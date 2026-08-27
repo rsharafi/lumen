@@ -667,6 +667,31 @@ def _background_rgb(inner):
         return (0, 0, 0)
 
 
+def adopt_resize(app):
+    """Re-adopt the framebuffer after the window changed size.
+
+    The native host calls this directly where the cmu-graphics host needs
+    `install_resize_hook` to intercept the framework doing it wrongly. SDL
+    hands out a fresh surface whenever a window resizes, and reports the new
+    size in points while everything drawn is in pixels.
+    """
+    global _logical
+    if _win is None:
+        return False
+    try:
+        import pygame
+        _logical = tuple(_win.size)
+        if not _attach_surface(pygame, _current_render_scale(),
+                               bool(os.environ.get('LUMEN_DEBUG'))):
+            return False
+        inner = getattr(app, '_app', app)
+        inner._screen = _surface
+        inner._width, inner._height = render_size()
+        return True
+    except Exception:
+        return False
+
+
 def install_gpu_hooks(app):
     """Replace the framework's rasterise-and-present step with the GPU's.
 

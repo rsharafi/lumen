@@ -230,6 +230,13 @@ def frame_open():
     return _frame_open
 
 
+def read_frame():
+    """The presented frame as a surface, for screenshots."""
+    if _renderer is None:
+        return None
+    return _renderer.to_surface()
+
+
 # --------------------------------------------------------------------------
 # Primitives
 # --------------------------------------------------------------------------

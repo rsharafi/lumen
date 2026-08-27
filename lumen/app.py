@@ -70,6 +70,7 @@ class Game:
 
         self.fade = 1.0
         self.fade_target = 0.0
+        self._last_dt = 1.0 / FPS
         self.pending = None
         self.ending = False
         self._blit_checked = False
@@ -270,8 +271,11 @@ class Game:
             return          # dummy video driver: there is no real window
         if os.environ.get('LUMEN_FULLSCREEN'):
             self.fullscreen = True
-        runtime.install_resize_hook(app)
-        runtime.install_gpu_hooks(app)
+        if not getattr(app, 'is_native', False):
+            # Both of these exist to intercept cmu-graphics' own present and
+            # resize paths. The native host owns those outright.
+            runtime.install_resize_hook(app)
+            runtime.install_gpu_hooks(app)
         # Replacing the window resets SDL's event filters, so the block set up
         # in `start` is gone by now and has to go back on.
         self._block_mouse_motion()
@@ -412,15 +416,26 @@ class Game:
         self.fade_target = 1.0
 
     # -------------------------------------------------------------- update --
-    def step(self, app):
+    def step(self, app, dt_arg=None):
+        """Advance one tick.
+
+        `dt` is supplied by the native host, which runs the simulation in
+        fixed increments and draws whenever it can. Left out - which is what
+        the cmu-graphics host does - the interval is taken from the clock
+        instead, so a slow frame is a longer tick.
+        """
         now = time.perf_counter()
-        if self.fixed_dt is not None:
+        dt = dt_arg
+        if dt is not None:
+            pass
+        elif self.fixed_dt is not None:
             dt = self.fixed_dt
         elif self._last is None:
             dt = 1.0 / FPS
         else:
             dt = clamp(now - self._last, 0.0, 1.0 / 15.0)
         self._last = now
+        self._last_dt = dt
         self.t += dt
         self.frames += 1
 
@@ -443,9 +458,10 @@ class Game:
                 pygame.mouse.set_visible(False)
             except Exception:
                 pass
-        if self.selftest_frames:
+        if self.selftest_frames and dt_arg is None:
             self._frame_marks.append(now)
-        if self.selftest_frames and self.frames >= self.selftest_frames:
+        if (self.selftest_frames and dt_arg is None
+                and self.frames >= self.selftest_frames):
             shot = os.environ.get('LUMEN_SELFTEST_SHOT')
             if shot:
                 try:
@@ -481,8 +497,12 @@ class Game:
         # chamber count: the menus draw a fraction of the shapes, and letting
         # them into the history would talk AUTO into a setting that a boss
         # room cannot hold.
-        if self.fixed_dt is None and self.state == PLAYING and self.fade <= 0.0:
-            self._note_frame(dt * 1000.0)
+        # Only when the interval *is* the frame period. The native host runs
+        # the simulation in fixed increments and reports its real frame times
+        # separately, so timing them here would measure the tick rate.
+        if (dt_arg is None and self.fixed_dt is None
+                and self.state == PLAYING and self.fade <= 0.0):
+            self._note_frame(self._last_dt * 1000.0)
 
         # Screen fade / scene handoff.
         if self.fade_target > self.fade:
@@ -785,6 +805,15 @@ class Game:
     AUTO_URGENT_COOLDOWN = 8.0
     AUTO_URGENT_AT = 1.22     # mid-play, only step in if it is this far over
     AUTO_HEADROOM = 0.95      # of the budget, so a busy room still fits
+
+    def note_frame_period(self, period_ms):
+        """Real frame period, reported by whichever host is drawing.
+
+        The native host runs the simulation on a fixed step, so the only
+        thing that knows how long a frame actually took is the host.
+        """
+        if self.state == PLAYING and self.fade <= 0.0:
+            self._note_frame(period_ms)
 
     def _note_frame(self, period_ms):
         history = self._auto_history
