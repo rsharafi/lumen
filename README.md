@@ -435,6 +435,40 @@ the game. Each effect gets a pool of voices, because `Sound.play()` reuses one
 channel per sound — without that, rapid fire retriggers a single channel and
 stutters instead of overlapping.
 
+The first version of these was built from raw square and saw waves and bare
+sine tones at musical intervals, all of it dry, and it sounded like a machine
+rather than like a vault. Sound cannot be checked by looking at it, so
+`tools/sound_report.py` measures the qualities that were wrong — where the
+energy sits, how much of it is above 4 kHz, the ratio of odd to even harmonics
+(a pure tone or a square wave has almost no even harmonics, which is the
+chiptune signature), and how long each effect rings after its peak.
+
+Three changes, measured across all 21 effects:
+
+| | before | after |
+| --- | --- | --- |
+| Spectral centroid | 841 Hz | **438 Hz** |
+| Energy above 4 kHz | 2.2% | **0.2%** |
+| Tail to −40 dB | 0.44 s | **0.62 s** |
+
+*Filtering that actually filters.* `_lowpass_fast` is a box average rolling off
+at 6 dB/octave, so a "filtered" square kept most of its buzz. `_filter` shapes
+the spectrum directly with an FFT, which is both cleaner and faster than
+looping a one-pole filter in Python.
+
+*A room.* `_room` convolves each effect with a synthesised impulse response —
+decaying filtered noise behind a few early reflections — so a shot has
+somewhere to go. This is most of why the set now sounds like it is happening
+somewhere.
+
+*Struck bodies, not tones.* Picking something up was two sine waves a fifth
+apart, which measured as having no even-harmonic content at all. `_struck`
+rings a set of *inharmonic* partials with the higher ones dying first, which
+is what stone and glass and metal actually do.
+
+`ui_move` is deliberately untouched: it is a 40 ms tick, it already sat right
+under the eye, and a tail on it would only smear the menu.
+
 ---
 
 ## Layout

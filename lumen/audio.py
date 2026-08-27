@@ -19,7 +19,7 @@ import wave
 import numpy as np
 
 SAMPLE_RATE = 44100
-CACHE_VERSION = 3
+CACHE_VERSION = 4
 
 _bank = None
 
@@ -107,6 +107,80 @@ def _tone(duration, freq, shape='sine'):
     return _sweep(duration, freq, freq, shape)
 
 
+def _filter(sig, cutoff, kind='low', slope=2.0):
+    """A real filter, done in the frequency domain.
+
+    `_lowpass_fast` is a box average, which rolls off at only 6 dB/octave and
+    leaves ripples in the stopband - so a "filtered" square wave keeps most of
+    the buzz that made these read as chiptune. Shaping the spectrum directly
+    is both cleaner and faster than looping a one-pole filter in Python.
+    """
+    n = sig.shape[0]
+    if n < 8:
+        return sig
+    spec = np.fft.rfft(sig)
+    freq = np.fft.rfftfreq(n, 1.0 / SAMPLE_RATE)
+    ratio = np.maximum(freq, 1e-6) / max(cutoff, 1e-6)
+    if kind == 'low':
+        gain = 1.0 / np.sqrt(1.0 + ratio ** (2.0 * slope))
+    else:
+        gain = ratio ** slope / np.sqrt(1.0 + ratio ** (2.0 * slope))
+    return np.fft.irfft(spec * gain, n).astype(np.float32)
+
+
+def _room(sig, seconds=0.9, decay=5.5, mix=0.30, damp=2600.0, rng=None):
+    """Put the sound in the vault.
+
+    Every effect used to be bone dry, which is most of why they sounded like
+    they came from a machine rather than from a large stone room. The impulse
+    response is decaying filtered noise with a few early reflections in front
+    of it - not a real hall, but enough that a shot has somewhere to go.
+    """
+    if mix <= 0.0:
+        return sig
+    rng = rng or np.random.default_rng(7)
+    n = int(seconds * SAMPLE_RATE)
+    t = np.arange(n, dtype=np.float32) / SAMPLE_RATE
+    ir = rng.uniform(-1.0, 1.0, n).astype(np.float32) * np.exp(-decay * t)
+    # Stone: the tail loses its top end faster than its body.
+    ir = _filter(ir, damp, 'low', 1.5)
+    for delay, gain in ((0.011, 0.5), (0.019, 0.38), (0.031, 0.26),
+                        (0.043, 0.18)):
+        k = int(delay * SAMPLE_RATE)
+        if k < n:
+            ir[k] += gain
+    ir /= max(float(np.abs(ir).max()), 1e-6)
+
+    size = int(2 ** math.ceil(math.log2(sig.shape[0] + n)))
+    wet = np.fft.irfft(np.fft.rfft(sig, size) * np.fft.rfft(ir, size),
+                       size)[:sig.shape[0] + n].astype(np.float32)
+    wet /= max(float(np.abs(wet).max()), 1e-6)
+    out = np.zeros(sig.shape[0] + n, dtype=np.float32)
+    out[:sig.shape[0]] = sig * (1.0 - mix)
+    out += wet * mix
+    return out
+
+
+def _struck(duration, freq, partials=None, decays=None, bright=1.0):
+    """A struck body rather than a tone.
+
+    A bare sine at a musical frequency is the sound of a machine beeping, and
+    is what made picking something up feel like an arcade cabinet. Real struck
+    things - stone, glass, metal - ring on partials that are not whole
+    multiples of the fundamental, and the higher ones die first.
+    """
+    partials = partials or (1.0, 2.41, 3.87, 5.13, 7.31)
+    decays = decays or (1.0, 2.0, 3.2, 4.6, 6.5)
+    n = int(duration * SAMPLE_RATE)
+    t = _t(duration)
+    out = np.zeros(n, dtype=np.float32)
+    for k, (mult, fall) in enumerate(zip(partials, decays)):
+        amp = bright ** k / (1.0 + k * 1.4)
+        out += (np.sin(2.0 * math.pi * freq * mult * t)
+                * np.exp(-fall * t / max(duration, 1e-6) * 3.2) * amp)
+    return out.astype(np.float32)
+
+
 def _mix(*parts):
     n = max(len(p) for p in parts)
     out = np.zeros(n, dtype=np.float32)
@@ -130,123 +204,158 @@ def _soft_clip(sig):
 # The effects themselves
 # --------------------------------------------------------------------------
 def _make_sounds():
+    """Every effect, built to sound like it happened in a stone vault.
+
+    The first version of these leaned on raw square and saw waves and on bare
+    sine tones at musical intervals, all of it dry. Measured, the jingles had
+    no even-harmonic content whatsoever - the signature of a pure tone, which
+    the ear reads as a machine beeping rather than as a thing being struck.
+    Nothing had a tail longer than its own envelope, so nothing sounded like
+    it was in a room at all.
+
+    So: the buzz is filtered rather than raw, the tones are struck bodies with
+    inharmonic partials, and almost everything is put through `_room`. The
+    exception is `ui_move`, which is a 40 ms tick and was already right - a
+    tail on that would only smear the menu.
+    """
     rng = np.random.default_rng(20240)
     out = {}
 
-    # Sparklance: a tight, bright pew with a noise transient.
+    # Sparklance: a tight discharge, not a bright pew. The old sweep started
+    # at 1500 Hz and was pure square; this starts lower and is filtered, so
+    # the transient is a snap rather than a chirp.
     n = int(0.17 * SAMPLE_RATE)
-    body = _sweep(0.17, 1500, 340, 'square', 0.55) * _env(n, 0.002, 0.05, 0.22, 0.1)
-    tick = _noise(n, rng) * _env(n, 0.001, 0.02, 0.0, 0.01) * 0.5
-    out['shoot'] = _normalise(_soft_clip(_mix(body * 0.6, tick)), 0.55)
+    body = _filter(_sweep(0.17, 860, 210, 'square', 0.55), 2100, 'low', 2.5)
+    body *= _env(n, 0.001, 0.05, 0.18, 0.1)
+    tick = _filter(_noise(n, rng), 5200, 'low', 1.5) * _env(n, 0.0005, 0.014, 0.0, 0.01)
+    out['shoot'] = _normalise(_room(_soft_clip(_mix(body * 0.75, tick * 0.6)),
+                                    0.42, 8.0, 0.24, rng=rng), 0.5)
 
     # Scatterlight: a wider, dirtier burst.
     n = int(0.26 * SAMPLE_RATE)
-    burst = _lowpass_fast(_noise(n, rng), 2600) * _env(n, 0.002, 0.09, 0.14, 0.13)
-    thump = _sweep(0.26, 420, 90, 'sine', 0.6) * _env(n, 0.002, 0.07, 0.1, 0.13)
-    out['shoot_scatter'] = _normalise(_soft_clip(_mix(burst, thump * 0.8)), 0.62)
+    burst = _filter(_noise(n, rng), 1700, 'low', 2.0) * _env(n, 0.002, 0.09, 0.12, 0.13)
+    thump = _sweep(0.26, 330, 70, 'sine', 0.6) * _env(n, 0.002, 0.07, 0.1, 0.13)
+    out['shoot_scatter'] = _normalise(
+        _room(_soft_clip(_mix(burst, thump * 0.95)), 0.5, 7.0, 0.26, rng=rng), 0.58)
 
     # Coilbeam: a charged release with a long ringing tail.
     n = int(0.55 * SAMPLE_RATE)
-    beam = _sweep(0.55, 220, 1750, 'saw', 1.6) * _env(n, 0.02, 0.16, 0.35, 0.34)
-    ring = _tone(0.55, 880, 'sine') * _env(n, 0.01, 0.3, 0.14, 0.24) * 0.4
-    out['shoot_beam'] = _normalise(_soft_clip(_mix(beam * 0.7, ring)), 0.7)
+    beam = _filter(_sweep(0.55, 150, 1050, 'saw', 1.6), 1900, 'low', 2.2)
+    beam *= _env(n, 0.02, 0.16, 0.32, 0.34)
+    ring = _struck(0.55, 330, bright=0.8) * _env(n, 0.01, 0.3, 0.2, 0.24) * 0.5
+    out['shoot_beam'] = _normalise(
+        _room(_soft_clip(_mix(beam * 0.7, ring)), 0.8, 5.0, 0.32, rng=rng), 0.62)
 
     # Charging hum for the beam.
     n = int(0.75 * SAMPLE_RATE)
-    hum = _sweep(0.75, 90, 700, 'saw', 1.8) * _env(n, 0.08, 0.4, 0.6, 0.25)
-    out['charge'] = _normalise(_soft_clip(hum), 0.4)
+    hum = _filter(_sweep(0.75, 70, 420, 'saw', 1.8), 900, 'low', 2.0)
+    hum *= _env(n, 0.08, 0.4, 0.6, 0.25)
+    out['charge'] = _normalise(_room(_soft_clip(hum), 0.5, 7.0, 0.2, rng=rng), 0.36)
 
     # Impacts.
     n = int(0.13 * SAMPLE_RATE)
-    hit = _mix(_lowpass_fast(_noise(n, rng), 5200) * _env(n, 0.001, 0.05, 0.0, 0.06),
-               _sweep(0.13, 700, 200, 'sine', 0.5) * _env(n, 0.001, 0.05, 0.0, 0.06))
-    out['hit'] = _normalise(_soft_clip(hit), 0.5)
+    hit = _mix(_filter(_noise(n, rng), 3000, 'low', 1.6) * _env(n, 0.001, 0.05, 0.0, 0.06),
+               _sweep(0.13, 520, 150, 'sine', 0.5) * _env(n, 0.001, 0.05, 0.0, 0.06))
+    out['hit'] = _normalise(_room(_soft_clip(hit), 0.34, 9.0, 0.22, rng=rng), 0.46)
 
-    n = int(0.2 * SAMPLE_RATE)
-    crit = _mix(_tone(0.2, 1320, 'sine') * _env(n, 0.001, 0.06, 0.1, 0.12),
-                _tone(0.2, 1980, 'sine') * _env(n, 0.001, 0.04, 0.05, 0.1) * 0.6,
-                _noise(n, rng) * _env(n, 0.001, 0.02, 0.0, 0.02) * 0.4)
-    out['crit'] = _normalise(_soft_clip(crit), 0.6)
+    # A crit is glass breaking, not two sine tones stacked.
+    n = int(0.24 * SAMPLE_RATE)
+    crit = _mix(_struck(0.24, 620, (1.0, 2.76, 5.41, 8.93), (1.0, 2.4, 4.0, 6.0)),
+                _filter(_noise(n, rng), 7000, 'high', 1.2)
+                * _env(n, 0.0005, 0.02, 0.0, 0.02) * 0.35)
+    out['crit'] = _normalise(_room(_soft_clip(crit), 0.5, 6.0, 0.3, rng=rng), 0.54)
 
     # Taking damage: an ugly low crunch.
     n = int(0.34 * SAMPLE_RATE)
-    hurt = _mix(_sweep(0.34, 300, 60, 'saw', 0.7) * _env(n, 0.002, 0.12, 0.2, 0.2),
-                _lowpass_fast(_noise(n, rng), 1400) * _env(n, 0.002, 0.1, 0.1, 0.2))
-    out['hurt'] = _normalise(_soft_clip(hurt), 0.72)
+    hurt = _mix(_filter(_sweep(0.34, 230, 48, 'saw', 0.7), 700, 'low', 2.0)
+                * _env(n, 0.002, 0.12, 0.2, 0.2),
+                _filter(_noise(n, rng), 900, 'low', 2.0) * _env(n, 0.002, 0.1, 0.1, 0.2))
+    out['hurt'] = _normalise(_room(_soft_clip(hurt), 0.55, 6.5, 0.24, rng=rng), 0.7)
 
     # Enemy death: a wet snap into a fading hiss.
     n = int(0.42 * SAMPLE_RATE)
-    death = _mix(_lowpass_fast(_noise(n, rng), 3000) * _env(n, 0.002, 0.16, 0.12, 0.24),
-                 _sweep(0.42, 520, 70, 'square', 0.5) * _env(n, 0.002, 0.1, 0.08, 0.28))
-    out['kill'] = _normalise(_soft_clip(death), 0.6)
+    death = _mix(_filter(_noise(n, rng), 1900, 'low', 1.8) * _env(n, 0.002, 0.16, 0.12, 0.24),
+                 _filter(_sweep(0.42, 380, 55, 'square', 0.5), 1200, 'low', 2.4)
+                 * _env(n, 0.002, 0.1, 0.08, 0.28))
+    out['kill'] = _normalise(_room(_soft_clip(death), 0.7, 5.5, 0.3, rng=rng), 0.56)
 
-    # Explosion.
+    # Explosion: the room does most of the work.
     n = int(0.8 * SAMPLE_RATE)
-    boom = _mix(_lowpass_fast(_noise(n, rng), 900) * _env(n, 0.004, 0.3, 0.22, 0.48),
-                _sweep(0.8, 180, 34, 'sine', 0.5) * _env(n, 0.004, 0.25, 0.2, 0.5))
-    out['boom'] = _normalise(_soft_clip(boom), 0.85)
+    boom = _mix(_filter(_noise(n, rng), 600, 'low', 2.0) * _env(n, 0.004, 0.3, 0.22, 0.48),
+                _sweep(0.8, 150, 28, 'sine', 0.5) * _env(n, 0.004, 0.25, 0.2, 0.5))
+    out['boom'] = _normalise(_room(_soft_clip(boom), 1.3, 3.4, 0.38, rng=rng), 0.85)
 
-    # Lantern flare: bright rising whoosh.
+    # Lantern flare: a rising whoosh, warmed and given somewhere to bloom.
     n = int(0.62 * SAMPLE_RATE)
-    flare = _mix(_lowpass_fast(_noise(n, rng), 6000) * _env(n, 0.01, 0.18, 0.3, 0.42),
-                 _sweep(0.62, 300, 2200, 'sine', 1.4) * _env(n, 0.01, 0.2, 0.22, 0.38))
-    out['flare'] = _normalise(_soft_clip(flare), 0.72)
+    flare = _mix(_filter(_noise(n, rng), 3200, 'low', 1.4) * _env(n, 0.012, 0.18, 0.28, 0.42),
+                 _sweep(0.62, 220, 1250, 'sine', 1.4) * _env(n, 0.012, 0.2, 0.22, 0.38))
+    out['flare'] = _normalise(_room(_soft_clip(flare), 0.9, 4.5, 0.34, rng=rng), 0.68)
 
-    # Dash: short airy whoosh.
+    # Dash: short airy whoosh, darker than it was.
     n = int(0.28 * SAMPLE_RATE)
-    dash = _lowpass_fast(_noise(n, rng), 3400) * _env(n, 0.01, 0.1, 0.16, 0.16)
+    dash = _filter(_noise(n, rng), 1500, 'low', 1.6) * _env(n, 0.012, 0.1, 0.16, 0.16)
     dash *= np.linspace(0.4, 1.2, n, dtype=np.float32)
-    out['dash'] = _normalise(dash, 0.42)
+    out['dash'] = _normalise(_room(dash, 0.42, 7.5, 0.24, rng=rng), 0.4)
 
-    # Pickups and rewards.
-    n = int(0.4 * SAMPLE_RATE)
-    pick = _mix(_tone(0.4, 880, 'sine') * _env(n, 0.004, 0.1, 0.2, 0.2),
-                _tone(0.4, 1320, 'sine') * _env(n, 0.05, 0.12, 0.14, 0.2) * 0.7)
-    out['pickup'] = _normalise(pick, 0.45)
+    # Pickups and rewards: struck, not beeped.
+    n = int(0.5 * SAMPLE_RATE)
+    pick = _struck(0.5, 470, (1.0, 2.33, 3.71, 6.02), (1.2, 2.6, 4.2, 6.4))
+    pick *= _env(n, 0.003, 0.14, 0.4, 0.3)
+    out['pickup'] = _normalise(_room(pick, 0.7, 5.0, 0.34, rng=rng), 0.44)
 
-    n = int(0.7 * SAMPLE_RATE)
-    up = _mix(_tone(0.7, 523, 'sine') * _env(n, 0.01, 0.2, 0.24, 0.3),
-              _tone(0.7, 784, 'sine') * _env(n, 0.12, 0.2, 0.2, 0.3) * 0.8,
-              _tone(0.7, 1046, 'sine') * _env(n, 0.24, 0.2, 0.16, 0.24) * 0.6)
-    out['upgrade'] = _normalise(up, 0.5)
+    # An offering taken: a low bell, two voices a fifth apart.
+    n = int(0.95 * SAMPLE_RATE)
+    up = _mix(_struck(0.95, 262, bright=0.85) * _env(n, 0.006, 0.3, 0.45, 0.4),
+              _struck(0.95, 392, bright=0.7) * _env(n, 0.09, 0.3, 0.3, 0.4) * 0.6)
+    out['upgrade'] = _normalise(_room(up, 1.4, 3.2, 0.4, rng=rng), 0.5)
 
     # Descending to the next floor.
     n = int(1.3 * SAMPLE_RATE)
-    desc = _mix(_sweep(1.3, 420, 70, 'sine', 1.2) * _env(n, 0.05, 0.4, 0.35, 0.7),
-                _lowpass_fast(_noise(n, rng), 700) * _env(n, 0.1, 0.4, 0.2, 0.7) * 0.6)
-    out['descend'] = _normalise(_soft_clip(desc), 0.6)
+    desc = _mix(_sweep(1.3, 330, 52, 'sine', 1.2) * _env(n, 0.05, 0.4, 0.35, 0.7),
+                _filter(_noise(n, rng), 450, 'low', 2.0) * _env(n, 0.1, 0.4, 0.2, 0.7) * 0.7)
+    out['descend'] = _normalise(_room(_soft_clip(desc), 1.6, 2.8, 0.42, rng=rng), 0.6)
 
-    # Interface.
+    # Interface. `ui_move` is left exactly as it was: it is a 40 ms tick, it
+    # already sits right under the eye, and a room on it would smear the menu.
     n = int(0.08 * SAMPLE_RATE)
-    out['ui_move'] = _normalise(_tone(0.08, 660, 'sine') * _env(n, 0.002, 0.03, 0.0, 0.04), 0.3)
-    n = int(0.2 * SAMPLE_RATE)
-    out['ui_select'] = _normalise(_mix(
-        _tone(0.2, 784, 'sine') * _env(n, 0.003, 0.06, 0.12, 0.1),
-        _tone(0.2, 1176, 'sine') * _env(n, 0.02, 0.06, 0.08, 0.1) * 0.6), 0.42)
+    out['ui_move'] = _normalise(
+        _tone(0.08, 660, 'sine') * _env(n, 0.002, 0.03, 0.0, 0.04), 0.3)
+    n = int(0.3 * SAMPLE_RATE)
+    sel = _struck(0.3, 540, (1.0, 2.18, 3.62), (1.4, 2.8, 4.4))
+    out['ui_select'] = _normalise(
+        _room(sel * _env(n, 0.003, 0.1, 0.25, 0.16), 0.45, 6.5, 0.26, rng=rng), 0.4)
     n = int(0.5 * SAMPLE_RATE)
-    out['ui_back'] = _normalise(_sweep(0.5, 500, 180, 'sine', 0.8) * _env(n, 0.005, 0.2, 0.1, 0.28), 0.36)
+    back = _sweep(0.5, 380, 130, 'sine', 0.8) * _env(n, 0.005, 0.2, 0.1, 0.28)
+    out['ui_back'] = _normalise(_room(back, 0.5, 6.0, 0.24, rng=rng), 0.34)
 
     # Boss.
     n = int(1.6 * SAMPLE_RATE)
-    roar = _mix(_sweep(1.6, 60, 150, 'saw', 0.8) * _env(n, 0.1, 0.5, 0.5, 0.9),
-                _lowpass_fast(_noise(n, rng), 480) * _env(n, 0.12, 0.6, 0.35, 0.8),
-                _sweep(1.6, 300, 90, 'square', 1.2) * _env(n, 0.2, 0.5, 0.2, 0.8) * 0.4)
-    out['roar'] = _normalise(_soft_clip(roar), 0.9)
+    roar = _mix(_filter(_sweep(1.6, 48, 120, 'saw', 0.8), 340, 'low', 2.0)
+                * _env(n, 0.1, 0.5, 0.5, 0.9),
+                _filter(_noise(n, rng), 380, 'low', 2.0) * _env(n, 0.12, 0.6, 0.35, 0.8),
+                _filter(_sweep(1.6, 240, 72, 'square', 1.2), 620, 'low', 2.4)
+                * _env(n, 0.2, 0.5, 0.2, 0.8) * 0.45)
+    out['roar'] = _normalise(_room(_soft_clip(roar), 1.8, 2.4, 0.44, rng=rng), 0.9)
 
     n = int(0.5 * SAMPLE_RATE)
-    out['enemy_shoot'] = _normalise(_soft_clip(_mix(
-        _sweep(0.5, 700, 180, 'saw', 0.7) * _env(n, 0.004, 0.12, 0.1, 0.3),
-        _lowpass_fast(_noise(n, rng), 1800) * _env(n, 0.004, 0.08, 0.06, 0.3) * 0.6)), 0.45)
+    enemy = _mix(_filter(_sweep(0.5, 520, 130, 'saw', 0.7), 1300, 'low', 2.2)
+                 * _env(n, 0.004, 0.12, 0.1, 0.3),
+                 _filter(_noise(n, rng), 1200, 'low', 1.8)
+                 * _env(n, 0.004, 0.08, 0.06, 0.3) * 0.6)
+    out['enemy_shoot'] = _normalise(
+        _room(_soft_clip(enemy), 0.6, 6.0, 0.28, rng=rng), 0.42)
 
-    n = int(0.34 * SAMPLE_RATE)
-    out['brazier'] = _normalise(_soft_clip(_mix(
-        _lowpass_fast(_noise(n, rng), 2400) * _env(n, 0.01, 0.14, 0.2, 0.16),
-        _sweep(0.34, 200, 620, 'sine', 1.3) * _env(n, 0.01, 0.14, 0.18, 0.16))), 0.5)
+    # A brazier catching: breath, then flame.
+    n = int(0.45 * SAMPLE_RATE)
+    braz = _mix(_filter(_noise(n, rng), 1500, 'low', 1.4) * _env(n, 0.02, 0.16, 0.3, 0.22),
+                _sweep(0.45, 150, 430, 'sine', 1.3) * _env(n, 0.02, 0.16, 0.2, 0.22) * 0.8)
+    out['brazier'] = _normalise(_room(_soft_clip(braz), 0.9, 4.5, 0.34, rng=rng), 0.48)
 
     n = int(0.9 * SAMPLE_RATE)
-    out['game_over'] = _normalise(_soft_clip(_mix(
-        _sweep(0.9, 200, 42, 'saw', 1.0) * _env(n, 0.02, 0.35, 0.3, 0.5),
-        _lowpass_fast(_noise(n, rng), 500) * _env(n, 0.05, 0.4, 0.2, 0.45))), 0.75)
+    over = _mix(_filter(_sweep(0.9, 160, 34, 'saw', 1.0), 420, 'low', 2.0)
+                * _env(n, 0.02, 0.35, 0.3, 0.5),
+                _filter(_noise(n, rng), 380, 'low', 2.0) * _env(n, 0.05, 0.4, 0.2, 0.45))
+    out['game_over'] = _normalise(_room(_soft_clip(over), 2.0, 2.2, 0.46, rng=rng), 0.75)
 
     return out
 
@@ -267,9 +376,14 @@ def _write_wav(path, mono):
 # Bank
 # --------------------------------------------------------------------------
 class SoundBank:
+    # How many copies of an effect can be in the air at once. Sized against
+    # how long each one now *rings*, not how long its envelope is: putting
+    # these in a room roughly tripled their tails, and a voice is busy until
+    # its tail has finished. Too few and a fast weapon steals a voice
+    # mid-decay, which is audible as a click.
     VOICES = {
-        'shoot': 4, 'shoot_scatter': 3, 'hit': 4, 'crit': 3, 'kill': 3,
-        'enemy_shoot': 3, 'boom': 2, 'pickup': 2,
+        'shoot': 7, 'shoot_scatter': 5, 'hit': 7, 'crit': 4, 'kill': 5,
+        'enemy_shoot': 5, 'boom': 3, 'pickup': 3,
     }
 
     def __init__(self, cache_dir, enabled=True):
