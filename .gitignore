@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.pyc
+.sound_cache/
+lumen_save.json
+tools/.playtest_save.json
+shots/
+.DS_Store
+tools/.compare_save.json
+tools/.blend/
