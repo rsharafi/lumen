@@ -75,6 +75,7 @@ def generation():
 NORMAL = 0
 ADD = 1
 MOD = 2
+MAX = 3
 
 _mode = NORMAL
 _blend = {}                 # mode -> (geometry blend, sprite blend)
@@ -112,6 +113,16 @@ def attach(new_renderer):
         _blend[NORMAL] = (pygame.BLENDMODE_BLEND, _premul)
         _blend[ADD] = (pygame.BLENDMODE_ADD, premul_add)
         _blend[MOD] = (pygame.BLENDMODE_MOD, pygame.BLENDMODE_MOD)
+        # Takes the brighter of source and destination rather than summing
+        # them. Overlapping draws then cost nothing: pieces of the same light
+        # can be laid over each other with no seam where they meet and no
+        # doubled-up blob where two of them cross.
+        brightest = new_renderer.compose_custom_blend_mode(
+            (pygame.BLENDFACTOR_ONE, pygame.BLENDFACTOR_ONE,
+             pygame.BLENDOPERATION_MAXIMUM),
+            (pygame.BLENDFACTOR_ONE, pygame.BLENDFACTOR_ONE,
+             pygame.BLENDOPERATION_MAXIMUM))
+        _blend[MAX] = (brightest, brightest)
         new_renderer.draw_blend_mode = pygame.BLENDMODE_BLEND
     except Exception as exc:
         if os.environ.get('LUMEN_DEBUG'):
@@ -532,7 +543,8 @@ def lighting_ready(size=None):
         w, h = size
         made = {'scene': sdl2.Texture(_renderer, (w, h), target=True),
                 'light': sdl2.Texture(_renderer, (w, h), target=True),
-                'final': sdl2.Texture(_renderer, (w, h), target=True)}
+                'final': sdl2.Texture(_renderer, (w, h), target=True),
+                'edge': sdl2.Texture(_renderer, (w, h), target=True)}
         bw, bh = w, h
         for i in range(BLOOM_LEVELS):
             bw, bh = max(4, bw // 2), max(4, bh // 2)
@@ -616,6 +628,38 @@ def amplify_scene(gain):
     scratch.alpha = 255
     scratch.draw(dstrect=(0, 0, w, h))
     scratch.color = (255, 255, 255)
+
+
+def begin_edge_light():
+    """Gather the light lying on wall edges in its own buffer, brightest-wins.
+
+    Every piece of every lit edge goes in here before any of it reaches the
+    frame. Drawn straight onto the frame they would have to be added, and
+    then two things go wrong: the strips of two walls meeting at an outside
+    corner sum into a bright blob, and any overlap between neighbouring
+    pieces of the same wall shows as a seam. Taking the brighter of the two
+    instead makes both free, so the pieces can be overlapped deliberately and
+    corners simply stay as bright as the brighter wall.
+    """
+    _use('edge')
+    _renderer.draw_color = (0, 0, 0, 255)
+    _renderer.clear()
+    set_mode(MAX)
+
+
+def end_edge_light(opacity=100):
+    """Add the gathered edge light to the frame."""
+    import pygame
+    set_mode(NORMAL)
+    _use(None)
+    w, h = _targets_size
+    tex = _targets['edge']
+    a = max(0, min(255, int(opacity * 2.55)))
+    tex.blend_mode = pygame.BLENDMODE_ADD
+    tex.color = (a, a, a)
+    tex.alpha = 255
+    tex.draw(dstrect=(0, 0, w, h))
+    tex.color = (255, 255, 255)
 
 
 def composite(bloom=0.0, bleed=0.0):

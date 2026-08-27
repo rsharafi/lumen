@@ -405,22 +405,25 @@ def polygon_flat(points, offset_x=0.0, offset_y=0.0):
 # length of one step of the gradient along the wall. Fixing the *count* per
 # edge instead - which is what this used to do - makes a short wall smooth and
 # a long one banded, because the piece size then grows with the wall.
-WALL_PIECE_LENGTH = 4.0
-WALL_PIECES_MAX = 160
+WALL_PIECE_LENGTH = 2.6
+WALL_PIECE_OVERLAP = 0.6
 
 
-def lit_wall_segments(level, ox, oy, radius, piece_length=WALL_PIECE_LENGTH):
-    """Lit wall edges cut into pieces, each with its own brightness.
+def lit_wall_segments(level, ox, oy, radius,
+                      piece_length=WALL_PIECE_LENGTH):
+    """Lit wall edges cut into equal pieces, each with its own brightness.
 
-    One strength per edge lights a whole wall uniformly, which is the one
-    thing a lantern never does: a long edge runs away from the light, and
-    should darken as it goes. Cutting each edge up and evaluating the falloff
-    at every piece's midpoint gives the light somewhere to fade, and lets the
-    colour ramp (`palette.wall_light`) run hot near the lantern and deep amber
-    at its reach.
+    Two things have to be true at once. A long edge running away from the
+    light has to darken along its length, so it cannot be lit as one flat
+    strip. And every wall has to be cut the *same* way, so a chamber's
+    hundred-tile border does not end up with coarser steps than a pillar
+    beside it - which is what a cap on the piece count per edge does, and it
+    is exactly as visible as it sounds.
 
-    Vectorised over (edges x pieces) because a dense chamber can light forty
-    edges at once and this runs every frame.
+    So each edge is first clipped to the part of it the light can actually
+    reach, and only that part is cut up, at a fixed length. The work is then
+    bounded by the lantern's radius rather than by how long the wall is, and
+    a wall of any length is cut into pieces of the same size as every other.
     """
     if level.seg_ax is None or len(level.seg_ax) == 0:
         return []
@@ -429,39 +432,39 @@ def lit_wall_segments(level, ox, oy, radius, piece_length=WALL_PIECE_LENGTH):
     ex = bx - ax
     ey = by - ay
 
-    # Cheap reject on whole edges first: keep any edge with an endpoint - or
-    # its midpoint - inside the lantern's reach, so a long wall crossing the
-    # rim is not dropped for having a distant middle.
-    r2 = radius * radius
-    da = (ax - ox) ** 2 + (ay - oy) ** 2
-    db = (bx - ox) ** 2 + (by - oy) ** 2
-    mx = (ax + bx) * 0.5 - ox
-    my = (ay + by) * 0.5 - oy
-    keep = (da <= r2) | (db <= r2) | (mx * mx + my * my <= r2)
-    if not keep.any():
+    # Where each edge crosses the circle of the light's reach, as the
+    # parameter range [t0, t1] along it.
+    fx = ax - ox
+    fy = ay - oy
+    aa = ex * ex + ey * ey
+    bb = 2.0 * (fx * ex + fy * ey)
+    cc = fx * fx + fy * fy - radius * radius
+    with np.errstate(invalid='ignore', divide='ignore'):
+        disc = bb * bb - 4.0 * aa * cc
+        root = np.sqrt(np.maximum(disc, 0.0))
+        t0 = np.clip((-bb - root) / np.where(aa == 0, 1.0, 2.0 * aa), 0.0, 1.0)
+        t1 = np.clip((-bb + root) / np.where(aa == 0, 1.0, 2.0 * aa), 0.0, 1.0)
+    reachable = (disc > 0.0) & (aa > 0.0) & (t1 > t0)
+    if not reachable.any():
         return []
-    idx = np.nonzero(keep)[0]
-    ax, ay, ex, ey = ax[idx], ay[idx], ex[idx], ey[idx]
+    idx = np.nonzero(reachable)[0]
 
     # Rectangle edges wind clockwise, so the outward normal is (ey, -ex).
-    nx = ey.copy()
-    ny = -ex.copy()
+    nx = ey[idx].copy()
+    ny = -ex[idx].copy()
     nlen = np.hypot(nx, ny)
     nlen[nlen == 0] = 1.0
     nx /= nlen
     ny /= nlen
 
-    # One count for every edge would have to suit the longest, which cuts a
-    # short edge into far more pieces than its length needs. There are only a
-    # handful of lit edges once the reject above has run, so each gets its own
-    # count and the piece length comes out the same everywhere - which is what
-    # makes a long wall as smooth as a short one.
-    lengths = np.hypot(ex, ey)
     out = []
-    for e in range(len(ax)):
-        pieces = int(max(2, min(WALL_PIECES_MAX,
-                                math.ceil(lengths[e] / piece_length))))
-        edge = np.arange(pieces + 1, dtype=np.float64) / pieces
+    for k, e in enumerate(idx):
+        span = (t1[e] - t0[e]) * nlen[k]
+        if span < 0.5:
+            continue
+        pieces = int(max(1, math.ceil(span / piece_length)))
+        edge = t0[e] + (t1[e] - t0[e]) * (
+            np.arange(pieces + 1, dtype=np.float64) / pieces)
         mid = (edge[:-1] + edge[1:]) * 0.5
 
         px_ = ax[e] + ex[e] * mid
@@ -470,18 +473,18 @@ def lit_wall_segments(level, ox, oy, radius, piece_length=WALL_PIECE_LENGTH):
         dy = py_ - oy
         d = np.hypot(dx, dy)
         d[d == 0] = 1.0
-        facing = -(dx / d) * nx[e] - (dy / d) * ny[e]
+        nxe, nye = float(nx[k]), float(ny[k])
+        facing = -(dx / d) * nxe - (dy / d) * nye
         falloff = np.clip(1.0 - d / radius, 0.0, 1.0) ** 1.5
         strength = np.clip(facing, 0.0, 1.0) ** 0.7 * falloff
 
-        lit = np.nonzero(strength > 0.02)[0]
+        lit = np.nonzero(strength > 0.015)[0]
         if lit.size == 0:
             continue
         x0 = ax[e] + ex[e] * edge[:-1]
         y0 = ay[e] + ey[e] * edge[:-1]
         x1 = ax[e] + ex[e] * edge[1:]
         y1 = ay[e] + ey[e] * edge[1:]
-        nxe, nye = float(nx[e]), float(ny[e])
         # The outward normal comes back with each piece: the caller needs it
         # to push the light *into* the stone as well as along its rim.
         for i in lit:

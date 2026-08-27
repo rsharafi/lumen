@@ -29,14 +29,6 @@ RIFT_HOLD = 0.45
 LANTERN_GLOW = (255, 198, 126)
 SHADOW_OPACITY = int(os.environ.get('LUMEN_SHADOW_OPACITY', '100'))
 
-# Radial bands the lit cone is filled in. Enough of them that no single step
-# is a whole unit of opacity: nine put a ring every few percent of the radius,
-# which against a dark floor is as visible as the 8-bit plateaus that had to
-# be dithered out of the glow sprite itself.
-_SHAFT_BAND_COUNT = 22
-_SHAFT_BANDS = tuple(
-    (i / _SHAFT_BAND_COUNT, (i + 1) / _SHAFT_BAND_COUNT,
-     (1.0 - i / _SHAFT_BAND_COUNT) ** 2.4) for i in range(_SHAFT_BAND_COUNT))
 # Test hook: render a frame with no lantern, to diff for light leaks.
 NO_LANTERN = bool(os.environ.get('LUMEN_NO_LANTERN'))
 
@@ -716,9 +708,9 @@ class World:
         # buffer leaves it black however close the lantern gets. What a wall
         # actually shows is light *on* it, so that is added after the
         # composite where nothing can wash it out again.
-        gpu.set_mode(gpu.ADD)
+        gpu.begin_edge_light()
         self._draw_wall_light(ox, oy, flicker)
-        gpu.set_mode(gpu.NORMAL)
+        gpu.end_edge_light()
 
         # ---- things that are not part of the world -------------------------
         # Eyes are emissive, so they belong on top of the lighting rather than
@@ -917,10 +909,6 @@ class World:
         if not NO_LANTERN:
             art.draw_lantern(LANTERN_GLOW, px - ox, py - oy, radius,
                              clamp(96 * flicker, 0, 100))
-            # The lit region again, faintly, so the shafts the light throws
-            # through a doorway read as air being lit rather than as a shape
-            # cut out of the dark.
-            self._draw_shafts(fan, ox, oy, flicker)
 
         gpu.set_mode(gpu.MOD)
         ribbons = fan.shadow_ribbons()
@@ -951,48 +939,6 @@ class World:
     # instead - one polygon at one opacity - lifts the whole visible region by
     # the same amount and leaves a hard circle at the lantern's reach, which
     # reads as a disc painted on the floor rather than as air catching light.
-    SHAFT_BANDS = _SHAFT_BANDS
-    SHAFT_STRENGTH = 8.0
-
-    def _draw_shafts(self, fan, ox, oy, flicker):
-        """The lit cone, added faintly - light with some air in it.
-
-        Each band is a ring of quads between two fractions along the same
-        rays the visibility sweep already cast, so the fill stops exactly
-        where the light does. Where the cone squeezes through a doorway the
-        bands squeeze with it, which is the shaft.
-        """
-        pts = fan.points
-        n = len(pts)
-        if n < 3:
-            return
-        px, py = fan.ox, fan.oy
-        tint = palette.LIGHT_WARM
-        step = 2
-        for lo, hi, weight in self.SHAFT_BANDS:
-            opacity = int(clamp(self.SHAFT_STRENGTH * weight * flicker, 0, 100))
-            if opacity <= 0:
-                continue
-            for i in range(0, n - step, step):
-                ax, ay = pts[i]
-                bx, by = pts[i + step]
-                drawPolygon(px + (ax - px) * lo - ox, py + (ay - py) * lo - oy,
-                            px + (bx - px) * lo - ox, py + (by - py) * lo - oy,
-                            px + (bx - px) * hi - ox, py + (by - py) * hi - oy,
-                            px + (ax - px) * hi - ox, py + (ay - py) * hi - oy,
-                            fill=tint, opacity=opacity)
-
-    # How far the light reaches back across the stone from a lit rim, in
-    # design units, and how much of the rim's brightness survives that far.
-    # This is what stops the lantern reading as a thin outline: the face of a
-    # nearby block is lit, not just its corner.
-    # (distance into the stone, share of the rim's brightness). The strokes
-    # must overlap: a gap between two of them shows as a dark line running
-    # along the wall, which is the same banding the piece count fixes in the
-    # other direction.
-    WALL_LIGHT_WASH_WIDTH = 3.2
-    WALL_LIGHT_WASH = ((1.5, 0.54), (3.9, 0.30), (6.3, 0.15), (8.7, 0.06))
-
     # How deep the light lying on a wall reaches, in design units, and how
     # much of that is in front of the edge rather than behind it.
     EDGE_LIGHT_DEPTH = 15.0
@@ -1033,11 +979,13 @@ class World:
             # The texture runs bright-edge-first down its own height, so the
             # quad is turned to put that axis along the outward normal.
             degrees = math.degrees(math.atan2(-ny, -nx)) - 90.0
-            # Exactly the piece's length: the quads are additive, so any
-            # overlap between two of them doubles up into a bright tick at
-            # every boundary - a comb along the wall.
+            # Deliberately longer than the piece. The edge buffer keeps the
+            # brighter of two overlapping draws rather than summing them, so
+            # the overlap costs nothing and guarantees there is no sliver of
+            # unlit wall between one piece and the next.
             gpu.blit_rot(profile, mx * scale, my * scale,
-                         length * scale, depth * scale, degrees,
+                         (length + lighting.WALL_PIECE_OVERLAP) * scale,
+                         depth * scale, degrees,
                          color=(color.red, color.green, color.blue),
                          opacity=int(6 + 74 * s))
 
