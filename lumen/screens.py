@@ -8,7 +8,7 @@ import math
 
 from .draw import drawImage, drawLabel, drawPolygon
 
-from . import art, palette, upgrades
+from . import art, gpu, palette, upgrades
 from .mathx import clamp, ease_out_back, ease_out_cubic, pulse
 
 
@@ -433,99 +433,308 @@ class UpgradeScreen:
         if self.choices:
             self.index = (self.index + delta) % len(self.choices)
 
+    # An offering is a lit alcove in the dark rather than a card on a page:
+    # the same thing the rest of the game does with light, applied to the one
+    # screen where the player stops and reads.
+    CARD_W = 286.0
+    CARD_H = 360.0
+    CARD_GAP = 40.0
+    RARITY = {3: ('COMMON', 1), 2: ('UNCOMMON', 2), 1: ('RARE', 3)}
+
     def draw(self, world):
         w, h = self.w, self.h
-        drawPolygon(0, 0, w, 0, w, h, 0, h, fill=palette.VOID, opacity=82)
-
         appear = ease_out_cubic(clamp(self.t / 0.45, 0.0, 1.0))
-        drawLabel('THE VAULT OFFERS', w * 0.5, h * 0.17, size=30, bold=True,
-                  fill=palette.UI_ACCENT, font=palette.FONT_DISPLAY,
-                  opacity=int(100 * appear))
-        drawLabel(f'floor {self.depth} cleared  -  choose one',
-                  w * 0.5, h * 0.17 + 30, size=13, fill=palette.UI_DIM,
-                  font=palette.FONT_UI, opacity=int(80 * appear))
+
+        # The chamber is still behind this, so it is dimmed rather than
+        # replaced - you are standing in the room you just cleared.
+        drawPolygon(0, 0, w, 0, w, h, 0, h, fill=palette.VOID,
+                    opacity=int(88 * appear))
+
+        self._draw_header(w, h, appear)
 
         count = max(1, len(self.choices))
-        cw, ch = 292, 300
-        gap = 34
+        cw, ch, gap = self.CARD_W, self.CARD_H, self.CARD_GAP
         total = count * cw + (count - 1) * gap
+        # The design view is only 720 units tall but its width follows the
+        # window's aspect, so a tall window leaves less room across than the
+        # cards want. Shrink them to fit rather than running off the edges.
+        room = w * 0.92
+        if total > room:
+            k = room / total
+            cw, gap, ch = cw * k, gap * k, ch * k
+            total = room
         x0 = (w - total) * 0.5
-        y0 = h * 0.31
+        y0 = h * 0.245
 
         self.hit_rects = []
         for i, up in enumerate(self.choices):
             selected = i == self.index
-            delay = clamp((self.t - 0.08 * i) / 0.4, 0.0, 1.0)
+            delay = clamp((self.t - 0.09 * i) / 0.42, 0.0, 1.0)
             pop = ease_out_back(delay)
-            lift = 16 if selected else 0
+            lift = 18.0 if selected else 0.0
             cx = x0 + i * (cw + gap)
-            cy = y0 - lift + (1.0 - pop) * 40
-            self.hit_rects.append((cx, y0 - 20, cw, ch + 40, i))
-
-            panel(cx, cy, cw, ch, 90 if selected else 66,
-                  up.color if selected else palette.UI_LINE,
-                  86 if selected else 42)
-            if selected:
-                corner_marks(cx, cy, cw, ch, up.color, 95, 16)
-                size = 256
-                drawImage(art.glow(_rgb(up.color), size, power=2.6),
-                          cx + cw * 0.5 - size * 0.5, cy + 44 - size * 0.5,
-                          opacity=20)
-
-            _sigil(cx + cw * 0.5, cy + 62, up, self.t, selected)
-
-            drawLabel(up.name, cx + cw * 0.5, cy + 132, size=19, bold=True,
-                      fill=up.color if selected else palette.UI_TEXT,
-                      font=palette.FONT_DISPLAY,
-                      opacity=int(100 * delay))
-            lines = wrap(up.blurb, 30)
-            for j, line in enumerate(lines[:4]):
-                drawLabel(line, cx + cw * 0.5, cy + 166 + j * 20, size=13,
-                          fill=palette.UI_DIM, font=palette.FONT_UI,
-                          opacity=int(88 * delay))
-            drawLabel(f'[{i + 1}]', cx + cw * 0.5, cy + ch - 26, size=12,
-                      fill=palette.UI_FAINT, font=palette.FONT_UI,
-                      opacity=int(80 * delay))
+            cy = y0 - lift + (1.0 - pop) * 46.0
+            self.hit_rects.append((cx, y0 - 24, cw, ch + 48, i))
+            self._draw_card(up, cx, cy, cw, ch, i, selected, delay,
+                            cw / self.CARD_W)
 
         drawLabel('LEFT / RIGHT  CHOOSE      ENTER  TAKE IT      '
-                  'OR CLICK A CARD', w * 0.5, y0 + ch + 44, size=13,
+                  'OR CLICK AN OFFERING', w * 0.5, y0 + ch + 42, size=12,
                   fill=palette.UI_DIM, font=palette.FONT_UI,
-                  opacity=int(84 * appear))
+                  opacity=int(76 * appear))
+        self._draw_carrying(world, w, h, appear)
 
+    def _draw_header(self, w, h, appear):
+        cx, cy = w * 0.5, h * 0.115
+        size = 300
+        _glow(cx, cy + 4, size, palette.LIGHT_WARM, int(13 * appear), 2.7)
+        drawLabel('THE VAULT OFFERS', cx, cy, size=30, bold=True,
+                  fill=palette.UI_ACCENT, font=palette.FONT_DISPLAY,
+                  opacity=int(100 * appear))
+        # A rule that draws itself outward from the centre as the screen
+        # settles, so the eye starts in the middle and is handed downward.
+        half = 168.0 * appear
+        _rule(cx - half, cx + half, cy + 22, palette.UI_ACCENT, 34)
+        drawLabel(f'FLOOR {self.depth} CLEARED   -   CHOOSE ONE',
+                  cx, cy + 38, size=11, fill=palette.UI_FAINT,
+                  font=palette.FONT_UI, opacity=int(74 * appear))
+
+    def _draw_card(self, up, x, y, cw, ch, index, selected, delay, k=1.0):
+        """One offering. `k` shrinks the whole card, contents included.
+
+        Everything inside is expressed against the card's full size and then
+        multiplied, because scaling the frame alone leaves the type where it
+        was and the bottom-anchored rows climb into the blurb.
+        """
+        colour = up.color
+        alpha = int(100 * delay)
+        if alpha <= 0:
+            return
+        mid = x + cw * 0.5
+
+        # The pool the offering throws on the floor beneath it. Only the
+        # chosen one is lit; the others are waiting in the dark.
+        if selected:
+            _glow(mid, y + ch * 0.60, int(cw * 2.0), colour,
+                  int(22 * delay), 2.4)
+
+        panel(x, y, cw, ch, (86 if selected else 58),
+              colour if selected else palette.UI_LINE,
+              (88 if selected else 34))
+        if selected:
+            corner_marks(x, y, cw, ch, colour, 92, 17 * k)
+
+        # ---- the alcove -------------------------------------------------
+        ay = y + 94.0 * k
+        _glow(mid, ay, int(232 * k), colour,
+              int((34 if selected else 12) * delay), 2.6)
+        _sigil(mid, ay, up, self.t, selected,
+               radius=(30.0 + (4.0 if selected else 0.0)) * k)
+
+        # ---- name, rule, blurb ------------------------------------------
+        drawLabel(up.name, mid, y + 190 * k, size=18 * k, bold=True,
+                  fill=colour if selected else palette.UI_TEXT,
+                  font=palette.FONT_DISPLAY, opacity=alpha)
+        _rule(x + 52 * k, x + cw - 52 * k, y + 212 * k, colour,
+              int((60 if selected else 26) * delay))
+
+        for j, line in enumerate(wrap(up.blurb, 28)[:4]):
+            drawLabel(line, mid, y + (238 + j * 20) * k, size=12 * k,
+                      fill=palette.UI_TEXT if selected else palette.UI_DIM,
+                      font=palette.FONT_UI,
+                      opacity=int((88 if selected else 66) * delay))
+
+        # ---- how often the vault offers this ----------------------------
+        label, pips = self.RARITY.get(up.rarity, ('COMMON', 1))
+        py = y + ch - 62 * k
+        drawLabel(label, mid, py - 16 * k, size=9 * k,
+                  fill=colour if selected else palette.UI_FAINT,
+                  font=palette.FONT_UI,
+                  opacity=int((72 if selected else 46) * delay))
+        # Centred on however many there are, not on a fixed row of three: a
+        # left-aligned pair under a centred label reads as a mistake.
+        for i in range(pips):
+            px = mid + (i - (pips - 1) * 0.5) * 13 * k
+            r = 3.4 * k
+            drawPolygon(px, py - r, px + r, py, px, py + r, px - r, py,
+                        fill=colour, opacity=int(90 * delay))
+
+        drawLabel(f'[{index + 1}]', mid, y + ch - 26 * k, size=11 * k,
+                  fill=colour if selected else palette.UI_FAINT,
+                  font=palette.FONT_UI, opacity=int(72 * delay))
+
+    def _draw_carrying(self, world, w, h, appear):
+        """What the run has already taken, as its own row of marks.
+
+        A comma-separated list of names is unreadable at a glance and says
+        nothing about what they were; the sigils are what the player saw when
+        they chose each one.
+        """
         owned = world.stats.owned
-        if owned:
-            names = ', '.join(upgrades.BY_KEY[k].name for k in owned[-7:])
-            drawLabel(f'CARRYING  {names}', w * 0.5, h - 40, size=11,
-                      fill=palette.UI_FAINT, font=palette.FONT_UI, opacity=66)
+        if not owned:
+            return
+        recent = owned[-9:]
+        y = h - 40
+        drawLabel('CARRYING', w * 0.5, y - 24, size=9,
+                  fill=palette.UI_FAINT, font=palette.FONT_UI,
+                  opacity=int(56 * appear))
+        for i, key in enumerate(recent):
+            up = upgrades.BY_KEY.get(key)
+            if up is None:
+                continue
+            cx = w * 0.5 - (len(recent) - 1) * 15 + i * 30
+            _sigil(cx, y, up, self.t * 0.25, False, radius=9.0)
 
 
-def _sigil(cx, cy, up, t, selected):
-    """A small procedural emblem so each card reads at a glance."""
+def _rule(x1, x2, y, color, opacity):
+    """A hairline that fades out at both ends rather than stopping."""
+    if x2 - x1 < 2 or opacity <= 0:
+        return
+    steps = 7
+    span = (x2 - x1) / steps
+    for i in range(steps):
+        f = 1.0 - abs((i + 0.5) / steps - 0.5) * 2.0
+        a = int(opacity * (0.25 + 0.75 * f))
+        if a <= 0:
+            continue
+        sx = x1 + i * span
+        drawPolygon(sx, y, sx + span, y, sx + span, y + 1.1, sx, y + 1.1,
+                    fill=color, opacity=a)
+
+
+def _glow(cx, cy, size, color, opacity, power=2.4):
+    """A soft pool of an upgrade's own colour, added rather than laid over."""
+    if opacity <= 0:
+        return
+    sprite = art.glow(_rgb(color), int(size), power=power)
+    additive = gpu.active()
+    if additive:
+        gpu.set_mode(gpu.ADD)
+    drawImage(sprite, cx - size * 0.5, cy - size * 0.5, opacity=opacity)
+    if additive:
+        gpu.set_mode(gpu.NORMAL)
+
+
+def _sigil(cx, cy, up, t, selected, radius=None):
+    """A small procedural emblem so each offering reads at a glance.
+
+    Four different constructions rather than one, chosen by the upgrade's key.
+    A single family with a varying point count made every sigil a star of some
+    number of points, which at a glance is no distinction at all - three cards
+    side by side looked like the same mark drawn three times.
+    """
     seed = sum(ord(c) for c in up.key)
-    points = 5 + seed % 4
+    family = seed % 4
     spin = t * (0.5 if selected else 0.2) + seed
-    r = 30 + (4 if selected else 0)
+    r = radius if radius is not None else (30.0 + (4.0 if selected else 0.0))
+    bright = 92 if selected else 58
+    faint = 62 if selected else 40
 
-    # Outer rosette: 2*points vertices alternating between two radii, so the
-    # star is actually symmetric (one vertex per point looks like a smudge).
+    if family == 0:
+        _sigil_star(cx, cy, r, spin, seed, up.color, bright)
+    elif family == 1:
+        _sigil_rings(cx, cy, r, spin, seed, up.color, bright, faint)
+    elif family == 2:
+        _sigil_blades(cx, cy, r, spin, seed, up.color, bright, faint)
+    else:
+        _sigil_core(cx, cy, r, spin, seed, up.color, bright, faint)
+
+    # Every family closes on the same lit centre, which is what makes them
+    # read as one set rather than four unrelated marks.
+    dot = r * 0.15
+    drawPolygon(cx, cy - dot, cx + dot, cy, cx, cy + dot, cx - dot, cy,
+                fill=up.color, opacity=95 if selected else 62)
+
+
+def _sigil_star(cx, cy, r, spin, seed, color, bright):
+    """A rosette: alternating radii, so the points are actually symmetric."""
+    points = 5 + seed % 4
     pts = []
     for i in range(points * 2):
         a = spin + i * math.pi / points
         rad = r * (1.0 if i % 2 == 0 else 0.52)
         pts.append(cx + math.cos(a) * rad)
         pts.append(cy + math.sin(a) * rad)
-    drawPolygon(*pts, fill=up.color, opacity=90 if selected else 58)
-
-    # Counter-rotating core, punched out in the panel colour.
+    drawPolygon(*pts, fill=color, opacity=bright)
     inner = []
     for i in range(points):
         a = -spin * 1.5 + i * math.tau / points
         inner.append(cx + math.cos(a) * r * 0.38)
         inner.append(cy + math.sin(a) * r * 0.38)
     drawPolygon(*inner, fill=palette.UI_PANEL, opacity=92)
-    dot = r * 0.15
-    drawPolygon(cx, cy - dot, cx + dot, cy, cx, cy + dot, cx - dot, cy,
-                fill=up.color, opacity=95 if selected else 62)
+
+
+def _sigil_rings(cx, cy, r, spin, seed, color, bright, faint):
+    """Broken concentric arcs, counter-rotating."""
+    for ring in range(3):
+        rr = r * (1.0 - ring * 0.27)
+        arcs = 3 + (seed + ring) % 3
+        direction = 1 if ring % 2 == 0 else -1
+        for k in range(arcs):
+            a0 = spin * direction * (1.0 + ring * 0.5) + k * math.tau / arcs
+            a1 = a0 + math.tau / arcs * 0.56
+            _arc(cx, cy, rr, rr - r * 0.13, a0, a1, color,
+                 bright if ring == 0 else faint)
+
+
+def _sigil_blades(cx, cy, r, spin, seed, color, bright, faint):
+    """Crossed tapers, like something struck rather than drawn."""
+    blades = 3 + seed % 3
+    for k in range(blades):
+        a = spin + k * math.tau / blades
+        ca, sa = math.cos(a), math.sin(a)
+        px, py = -sa, ca
+        drawPolygon(cx + ca * r, cy + sa * r,
+                    cx + px * r * 0.17, cy + py * r * 0.17,
+                    cx - ca * r * 0.34, cy - sa * r * 0.34,
+                    cx - px * r * 0.17, cy - py * r * 0.17,
+                    fill=color, opacity=bright)
+    _arc(cx, cy, r * 0.52, r * 0.44, spin * -1.4, spin * -1.4 + math.tau,
+         color, faint, segments=18)
+
+
+def _sigil_core(cx, cy, r, spin, seed, color, bright, faint):
+    """A faceted core with spokes reaching out of it."""
+    sides = 6
+    pts = []
+    for i in range(sides):
+        a = spin * 0.6 + i * math.tau / sides
+        pts.append(cx + math.cos(a) * r * 0.46)
+        pts.append(cy + math.sin(a) * r * 0.46)
+    drawPolygon(*pts, fill=color, opacity=bright)
+    inner = []
+    for i in range(sides):
+        a = spin * 0.6 + i * math.tau / sides
+        inner.append(cx + math.cos(a) * r * 0.26)
+        inner.append(cy + math.sin(a) * r * 0.26)
+    drawPolygon(*inner, fill=palette.UI_PANEL, opacity=90)
+    spokes = 4 + seed % 3
+    for k in range(spokes):
+        a = -spin + k * math.tau / spokes
+        ca, sa = math.cos(a), math.sin(a)
+        px, py = -sa * r * 0.07, ca * r * 0.07
+        drawPolygon(cx + ca * r * 0.62 + px, cy + sa * r * 0.62 + py,
+                    cx + ca * r + px * 0.3, cy + sa * r + py * 0.3,
+                    cx + ca * r - px * 0.3, cy + sa * r - py * 0.3,
+                    cx + ca * r * 0.62 - px, cy + sa * r * 0.62 - py,
+                    fill=color, opacity=faint + 18)
+
+
+def _arc(cx, cy, outer, inner, a0, a1, color, opacity, segments=7):
+    """A band of an annulus, as a strip of quads."""
+    if opacity <= 0:
+        return
+    span = a1 - a0
+    for i in range(segments):
+        b0 = a0 + span * i / segments
+        b1 = a0 + span * (i + 1) / segments
+        c0, s0 = math.cos(b0), math.sin(b0)
+        c1, s1 = math.cos(b1), math.sin(b1)
+        drawPolygon(cx + c0 * outer, cy + s0 * outer,
+                    cx + c1 * outer, cy + s1 * outer,
+                    cx + c1 * inner, cy + s1 * inner,
+                    cx + c0 * inner, cy + s0 * inner,
+                    fill=color, opacity=opacity)
 
 
 def _rgb(color):
