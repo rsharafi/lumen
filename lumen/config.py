@@ -93,13 +93,14 @@ LIGHT_MAX_CORNERS = 96
 LIGHT_EPSILON = 0.0016         # radians nudged either side of each corner
 
 # ------------------------------------------------------------------- fx -----
-MAX_PARTICLES = 460
+MAX_PARTICLES = 4000
 # Particles keep simulating past this many, but only this many are drawn in a
-# frame - a five-kill burst can put 270 on screen at once, and at roughly
-# 35 us a shape that alone is most of a 120 Hz frame. When the budget is
-# exceeded the most-faded particles are skipped, which is where the eye is
-# least likely to miss them.
-MAX_PARTICLES_DRAWN = 170
+# frame. The old cap of 170 was set by cmu-graphics charging ~35 us a shape,
+# where a five-kill burst of 270 was most of a 120 Hz frame on its own. On the
+# GPU a particle is one quad, so the cap is now high enough that it only
+# exists as a backstop. When it is exceeded the most-faded ones are skipped,
+# which is where the eye is least likely to miss them.
+MAX_PARTICLES_DRAWN = 3000
 SHAKE_DECAY = 7.0
 HITSTOP_MAX = 0.09
 

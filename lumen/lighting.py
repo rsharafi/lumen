@@ -401,7 +401,15 @@ def polygon_flat(points, offset_x=0.0, offset_y=0.0):
     return flat
 
 
-def lit_wall_segments(level, ox, oy, radius, pieces=6):
+# A piece of lit wall edge is drawn as one flat-coloured quad, so this is the
+# length of one step of the gradient along the wall. Fixing the *count* per
+# edge instead - which is what this used to do - makes a short wall smooth and
+# a long one banded, because the piece size then grows with the wall.
+WALL_PIECE_LENGTH = 4.0
+WALL_PIECES_MAX = 160
+
+
+def lit_wall_segments(level, ox, oy, radius, piece_length=WALL_PIECE_LENGTH):
     """Lit wall edges cut into pieces, each with its own brightness.
 
     One strength per edge lights a whole wall uniformly, which is the one
@@ -443,36 +451,43 @@ def lit_wall_segments(level, ox, oy, radius, pieces=6):
     nx /= nlen
     ny /= nlen
 
-    pieces = max(1, int(pieces))
-    edge = np.arange(pieces + 1, dtype=np.float64) / pieces      # (P+1,)
-    mid = (edge[:-1] + edge[1:]) * 0.5                           # (P,)
+    # One count for every edge would have to suit the longest, which cuts a
+    # short edge into far more pieces than its length needs. There are only a
+    # handful of lit edges once the reject above has run, so each gets its own
+    # count and the piece length comes out the same everywhere - which is what
+    # makes a long wall as smooth as a short one.
+    lengths = np.hypot(ex, ey)
+    out = []
+    for e in range(len(ax)):
+        pieces = int(max(2, min(WALL_PIECES_MAX,
+                                math.ceil(lengths[e] / piece_length))))
+        edge = np.arange(pieces + 1, dtype=np.float64) / pieces
+        mid = (edge[:-1] + edge[1:]) * 0.5
 
-    px = ax[:, None] + ex[:, None] * mid[None, :]
-    py = ay[:, None] + ey[:, None] * mid[None, :]
-    dx = px - ox
-    dy = py - oy
-    d = np.hypot(dx, dy)
-    d[d == 0] = 1.0
-    facing = -(dx / d) * nx[:, None] - (dy / d) * ny[:, None]
-    falloff = np.clip(1.0 - d / radius, 0.0, 1.0) ** 1.5
-    strength = np.clip(facing, 0.0, 1.0) ** 0.7 * falloff
+        px_ = ax[e] + ex[e] * mid
+        py_ = ay[e] + ey[e] * mid
+        dx = px_ - ox
+        dy = py_ - oy
+        d = np.hypot(dx, dy)
+        d[d == 0] = 1.0
+        facing = -(dx / d) * nx[e] - (dy / d) * ny[e]
+        falloff = np.clip(1.0 - d / radius, 0.0, 1.0) ** 1.5
+        strength = np.clip(facing, 0.0, 1.0) ** 0.7 * falloff
 
-    lit = strength > 0.02
-    if not lit.any():
-        return []
-
-    x0 = ax[:, None] + ex[:, None] * edge[None, :-1]
-    y0 = ay[:, None] + ey[:, None] * edge[None, :-1]
-    x1 = ax[:, None] + ex[:, None] * edge[None, 1:]
-    y1 = ay[:, None] + ey[:, None] * edge[None, 1:]
-
-    ei, pi = np.nonzero(lit)
-    # The outward normal comes back with each piece: the caller needs it to
-    # push the light *into* the stone as well as along its rim.
-    return [(float(x0[e, p]), float(y0[e, p]),
-             float(x1[e, p]), float(y1[e, p]),
-             float(strength[e, p]), float(nx[e]), float(ny[e]))
-            for e, p in zip(ei, pi)]
+        lit = np.nonzero(strength > 0.02)[0]
+        if lit.size == 0:
+            continue
+        x0 = ax[e] + ex[e] * edge[:-1]
+        y0 = ay[e] + ey[e] * edge[:-1]
+        x1 = ax[e] + ex[e] * edge[1:]
+        y1 = ay[e] + ey[e] * edge[1:]
+        nxe, nye = float(nx[e]), float(ny[e])
+        # The outward normal comes back with each piece: the caller needs it
+        # to push the light *into* the stone as well as along its rim.
+        for i in lit:
+            out.append((float(x0[i]), float(y0[i]), float(x1[i]), float(y1[i]),
+                        float(strength[i]), nxe, nye))
+    return out
 
 
 def lit_wall_edges(level, ox, oy, radius):

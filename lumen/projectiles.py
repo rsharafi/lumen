@@ -134,6 +134,24 @@ class ProjectilePool:
             p.x, p.y = nx, ny
         return wall_hits
 
+    def draw_lights(self, ox, oy, view_w, view_h):
+        """Every live bolt as a light, for the deferred pass.
+
+        A projectile is a moving light source in a game about carrying the
+        only one, so it lights the walls it flies past rather than merely
+        being drawn bright.
+        """
+        for p in self.pool:
+            if not p.alive:
+                continue
+            sx = p.x - ox
+            sy = p.y - oy
+            r = max(34.0, p.width * 7.0)
+            if sx < -r or sy < -r or sx > view_w + r or sy > view_h + r:
+                continue
+            fade = clamp(p.life / max(p.max_life, 1e-6) * 3.0, 0.25, 1.0)
+            art.draw_glow(p.glow_color, sx, sy, r, 54 * fade, power=2.4)
+
     def draw(self, ox, oy, view_w, view_h):
         for p in self.pool:
             if not p.alive:

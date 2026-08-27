@@ -625,7 +625,130 @@ class World:
         return self.rift is not None and self.rift.hold >= RIFT_HOLD
 
     # --------------------------------------------------------------- draw --
+    # What a shadowed corner settles to once the lantern has been multiplied
+    # out of it. Not black: a chamber with nothing in it at all reads as a
+    # hole cut in the screen rather than as darkness.
+    AMBIENT = (15, 18, 28)
+    # How much of the light buffer is added on top of the multiply. The old
+    # renderer laid the floor back over the glow at 46%, so a bit over half of
+    # a lit floor's brightness was the light itself; this is that share.
+    # A lit floor is mostly light, not ground: the old renderer laid the floor
+    # back over the glow at 46%, so 54% of what you saw was the lantern. This
+    # is that share, and it is what keeps the pool warm instead of merely
+    # revealing the stone.
+    # Split between the two: the gain scales the albedo, so a wall and the
+    # floor beside it keep the difference between them, and the bleed supplies
+    # the warmth that makes a lit floor read as lit rather than merely
+    # visible. All bleed and the masonry washes out; all gain and the pool
+    # goes grey.
+    BLEED = 0.30
+    BLOOM = 0.30
+    ALBEDO_GAIN = 0.62
+
     def draw(self, app):
+        if gpu.lighting_ready():
+            self._draw_lit(app)
+        else:
+            self._draw_flat(app)
+
+    def _draw_lit(self, app):
+        """Albedo, then light, then the two multiplied together.
+
+        Everything solid goes into the scene buffer unlit; every light goes
+        into the light buffer; the composite lights all of it at once. That is
+        what makes an enemy fade up as the lantern reaches it instead of
+        popping on, and what lets the masonry catch light without a rim stroke
+        painted along each edge by hand.
+        """
+        cam = self.camera
+        ox, oy = cam.ox, cam.oy
+        lv = self.level
+        player = self.player
+        flicker = self.lantern_flicker()
+
+        # ---- what is there ------------------------------------------------
+        gpu.begin_scene(palette.VOID_RGB)
+        drawImage(lv.floor_image, -ox, -oy)
+        self._draw_rift(ox, oy)
+        self.pickups.draw(ox, oy, self.view_w, self.view_h)
+        drawImage(lv.wall_image, -ox, -oy)
+        self._draw_wall_light(ox, oy, flicker)
+        self._draw_braziers(ox, oy)
+
+        for e in self.enemies:
+            if not e.alive:
+                continue
+            sx = e.x - ox
+            sy = e.y - oy
+            if sx < -90 or sy < -90 or sx > self.view_w + 90 or sy > self.view_h + 90:
+                continue
+            # Always the body. The light decides how much of it you see.
+            e.draw_body(sx, sy)
+            if e.lit and e.species != 'choir':
+                e.draw_health(sx, sy)
+
+        if player.alive:
+            player.draw(ox, oy)
+        self.projectiles.draw(ox, oy, self.view_w, self.view_h)
+        self.particles.draw(ox, oy, self.view_w, self.view_h)
+
+        gpu.amplify_scene(self.ALBEDO_GAIN)
+
+        # ---- what lights it -----------------------------------------------
+        gpu.begin_light()
+        self._draw_light(ox, oy)
+        self._draw_point_lights(ox, oy, flicker)
+        gpu.add_ambient(self.AMBIENT)
+
+        # ---- and the two together -----------------------------------------
+        gpu.composite(self.BLOOM, self.BLEED)
+
+        # ---- things that are not part of the world -------------------------
+        # Eyes are emissive, so they belong on top of the lighting rather than
+        # under it: an unlit enemy is a pair of eyes in the dark.
+        for e in self.enemies:
+            if e.alive and not e.lit:
+                sx, sy = e.x - ox, e.y - oy
+                if -90 < sx < self.view_w + 90 and -90 < sy < self.view_h + 90:
+                    e.draw_glint(sx, sy)
+        drawImage(self.overlay, 0, 0)
+        self.effects.draw_texts(ox, oy)
+        self.effects.draw_flash(self.view_w, self.view_h)
+
+    def _draw_point_lights(self, ox, oy, flicker):
+        """Every other light in the chamber, added into the light buffer.
+
+        None of these cast shadows. They are small and short-lived, and the
+        cost of a visibility sweep each is not worth an occlusion nobody would
+        notice against the lantern's own.
+        """
+        gpu.set_mode(gpu.ADD)
+        for b in self.level.braziers:
+            if not b.lit:
+                continue
+            sx, sy = b.x - ox, b.y - oy
+            if sx < -260 or sy < -260 or sx > self.view_w + 260 or sy > self.view_h + 260:
+                continue
+            r = 150.0 * (0.85 + 0.15 * math.sin(self.run_time * 7.0 + b.x))
+            art.draw_glow(palette.LIGHT_DEEP, sx, sy, r,
+                          clamp(64 * b.ignite_t * flicker, 0, 100), power=2.2)
+        self.projectiles.draw_lights(ox, oy, self.view_w, self.view_h)
+        self.effects.draw_lights(ox, oy, self.view_w, self.view_h)
+        # Eyes throw just enough light to catch the ground under them. Any
+        # more and a chamber full of enemies lights itself, which takes the
+        # dark away from a game whose whole subject is the dark.
+        for e in self.enemies:
+            if not e.alive:
+                continue
+            sx, sy = e.x - ox, e.y - oy
+            if sx < -40 or sy < -40 or sx > self.view_w + 40 or sy > self.view_h + 40:
+                continue
+            art.draw_glow(art.rgb_tuple(e.eye_color), sx, sy, 15.0, 13,
+                          power=3.0)
+        gpu.set_mode(gpu.NORMAL)
+
+    def _draw_flat(self, app):
+        """The original single-pass path, for the cmu-graphics renderer."""
         cam = self.camera
         ox, oy = cam.ox, cam.oy
         lv = self.level
@@ -695,6 +818,10 @@ class World:
         # because CPCS mode rebuilds the shape every frame and so never hits
         # the renderer's scaled-image cache; the falloff and the hot core are
         # baked into a single profile instead.
+        if gpu.lighting_ready():
+            self._draw_light_deferred(fan, px, py, radius, flicker, ox, oy)
+            return
+
         if not NO_LANTERN:
             art.draw_lantern(LANTERN_GLOW, px - ox, py - oy, radius,
                              clamp(96 * flicker, 0, 100))
@@ -758,6 +885,87 @@ class World:
             self._draw_wall_light_flat(ox, oy)
         self._draw_brazier_light(ox, oy)
 
+    # A cast shadow is drawn three times, the outer end of each swung a hair
+    # around the lantern. Where all three overlap the ground is fully dark;
+    # along the edges only some do, and the partial products are the penumbra.
+    # Swinging the *outer* end and leaving the inner one on the occluder is
+    # what makes the softness grow with distance from whatever is casting it,
+    # which is how a real shadow behaves.
+    SHADOW_SPREAD = 0.016
+    SHADOW_PASS = 104           # 0.41 per pass, so ~0.07 where all three land
+
+    def _draw_light_deferred(self, fan, px, py, radius, flicker, ox, oy):
+        """The lantern, into the light buffer rather than onto the floor."""
+        gpu.set_mode(gpu.ADD)
+        if not NO_LANTERN:
+            art.draw_lantern(LANTERN_GLOW, px - ox, py - oy, radius,
+                             clamp(96 * flicker, 0, 100))
+            # The lit region again, faintly, so the shafts the light throws
+            # through a doorway read as air being lit rather than as a shape
+            # cut out of the dark.
+            self._draw_shafts(fan, ox, oy, flicker)
+
+        gpu.set_mode(gpu.MOD)
+        ribbons = fan.shadow_ribbons()
+        self.last_wedges = len(ribbons)
+        shade = palette.rgb(self.SHADOW_PASS, self.SHADOW_PASS,
+                            self.SHADOW_PASS)
+        for spread in (-self.SHADOW_SPREAD, 0.0, self.SHADOW_SPREAD):
+            cos_s, sin_s = math.cos(spread), math.sin(spread)
+            for inner, outer in ribbons:
+                for i in range(len(inner) - 1):
+                    ax, ay = inner[i]
+                    bx, by = inner[i + 1]
+                    cx, cy = self._swing(outer[i + 1], px, py, cos_s, sin_s)
+                    dx, dy = self._swing(outer[i], px, py, cos_s, sin_s)
+                    drawPolygon(ax - ox, ay - oy, bx - ox, by - oy,
+                                cx - ox, cy - oy, dx - ox, dy - oy,
+                                fill=shade, opacity=100)
+        gpu.set_mode(gpu.NORMAL)
+
+    @staticmethod
+    def _swing(point, px, py, cos_s, sin_s):
+        """Rotate a point about the light by a small angle."""
+        rx, ry = point[0] - px, point[1] - py
+        return (px + rx * cos_s - ry * sin_s, py + rx * sin_s + ry * cos_s)
+
+    # Radial bands the lit cone is filled in, from the flame outwards, and
+    # what share of the shaft brightness each carries. Filling the cone flat
+    # instead - one polygon at one opacity - lifts the whole visible region by
+    # the same amount and leaves a hard circle at the lantern's reach, which
+    # reads as a disc painted on the floor rather than as air catching light.
+    SHAFT_BANDS = tuple(
+        (i / 9.0, (i + 1) / 9.0, (1.0 - i / 9.0) ** 2.2) for i in range(9))
+    SHAFT_STRENGTH = 9.0
+
+    def _draw_shafts(self, fan, ox, oy, flicker):
+        """The lit cone, added faintly - light with some air in it.
+
+        Each band is a ring of quads between two fractions along the same
+        rays the visibility sweep already cast, so the fill stops exactly
+        where the light does. Where the cone squeezes through a doorway the
+        bands squeeze with it, which is the shaft.
+        """
+        pts = fan.points
+        n = len(pts)
+        if n < 3:
+            return
+        px, py = fan.ox, fan.oy
+        tint = palette.LIGHT_WARM
+        step = 2
+        for lo, hi, weight in self.SHAFT_BANDS:
+            opacity = int(clamp(self.SHAFT_STRENGTH * weight * flicker, 0, 100))
+            if opacity <= 0:
+                continue
+            for i in range(0, n - step, step):
+                ax, ay = pts[i]
+                bx, by = pts[i + step]
+                drawPolygon(px + (ax - px) * lo - ox, py + (ay - py) * lo - oy,
+                            px + (bx - px) * lo - ox, py + (by - py) * lo - oy,
+                            px + (bx - px) * hi - ox, py + (by - py) * hi - oy,
+                            px + (ax - px) * hi - ox, py + (ay - py) * hi - oy,
+                            fill=tint, opacity=opacity)
+
     # How far the light reaches back across the stone from a lit rim, in
     # design units, and how much of the rim's brightness survives that far.
     # This is what stops the lantern reading as a thin outline: the face of a
@@ -771,8 +979,7 @@ class World:
 
     def _draw_wall_light_rich(self, ox, oy, flicker):
         pieces = lighting.lit_wall_segments(
-            self.level, self.player.x, self.player.y, self.light_radius,
-            self.WALL_LIGHT_PIECES)
+            self.level, self.player.x, self.player.y, self.light_radius)
         self.last_edges = len(pieces)
         wash = self.WALL_LIGHT_WASH
         for ax, ay, bx, by, s, nx, ny in pieces:
@@ -830,7 +1037,7 @@ class World:
             if b.edges is None:
                 if rich:
                     b.edges = lighting.lit_wall_segments(
-                        self.level, b.x, b.y, 190, self.WALL_LIGHT_PIECES)
+                        self.level, b.x, b.y, 190)
                 else:
                     b.edges = lighting.lit_wall_edges(self.level, b.x, b.y, 190)
             for piece in b.edges:

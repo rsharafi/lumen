@@ -394,10 +394,12 @@ def draw_glow(color, cx, cy, radius, opacity, power=2.2, core=0.0):
     """
     if radius <= 1.0 or opacity <= 0:
         return
-    # Whole-pixel destination and size: see the note on Camera.ox.
+    # Size is quantised so one cached sprite serves many radii; the position
+    # is not - rounding it to whole design units makes a moving light judder
+    # against everything drawn at exact coordinates. See `draw_lantern`.
     d = float(int(radius * 2.0))
-    left = float(int(cx - radius))
-    top = float(int(cy - radius))
+    left = cx - radius
+    top = cy - radius
     drawImage(glow(color, GLOW_BASE, power, core), left, top,
               width=d, height=d, opacity=min(100, int(opacity)))
 
