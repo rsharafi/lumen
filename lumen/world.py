@@ -88,6 +88,9 @@ class World:
 
         self.overlay = art.screen_overlay(view_w, view_h, 0.94, 0.6, 0.05,
                                           0.1, 4)
+        # Set by `Game` from the player's settings.
+        self.deferred = True        # the light-buffer pipeline
+        self.volumetric = True      # air in the lit cone
         self.prewarm_lantern_sizes()
 
     def resize(self, view_w, view_h):
@@ -647,7 +650,7 @@ class World:
     ALBEDO_GAIN = 0.58
 
     def draw(self, app):
-        if gpu.lighting_ready():
+        if self.deferred and gpu.lighting_ready():
             self._draw_lit(app)
         else:
             self._draw_flat(app)
@@ -701,7 +704,7 @@ class World:
         gpu.add_ambient(self.AMBIENT)
 
         # ---- and the two together -----------------------------------------
-        gpu.composite(self.BLOOM, self.BLEED)
+        gpu.composite(self.BLOOM, self.BLEED, art.dither_tile())
 
         # ---- light that lands on surfaces, not in the air ------------------
         # The masonry is baked very dark, so multiplying it by the light
@@ -909,6 +912,8 @@ class World:
         if not NO_LANTERN:
             art.draw_lantern(LANTERN_GLOW, px - ox, py - oy, radius,
                              clamp(96 * flicker, 0, 100))
+            if self.volumetric:
+                self._draw_shafts(fan, ox, oy, flicker)
 
         gpu.set_mode(gpu.MOD)
         ribbons = fan.shadow_ribbons()
@@ -939,6 +944,45 @@ class World:
     # instead - one polygon at one opacity - lifts the whole visible region by
     # the same amount and leaves a hard circle at the lantern's reach, which
     # reads as a disc painted on the floor rather than as air catching light.
+    # The lit cone is filled from the flame outwards in bands. Enough of them
+    # that a step is a fraction of a level - and the frame-wide dither takes
+    # care of what is left, which is why this can exist at all: at 22 bands it
+    # put a visible ring every few percent of the radius.
+    SHAFT_BAND_COUNT = 40
+    SHAFT_STRENGTH = 7.0
+
+    def _draw_shafts(self, fan, ox, oy, flicker):
+        """The lit cone, added faintly - light with some air in it.
+
+        Each band is a ring of quads between two fractions along the rays the
+        visibility sweep already cast, so the fill stops exactly where the
+        light does. Where the cone squeezes through a doorway the bands
+        squeeze with it, and that is the shaft.
+        """
+        pts = fan.points
+        n = len(pts)
+        if n < 3:
+            return
+        px, py = fan.ox, fan.oy
+        tint = palette.LIGHT_WARM
+        bands = self.SHAFT_BAND_COUNT
+        step = 2
+        for b in range(bands):
+            lo = b / bands
+            hi = (b + 1) / bands
+            weight = (1.0 - lo) ** 2.4
+            opacity = int(clamp(self.SHAFT_STRENGTH * weight * flicker, 0, 100))
+            if opacity <= 0:
+                continue
+            for i in range(0, n - step, step):
+                ax, ay = pts[i]
+                bx, by = pts[i + step]
+                drawPolygon(px + (ax - px) * lo - ox, py + (ay - py) * lo - oy,
+                            px + (bx - px) * lo - ox, py + (by - py) * lo - oy,
+                            px + (bx - px) * hi - ox, py + (by - py) * hi - oy,
+                            px + (ax - px) * hi - ox, py + (ay - py) * hi - oy,
+                            fill=tint, opacity=opacity)
+
     # How deep the light lying on a wall reaches, in design units, and how
     # much of that is in front of the edge rather than behind it.
     EDGE_LIGHT_DEPTH = 15.0

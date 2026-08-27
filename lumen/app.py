@@ -77,6 +77,8 @@ class Game:
         self.pixel_w = WIDTH
         self.pixel_h = HEIGHT
         self.fullscreen = False
+        self.deferred = True
+        self.volumetric = True
         self.windowed_size = (WIDTH, HEIGHT)
         self.display_index = 0
         self._app_ref = None
@@ -139,6 +141,8 @@ class Game:
         remembered = int(self.save.get('auto', self.AUTO_RUNGS[0]))
         if remembered in self.AUTO_RUNGS:
             self.auto_index = remembered
+        self.deferred = str(self.save.get('visuals', 'lit')).lower() != 'classic'
+        self.volumetric = bool(self.save.get('volumetric', True))
 
         self._block_mouse_motion()
 
@@ -359,6 +363,7 @@ class Game:
         rng.world.reseed(seed)
         self.stats = upgrades.Stats()
         self.world = World(self.stats, rng.world, rng.fx, self.width, self.height)
+        self._sync_visuals()
         self.world.enter_floor(max(1, min(FLOORS_PER_RUN, self.start_floor)))
         self.ending = False
         self.state = PLAYING
@@ -620,6 +625,10 @@ class Game:
                 self.state = HELP
             elif choice == 'DISPLAY':
                 self.cycle_display(self._app_ref)
+            elif choice == 'VISUALS':
+                self.toggle_visuals()
+            elif choice == 'SHAFTS':
+                self.toggle_volumetric()
             elif choice == 'SOUND':
                 self.toggle_sound()
             elif choice == 'QUIT':
@@ -863,6 +872,34 @@ class Game:
             save.save(self.save)
         audio.play('ui_select', 0.5)
 
+    def _sync_visuals(self):
+        if self.world is not None:
+            self.world.deferred = self.deferred
+            self.world.volumetric = self.volumetric
+
+    def visuals_label(self):
+        return 'LIT' if self.deferred else 'CLASSIC'
+
+    def toggle_visuals(self):
+        """Swap between the light-buffer pipeline and the original look."""
+        self.deferred = not self.deferred
+        self._sync_visuals()
+        self.save['visuals'] = 'lit' if self.deferred else 'classic'
+        save.save(self.save)
+        audio.play('ui_select', 0.5)
+
+    def volumetric_label(self):
+        if not self.deferred:
+            return 'N/A'
+        return 'ON' if self.volumetric else 'OFF'
+
+    def toggle_volumetric(self):
+        self.volumetric = not self.volumetric
+        self._sync_visuals()
+        self.save['volumetric'] = self.volumetric
+        save.save(self.save)
+        audio.play('ui_select', 0.5)
+
     def toggle_sound(self):
         self.sound_on = not self.sound_on
         self.save['sound'] = self.sound_on
@@ -887,7 +924,9 @@ class Game:
         started = time.perf_counter()
 
         if self.state == TITLE:
-            self.title_screen.draw(self.sound_on, self.display_label())
+            self.title_screen.draw(self.sound_on, self.display_label(),
+                                   self.visuals_label(),
+                                   self.volumetric_label())
         elif self.state == HELP:
             self.help_screen.draw()
         elif self.state == ENDED:

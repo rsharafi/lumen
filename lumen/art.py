@@ -248,7 +248,10 @@ _BAYER8 = np.array([
 # transition properly. It reads as no noise at all against the film grain that
 # is already on the frame.
 _DITHER_LEVELS = 2.4
-_BAYER8 = ((_BAYER8 + 0.5) / 64.0 - 0.5) * _DITHER_LEVELS
+# Kept in 0..1 as well: the frame-wide dither tile needs the raw pattern, not
+# the signed version the sprite bakes use.
+_BAYER_RAW = (_BAYER8 + 0.5) / 64.0
+_BAYER8 = (_BAYER_RAW - 0.5) * _DITHER_LEVELS
 
 
 def _dither(shape):
@@ -377,6 +380,31 @@ def lantern_glow(color, size=GLOW_BASE):
     return _store(key, _rgba((np.full(a.shape, r, np.float32),
                               np.full(a.shape, g, np.float32),
                               np.full(a.shape, b, np.float32)), a))
+
+
+def dither_tile(size=256):
+    """A tile of ordered dither, laid over the finished frame.
+
+    Dithering the sprites is only half the job. A glow is drawn into an 8-bit
+    light buffer, multiplied by an 8-bit albedo and added back at a fraction -
+    and every one of those steps rounds again. Worse, the fractional add
+    *shrinks* whatever dither survived: scaled by a third, a dither of one
+    level becomes a third of one and stops breaking anything.
+
+    So the frame gets a last pass of its own. It cannot recover detail that
+    was already rounded away, but it makes the boundary between two output
+    levels ragged instead of a clean contour, and a ragged boundary is not a
+    ring. Two levels is enough to do that and stays under the film grain.
+    """
+    key = ('dither', size)
+    hit = _cache.get(key)
+    if hit is not None:
+        return hit
+    tile = np.tile(_BAYER_RAW, (size // 8 + 1, size // 8 + 1))[:size, :size]
+    values = np.floor(tile * 2.999).astype(np.float32)
+    alpha = np.ones((size, size), np.float32)
+    return _store(key, _rgba((values, values, values), alpha, dither=False),
+                  keep_source=False)
 
 
 # Where the lit edge itself sits inside the profile below, as a fraction of

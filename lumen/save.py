@@ -20,6 +20,11 @@ DEFAULT = {
     'display': -1,
     'auto': 1,
     'fullscreen': False,
+    # 'lit' is the light-buffer pipeline; 'classic' is the original
+    # single-pass look, kept because it is a different aesthetic rather than
+    # merely a worse one. `volumetric` is the air in the lit cone.
+    'visuals': 'lit',
+    'volumetric': True,
 }
 
 

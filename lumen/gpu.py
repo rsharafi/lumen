@@ -662,7 +662,31 @@ def end_edge_light(opacity=100):
     tex.color = (255, 255, 255)
 
 
-def composite(bloom=0.0, bleed=0.0):
+def tile_over(sprite, opacity=100):
+    """Repeat a sprite across the frame at one texel per pixel."""
+    tex = sprite.texture() if sprite is not None else None
+    if tex is None or _targets_size is None:
+        return
+    w, h = _targets_size
+    tw, th = sprite.size
+    a = _alpha(opacity)
+    blend = sprite_blend()
+    if blend is not None:
+        tex.blend_mode = blend
+    tex.color = (a, a, a)
+    tex.alpha = a
+    y = 0
+    while y < h:
+        x = 0
+        while x < w:
+            tex.draw(dstrect=(x, y, tw, th))
+            x += tw
+        y += th
+    tex.color = (255, 255, 255)
+    tex.alpha = 255
+
+
+def composite(bloom=0.0, bleed=0.0, dither=None):
     """Combine the two buffers, and bloom the result.
 
     `scene * light` alone would leave the game far darker than it was, because
@@ -702,6 +726,11 @@ def composite(bloom=0.0, bleed=0.0):
         _use(None)
         _targets['final'].blend_mode = pygame.BLENDMODE_NONE
         _targets['final'].draw(dstrect=(0, 0, w, h))
+    if dither is not None:
+        # Last of all, on the finished frame: everything above this has had a
+        # chance to round a gradient into a contour.
+        set_mode(ADD)
+        tile_over(dither)
     set_mode(NORMAL)
 
 

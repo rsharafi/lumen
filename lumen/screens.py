@@ -155,7 +155,8 @@ class TitleScreen:
         self.h = view_h
         self.backdrop = Backdrop(view_w, view_h, rng, 64)
         self.save = save_data
-        self.menu = Menu(['DESCEND', 'HOW TO PLAY', 'DISPLAY', 'SOUND', 'QUIT'])
+        self.menu = Menu(['DESCEND', 'HOW TO PLAY', 'DISPLAY', 'VISUALS',
+                          'SHAFTS', 'SOUND', 'QUIT'])
         self.t = 0.0
         # Rectangles from the last frame's layout, used for mouse hit-testing.
         self.hit_rects = []
@@ -175,7 +176,8 @@ class TitleScreen:
         self.t += dt
         self.backdrop.update(dt)
 
-    def draw(self, sound_on, display_label=''):
+    def draw(self, sound_on, display_label='', visuals_label='',
+             volumetric_label=''):
         self.backdrop.draw()
         w, h = self.w, self.h
 
@@ -204,17 +206,23 @@ class TitleScreen:
             drawPolygon(*pts, fill=None, border=palette.UI_LINE,
                         borderWidth=1, opacity=30 - ring * 6)
 
-        base = h * 0.56
+        # Seven rows now, so they start higher and sit closer together than
+        # the five this was laid out for.
+        base = h * 0.50
         self.hit_rects = []
         for i, item in enumerate(self.menu.items):
             selected = i == self.menu.index
-            y = base + i * 38
-            self.hit_rects.append((w * 0.5 - 170, y - 14, 340, 32, i))
+            y = base + i * 34
+            self.hit_rects.append((w * 0.5 - 170, y - 13, 340, 30, i))
             label = item
             if item == 'SOUND':
                 label = f'SOUND  {"ON" if sound_on else "OFF"}'
             elif item == 'DISPLAY':
                 label = f'DISPLAY  {display_label}'
+            elif item == 'VISUALS':
+                label = f'VISUALS  {visuals_label}'
+            elif item == 'SHAFTS':
+                label = f'SHAFTS  {volumetric_label}'
             if selected:
                 glide = 8 + 3 * pulse(self.t, 1.6)
                 drawPolygon(w * 0.5 - 150 - glide, y - 2,
