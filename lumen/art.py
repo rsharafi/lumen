@@ -229,14 +229,44 @@ def rgb_tuple(color):
     return (color.red, color.green, color.blue)
 
 
-def _rgba(arr_rgb, alpha):
+# Ordered dither, added to alpha before it is rounded to 8 bits. A glow is a
+# gradient hundreds of pixels wide and 8-bit alpha has 256 steps to spend on
+# it, so its faint tail lands in plateaus - measured, up to 16 pixels of
+# identical alpha at a time, which is a visible ring. Half a level of dither
+# turns each of those boundaries into a blend between the two levels either
+# side. The pattern is a 8x8 Bayer matrix rather than random noise because it
+# averages out evenly and does not shimmer when the sprite is scaled.
+_BAYER8 = np.array([
+    [0, 32, 8, 40, 2, 34, 10, 42], [48, 16, 56, 24, 50, 18, 58, 26],
+    [12, 44, 4, 36, 14, 46, 6, 38], [60, 28, 52, 20, 62, 30, 54, 22],
+    [3, 35, 11, 43, 1, 33, 9, 41], [51, 19, 59, 27, 49, 17, 57, 25],
+    [15, 47, 7, 39, 13, 45, 5, 37], [63, 31, 55, 23, 61, 29, 53, 21],
+], dtype=np.float32)
+# Rather more than the half-level that would just break the boundary between
+# two adjacent values. The lantern's tail is so nearly flat that half a level
+# still leaves plateaus ten pixels wide; a little over one level spreads each
+# transition properly. It reads as no noise at all against the film grain that
+# is already on the frame.
+_DITHER_LEVELS = 2.4
+_BAYER8 = ((_BAYER8 + 0.5) / 64.0 - 0.5) * _DITHER_LEVELS
+
+
+def _dither(shape):
+    h, w = shape
+    return np.tile(_BAYER8, (h // 8 + 1, w // 8 + 1))[:h, :w]
+
+
+def _rgba(arr_rgb, alpha, dither=True):
     """Compose float32 colour planes + alpha plane into a PIL RGBA image."""
     h, w = alpha.shape
     out = np.empty((h, w, 4), dtype=np.uint8)
     out[..., 0] = np.clip(arr_rgb[0], 0, 255).astype(np.uint8)
     out[..., 1] = np.clip(arr_rgb[1], 0, 255).astype(np.uint8)
     out[..., 2] = np.clip(arr_rgb[2], 0, 255).astype(np.uint8)
-    out[..., 3] = np.clip(alpha * 255.0, 0, 255).astype(np.uint8)
+    a = alpha * 255.0
+    if dither:
+        a = a + _dither(alpha.shape)
+    out[..., 3] = np.clip(a, 0, 255).astype(np.uint8)
     return Image.fromarray(out, 'RGBA')
 
 
@@ -347,6 +377,43 @@ def lantern_glow(color, size=GLOW_BASE):
     return _store(key, _rgba((np.full(a.shape, r, np.float32),
                               np.full(a.shape, g, np.float32),
                               np.full(a.shape, b, np.float32)), a))
+
+
+# Where the lit edge itself sits inside the profile below, as a fraction of
+# its depth: a quarter of it spills forward onto the floor, the rest carries
+# back across the stone.
+EDGE_LIGHT_PEAK = 0.26
+_EDGE_LIGHT_DEPTH = 128
+
+
+def edge_light():
+    """The cross-section of light lying on a lit wall edge.
+
+    One texture, stretched and rotated along each piece of edge, in place of
+    the half-dozen stacked strokes this used to take. Strokes give a stepped
+    profile with a hard line at the top of each one, which against the soft
+    falloff everything else now has read as drawn-on rather than lit. A
+    gradient stretched across the same depth is smooth by construction, and
+    one quad instead of six.
+    """
+    key = ('edgelight',)
+    hit = _cache.get(key)
+    if hit is not None:
+        return hit
+    n = _EDGE_LIGHT_DEPTH
+    t = np.linspace(0.0, 1.0, n, dtype=np.float32)
+    peak = EDGE_LIGHT_PEAK
+    a = np.empty(n, dtype=np.float32)
+    front = t < peak
+    # Onto the floor: a short, steep spill.
+    a[front] = np.clip(t[front] / peak, 0.0, 1.0) ** 2.1
+    # Into the stone: a long tail, so the wall face is lit and not just its
+    # corner.
+    back = ~front
+    a[back] = np.clip(1.0 - (t[back] - peak) / (1.0 - peak), 0.0, 1.0) ** 1.7
+    plane = np.repeat(a[:, None], 4, axis=1)
+    white = np.full(plane.shape, 255.0, np.float32)
+    return _store(key, _rgba((white, white, white), plane), keep_source=False)
 
 
 # Largest lantern sprite kept at its exact size. Anything bigger (a flare at

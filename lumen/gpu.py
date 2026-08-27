@@ -254,6 +254,31 @@ def blit(sprite, left, top, width=None, height=None, opacity=None):
     tex.draw(dstrect=(left, top, width, height))
 
 
+def blit_rot(sprite, cx, cy, width, height, degrees, color=None, opacity=None):
+    """Draw a sprite rotated about its own centre, in real pixels.
+
+    SDL rotates the destination rectangle for free, which is what lets a
+    single baked gradient serve as the light lying along a wall at any angle.
+    """
+    tex = sprite.texture() if sprite is not None else None
+    if tex is None:
+        return
+    a = _alpha(opacity)
+    if color is not None:
+        r, g, b = color
+        tex.color = (r * a // 255, g * a // 255, b * a // 255)
+    else:
+        tex.color = (a, a, a)
+    tex.alpha = a
+    blend = sprite_blend()
+    if blend is not None:
+        tex.blend_mode = blend
+    tex.draw(dstrect=(cx - width * 0.5, cy - height * 0.5, width, height),
+             angle=degrees)
+    tex.color = (255, 255, 255)
+    tex.alpha = 255
+
+
 def _convex(points):
     """True if the polygon turns the same way at every vertex."""
     n = len(points)

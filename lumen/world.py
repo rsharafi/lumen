@@ -9,7 +9,7 @@ import gc
 import math
 import os
 
-from . import gpu
+from . import draw, gpu
 from .draw import drawImage, drawLine, drawPolygon
 
 from . import (art, audio, boss, enemies as enemy_mod, flow as flow_mod,
@@ -28,6 +28,15 @@ from .player import Player
 RIFT_HOLD = 0.45
 LANTERN_GLOW = (255, 198, 126)
 SHADOW_OPACITY = int(os.environ.get('LUMEN_SHADOW_OPACITY', '100'))
+
+# Radial bands the lit cone is filled in. Enough of them that no single step
+# is a whole unit of opacity: nine put a ring every few percent of the radius,
+# which against a dark floor is as visible as the 8-bit plateaus that had to
+# be dithered out of the glow sprite itself.
+_SHAFT_BAND_COUNT = 22
+_SHAFT_BANDS = tuple(
+    (i / _SHAFT_BAND_COUNT, (i + 1) / _SHAFT_BAND_COUNT,
+     (1.0 - i / _SHAFT_BAND_COUNT) ** 2.4) for i in range(_SHAFT_BAND_COUNT))
 # Test hook: render a frame with no lantern, to diff for light leaks.
 NO_LANTERN = bool(os.environ.get('LUMEN_NO_LANTERN'))
 
@@ -942,9 +951,8 @@ class World:
     # instead - one polygon at one opacity - lifts the whole visible region by
     # the same amount and leaves a hard circle at the lantern's reach, which
     # reads as a disc painted on the floor rather than as air catching light.
-    SHAFT_BANDS = tuple(
-        (i / 9.0, (i + 1) / 9.0, (1.0 - i / 9.0) ** 2.2) for i in range(9))
-    SHAFT_STRENGTH = 9.0
+    SHAFT_BANDS = _SHAFT_BANDS
+    SHAFT_STRENGTH = 8.0
 
     def _draw_shafts(self, fan, ox, oy, flicker):
         """The lit cone, added faintly - light with some air in it.
@@ -985,36 +993,53 @@ class World:
     WALL_LIGHT_WASH_WIDTH = 3.2
     WALL_LIGHT_WASH = ((1.5, 0.54), (3.9, 0.30), (6.3, 0.15), (8.7, 0.06))
 
+    # How deep the light lying on a wall reaches, in design units, and how
+    # much of that is in front of the edge rather than behind it.
+    EDGE_LIGHT_DEPTH = 15.0
+
     def _draw_wall_light_rich(self, ox, oy, flicker):
+        """The light lying along a lit wall edge, as one gradient per piece.
+
+        The profile across the wall is baked once (`art.edge_light`) and
+        stretched and rotated onto each piece, so it is smooth by
+        construction. Stacking half a dozen strokes at different widths - what
+        this did before - leaves a hard line at the top of every one of them,
+        and against the soft falloff the rest of the lighting now has, those
+        read as lines drawn on the wall rather than as light landing on it.
+        """
         pieces = lighting.lit_wall_segments(
             self.level, self.player.x, self.player.y, self.light_radius)
         self.last_edges = len(pieces)
-        wash = self.WALL_LIGHT_WASH
+        if not gpu.active():
+            return self._draw_wall_light_flat(ox, oy)
+
+        profile = art.edge_light()
+        scale = draw.SCALE
+        depth = self.EDGE_LIGHT_DEPTH
+        # The gradient's bright line sits a fraction of the way down the
+        # texture, so the quad is pushed forward to put that line on the edge.
+        offset = depth * (art.EDGE_LIGHT_PEAK - 0.5)
         for ax, ay, bx, by, s, nx, ny in pieces:
             s = s * flicker
             if s > 1.0:
                 s = 1.0
-            x1, y1 = ax - ox, ay - oy
-            x2, y2 = bx - ox, by - oy
+            ex, ey = bx - ax, by - ay
+            length = math.hypot(ex, ey)
+            if length < 1e-6:
+                continue
+            mx = (ax + bx) * 0.5 - ox + nx * offset
+            my = (ay + by) * 0.5 - oy + ny * offset
             color = palette.wall_light(s)
-
-            # Spill onto the floor in front of the stone. Squared, so it stays
-            # tight around the brightest masonry instead of fogging the room.
-            drawLine(x1 + nx * 1.6, y1 + ny * 1.6, x2 + nx * 1.6, y2 + ny * 1.6,
-                     fill=color, lineWidth=8.0, opacity=int(2 + 14 * s * s))
-            # The lit rim itself.
-            drawLine(x1, y1, x2, y2, fill=color, lineWidth=3.0,
-                     opacity=int(5 + 70 * s))
-            # And the light carrying back across the face behind it.
-            for dist, k in wash:
-                drawLine(x1 - nx * dist, y1 - ny * dist,
-                         x2 - nx * dist, y2 - ny * dist,
-                         fill=color, lineWidth=self.WALL_LIGHT_WASH_WIDTH,
-                         opacity=int(66 * s * k))
-            # A hot filament only where the flame is close and square-on.
-            if s > 0.6:
-                drawLine(x1, y1, x2, y2, fill=palette.LIGHT_CORE,
-                         lineWidth=1.2, opacity=int(62 * (s - 0.6) / 0.4))
+            # The texture runs bright-edge-first down its own height, so the
+            # quad is turned to put that axis along the outward normal.
+            degrees = math.degrees(math.atan2(-ny, -nx)) - 90.0
+            # Exactly the piece's length: the quads are additive, so any
+            # overlap between two of them doubles up into a bright tick at
+            # every boundary - a comb along the wall.
+            gpu.blit_rot(profile, mx * scale, my * scale,
+                         length * scale, depth * scale, degrees,
+                         color=(color.red, color.green, color.blue),
+                         opacity=int(6 + 74 * s))
 
     def _draw_wall_light_flat(self, ox, oy):
         # One stroke per edge, not two. `drawLine` builds a rotated quad and
