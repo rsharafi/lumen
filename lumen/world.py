@@ -641,9 +641,9 @@ class World:
     # the warmth that makes a lit floor read as lit rather than merely
     # visible. All bleed and the masonry washes out; all gain and the pool
     # goes grey.
-    BLEED = 0.30
-    BLOOM = 0.30
-    ALBEDO_GAIN = 0.62
+    BLEED = 0.32
+    BLOOM = 0.16
+    ALBEDO_GAIN = 0.58
 
     def draw(self, app):
         if gpu.lighting_ready():
@@ -672,7 +672,6 @@ class World:
         self._draw_rift(ox, oy)
         self.pickups.draw(ox, oy, self.view_w, self.view_h)
         drawImage(lv.wall_image, -ox, -oy)
-        self._draw_wall_light(ox, oy, flicker)
         self._draw_braziers(ox, oy)
 
         for e in self.enemies:
@@ -702,6 +701,15 @@ class World:
 
         # ---- and the two together -----------------------------------------
         gpu.composite(self.BLOOM, self.BLEED)
+
+        # ---- light that lands on surfaces, not in the air ------------------
+        # The masonry is baked very dark, so multiplying it by the light
+        # buffer leaves it black however close the lantern gets. What a wall
+        # actually shows is light *on* it, so that is added after the
+        # composite where nothing can wash it out again.
+        gpu.set_mode(gpu.ADD)
+        self._draw_wall_light(ox, oy, flicker)
+        gpu.set_mode(gpu.NORMAL)
 
         # ---- things that are not part of the world -------------------------
         # Eyes are emissive, so they belong on top of the lighting rather than
@@ -1108,8 +1116,10 @@ class World:
                 pts.append(sy + math.sin(a) * rr)
             drawPolygon(*pts, fill=palette.PLAYER_TRIM,
                         opacity=int((30 - ring * 7) * t))
+        # Same reasoning as the lantern body: an emissive drawn into the
+        # albedo gets lit and then bled onto, so it clips if it starts white.
         drawPolygon(sx, sy - 9 * t, sx + 9 * t, sy, sx, sy + 9 * t,
-                    sx - 9 * t, sy, fill=palette.LIGHT_CORE, opacity=int(92 * t))
+                    sx - 9 * t, sy, fill=palette.LIGHT_CORE, opacity=int(62 * t))
 
         if rift.hold > 0.01:
             frac = clamp(rift.hold / RIFT_HOLD, 0.0, 1.0)

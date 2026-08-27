@@ -377,9 +377,13 @@ class Player:
         drawPolygon(lx - 4.0, ly - 5.0, lx + 4.0, ly - 5.0,
                     lx + 4.0, ly + 5.0, lx - 4.0, ly + 5.0,
                     fill=palette.VOID, opacity=90)
+        # Not full strength: this sits at the exact centre of the light, so
+        # anything near-white here is multiplied by a bright light buffer and
+        # then has the light added on top again, and clips to a flat white
+        # slab. It reads as a flame because of what surrounds it.
         drawPolygon(lx - 2.6, ly - 3.6, lx + 2.6, ly - 3.6,
                     lx + 2.6, ly + 3.6, lx - 2.6, ly + 3.6,
-                    fill=palette.LIGHT_CORE, opacity=98)
+                    fill=palette.LIGHT_CORE, opacity=60)
 
         if self.muzzle_flash > 0.05:
             mx = sx + ca * (self.radius + 14.0)

@@ -329,13 +329,20 @@ def lantern_glow(color, size=GLOW_BASE):
     tiny bright dot (high one). Summing three terms gives what a flame in a
     dark room actually looks like: a hot core, a broad usable pool, and a long
     tail that fades to nothing instead of ending at a visible rim.
+
+    Every exponent is above 1, which is what makes the tail smooth. A term
+    near f**1 falls off linearly, so it still has slope where it reaches the
+    edge of the sprite and stops - and a falloff that stops with slope left in
+    it draws a circle. That was fine when the glow was a wash under the floor;
+    once it became the light buffer itself, its shape is on screen directly
+    and the circle showed.
     """
     key = ('lantern', rgb_tuple(color), int(size))
     hit = _cache.get(key)
     if hit is not None:
         return hit
     f = noise.radial_falloff(px(size), 1.0)
-    a = np.clip(0.30 * f ** 1.05 + 0.34 * f ** 2.2 + 0.36 * f ** 5.5, 0.0, 1.0)
+    a = np.clip(0.44 * f ** 1.7 + 0.34 * f ** 3.2 + 0.26 * f ** 6.5, 0.0, 1.0)
     r, g, b = rgb_tuple(color)
     return _store(key, _rgba((np.full(a.shape, r, np.float32),
                               np.full(a.shape, g, np.float32),
