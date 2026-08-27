@@ -1,3 +1,11 @@
 cmu-graphics>=2.0.1
 Pillow>=10.0
 numpy>=1.26
+
+# Pulled in by cmu-graphics anyway, but pinned here because the GPU renderer
+# needs three things that arrived in 2.5.2: `pygame.Window`, its
+# `allow_high_dpi` flag, and `Renderer.compose_custom_blend_mode`. Without
+# them lumen/gpu.py cannot start and the game falls back to cmu-graphics'
+# own CPU rasteriser - which works, but gives up native resolution and
+# roughly a third of the frame rate.
+pygame-ce>=2.5.2

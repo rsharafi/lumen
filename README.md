@@ -24,12 +24,20 @@ and all 21 sound effects, are generated at startup from numpy and PIL.
 ./run.sh
 ```
 
-That creates a virtualenv on first launch, installs the three dependencies,
-and starts the game. To do it by hand:
+That creates a virtualenv on first launch, installs the dependencies, and
+starts the game. It picks the newest suitable Python on `PATH`; override with
+`PYTHON=/path/to/python ./run.sh`. To do it by hand:
 
 ```bash
 python3.12 -m venv .venv && .venv/bin/pip install -r requirements.txt && .venv/bin/python main.py
 ```
+
+`pygame-ce` is pinned to 2.5.2 or newer even though `cmu-graphics` pulls it in
+anyway: the GPU renderer needs `pygame.Window`, its `allow_high_dpi` flag, and
+`Renderer.compose_custom_blend_mode`, all of which arrived in that release.
+Without them the game still runs, but falls back to `cmu-graphics`' own CPU
+rasteriser - which gives up native resolution and about two thirds of the
+frame rate.
 
 **Python 3.11–3.14 is required** — `cmu-graphics` 2.x does not support 3.10 or
 earlier, and the system Python on macOS is 3.9. Run it from a real terminal:
