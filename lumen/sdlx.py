@@ -318,6 +318,10 @@ SHADOW_PASSES = 3
 _shadow_fill = (255, 255, 255)
 
 
+def scene_coverage(on):
+    """No spare channel to record it in here; the bleed lands on everything."""
+
+
 def radial_fan(cx, cy, radius, points, color, opacity=100, power=2.4):
     """Not available here; `world` fills the cone with bands instead."""
     return False

@@ -248,6 +248,12 @@ void main() {
         frag = vec4(acc / wsum, 1.0);
     } else if (mode == 3) {
         frag = texture(scene, v_uv);
+    } else if (mode == 6) {
+        // `scene` is the light here and `bloom` is the albedo buffer, whose
+        // alpha says whether a solid thing stands at this pixel.
+        float solid = texture(bloom, v_uv).a;
+        float k = mix(1.0, threshold, clamp(solid, 0.0, 1.0));
+        frag = vec4(texture(scene, v_uv).rgb * bloom_amount * k, 1.0);
     } else if (mode == 5) {
         // Surface relief. The normal buffer holds the slope of the stone;
         // this works out how much more or less light a facet takes than the
@@ -1016,7 +1022,42 @@ def begin_scene(background):
     _use('scene')
     set_mode(NORMAL)
     r, g, b = background
-    _ctx.clear(r / 255.0, g / 255.0, b / 255.0, 1.0)
+    # Alpha starts at nothing and is used as a coverage mask - see
+    # `scene_coverage`. It is not the scene's opacity; the scene is opaque.
+    # The mask has to be opened before the clear or the alpha the last frame
+    # left behind survives into this one and never resets.
+    scene_coverage(True)
+    _ctx.clear(r / 255.0, g / 255.0, b / 255.0, 0.0)
+    scene_coverage(False)
+
+
+def scene_coverage(on):
+    """Whether what is drawn next counts as a solid thing standing in the room.
+
+    The lit floor is mostly not floor. Measured in a lit pool, two thirds of
+    what you see there is the light added over the stone rather than the stone
+    itself - which is the point of that term, and why a lit floor reads as lit
+    instead of merely visible. The trouble is that the same amount is added
+    over everything else too, and a figure whose whole design is a near-black
+    silhouette has almost no albedo of its own to compete with it. It comes
+    out as a warm haze in the shape of a person, with the floor's carving
+    still legible through it.
+
+    So the scene buffer's alpha, which nothing else was using, records whether
+    a solid thing was drawn at each pixel. The stone layers leave it alone;
+    people, walls' furniture and projectiles set it; and the composite holds
+    the added light back where it is set. Everything keeps its own light.
+    """
+    if _ctx is None or not _targets:
+        return
+    flush()
+    fbo = _targets['scene'][1]
+    fbo.color_mask = (True, True, True, bool(on))
+    # moderngl applies a colour mask when the framebuffer is bound, not when
+    # it is set - verified: setting it and drawing without rebinding writes
+    # alpha anyway. Rebinding is what makes it take.
+    if _target_name == 'scene':
+        fbo.use()
 
 
 def begin_light():
@@ -1094,7 +1135,7 @@ def composite(bloom=0.0, bleed=0.0, dither=None):
     _blit_target('scene', REPLACE, _albedo_gain, size)
     _blit_target('light', MOD, 1.0, size)
     if bleed > 0.0:
-        _blit_target('light', ADD, bleed, size)
+        _bleed_pass(bleed, size)
 
     if bloom > 0.0:
         _bloom_chain()
@@ -1103,6 +1144,31 @@ def composite(bloom=0.0, bleed=0.0, dither=None):
     else:
         _use(None)
         _post(scene='final', bloom='final', mode=0, amount=0.0)
+
+
+# What share of the added light still lands on a solid thing. Not zero: a
+# figure standing in the middle of a lit room is in that light too, and
+# cutting it out entirely puts a hole in the pool in the shape of the player.
+BLEED_ON_SOLIDS = 0.30
+
+
+def _bleed_pass(amount, size):
+    """Add the light over the room, but not over what is standing in it."""
+    flush()
+    _ctx.blend_equation = _ctx.FUNC_ADD
+    _ctx.blend_func = (_ctx.ONE, _ctx.ONE)
+    _targets['light'][0].use(0)
+    _targets['scene'][0].use(1)
+    _set('scene', 0)
+    _set('bloom', 1)
+    _set('mode', 6)
+    _set('bloom_amount', amount)
+    _set('threshold', BLEED_ON_SOLIDS)
+    _set('exposure', _EXPOSURE)
+    _set('texel', (0.0, 0.0))
+    _set('dither', 0.0)
+    _quad_vao.render(vertices=3)
+    _apply_blend()
 
 
 def _post(scene, bloom, mode, amount=0.0, threshold=1.0, texel=(0.0, 0.0)):

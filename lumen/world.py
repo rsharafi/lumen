@@ -663,6 +663,12 @@ class World:
     # like corrugated iron; none of it is the flat pool this replaces.
     RELIEF = 0.45
 
+    # The rift's own light. Cold, so it reads against the lantern at a
+    # glance, and far-reaching, because its whole job is to be findable.
+    RIFT_LIGHT = (122, 190, 255)
+    RIFT_LIGHT_RADIUS = 300.0
+    RIFT_LIGHT_STRENGTH = 54.0
+
     def draw(self, app):
         if self.deferred and gpu.lighting_ready():
             self._draw_lit(app)
@@ -686,10 +692,16 @@ class World:
 
         # ---- what is there ------------------------------------------------
         gpu.begin_scene(palette.VOID_RGB)
+        # The room itself. It takes the added light in full, because that
+        # light is in the air above it and this is what it lands on.
         drawImage(lv.floor_image, -ox, -oy)
         self._draw_rift(ox, oy)
         self.pickups.draw(ox, oy, self.view_w, self.view_h)
         drawImage(lv.wall_image, -ox, -oy)
+        # Everything from here on is a thing standing in the room rather than
+        # the room, and is marked as such so the added light does not wash it
+        # out. See `gpu.scene_coverage`.
+        gpu.scene_coverage(True)
         self._draw_braziers(ox, oy)
 
         for e in self.enemies:
@@ -709,6 +721,7 @@ class World:
         self.projectiles.draw(ox, oy, self.view_w, self.view_h)
         self.particles.draw(ox, oy, self.view_w, self.view_h)
 
+        gpu.scene_coverage(False)
         gpu.amplify_scene(self.ALBEDO_GAIN)
 
         # ---- what shape the surfaces are ----------------------------------
@@ -764,6 +777,24 @@ class World:
         notice against the lantern's own.
         """
         gpu.set_mode(gpu.ADD)
+        # The way down. It was drawn into the albedo only, which means it was
+        # lit rather than lighting - and since it opens across the chamber
+        # from wherever the fight ended, it sat in the dark and could not be
+        # found without walking into it. As a light it announces itself from
+        # the far side of the room, and cold against the lantern's warmth,
+        # which is the one colour in the game that means somewhere to go.
+        rift = self.rift
+        if rift is not None and rift.open_t > 0.01:
+            sx, sy = rift.x - ox, rift.y - oy
+            if (-self.RIFT_LIGHT_RADIUS < sx < self.view_w + self.RIFT_LIGHT_RADIUS
+                    and -self.RIFT_LIGHT_RADIUS < sy
+                    < self.view_h + self.RIFT_LIGHT_RADIUS):
+                t = ease_out_cubic(rift.open_t)
+                breathe = 0.84 + 0.16 * math.sin(self.run_time * 2.1)
+                art.draw_glow(self.RIFT_LIGHT, sx, sy,
+                              self.RIFT_LIGHT_RADIUS * t * breathe,
+                              clamp(self.RIFT_LIGHT_STRENGTH * t * breathe,
+                                    0, 100), power=2.0)
         for b in self.level.braziers:
             if not b.lit:
                 continue

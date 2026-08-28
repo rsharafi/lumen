@@ -428,6 +428,13 @@ def _ensure_connected(level, rng):
 # --------------------------------------------------------------------------
 # Floor baking
 # --------------------------------------------------------------------------
+# How much of the wall tile's brightness survives into the level image.
+# The tops used to be at 0.34 of it, which is darker than the floor
+# beside them, and is why they read as black shapes however much light
+# landed on them.
+WALL_ALBEDO = 0.50
+
+
 def _bake_layers(level, rng, seed):
     """Bake the chamber into two images: floor beneath the light, walls above.
 
@@ -538,21 +545,35 @@ def _bake_layers(level, rng, seed):
         for tx in range(0, w, wall_px):
             body.paste(wall_tex, (tx, ty))
 
-    pixels = np.asarray(body, dtype=np.float32) * 0.34
+    # Bright enough that the top of a wall is a surface you can see rather
+    # than a black shape with a lit line on its near edge.
+    pixels = np.asarray(body, dtype=np.float32) * WALL_ALBEDO
     body = Image.fromarray(np.clip(pixels, 0, 255).astype(np.uint8), 'RGB')
 
+    # A wall is a block of stone with a top, not a rectangle with a border
+    # drawn round it. What sells that is the arris: the outer face falls away
+    # into shadow, and a narrow chamfer just inside the top edge catches the
+    # light. Drawn per wall rather than in the tile, because it belongs to the
+    # block's own edges and not to the courses running through it.
     wdraw = ImageDraw.Draw(body, 'RGBA')
-    edge = max(1, int(round(q(2))))
-    base = max(1, int(round(q(3))))
+    rim = max(1, int(round(q(1.5))))
+    cham = max(1, int(round(q(4.0))))
+    base = max(2, int(round(q(5.0))))
     for rc in level.rects:
-        wdraw.rectangle([q(rc.x), q(rc.y), q(rc.right) - 1, q(rc.bottom) - 1],
-                        outline=(3, 5, 10, 255), width=edge)
-        wdraw.line([(q(rc.x) + edge, q(rc.y) + edge),
-                    (q(rc.right) - edge - 1, q(rc.y) + edge)],
-                   fill=(40, 52, 76, 200), width=edge)
-        wdraw.line([(q(rc.x) + edge, q(rc.bottom) - base - 1),
-                    (q(rc.right) - edge - 1, q(rc.bottom) - base - 1)],
-                   fill=(2, 3, 7, 235), width=base)
+        x0, y0 = q(rc.x), q(rc.y)
+        x1, y1 = q(rc.right) - 1, q(rc.bottom) - 1
+        # The chamfer, brightest along the top where a top-down view sees
+        # most of it, fading down the sides.
+        for i in range(cham):
+            f = 1.0 - i / max(1.0, cham - 1.0)
+            wdraw.rectangle([x0 + rim + i, y0 + rim + i,
+                             x1 - rim - i, y1 - rim - i],
+                            outline=(74, 88, 118, int(30 + 84 * f * f)),
+                            width=1)
+        # Where the wall meets the floor: its own face, always unlit.
+        wdraw.rectangle([x0, y1 - base, x1, y1], fill=(3, 4, 9, 236))
+        # And a hard outer rim so one block reads as separate from the next.
+        wdraw.rectangle([x0, y0, x1, y1], outline=(2, 3, 8, 255), width=rim)
 
     mask = Image.new('L', (w, h), 0)
     mdraw = ImageDraw.Draw(mask)

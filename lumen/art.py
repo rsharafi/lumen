@@ -865,21 +865,74 @@ def floor_tile(seed, size=256):
 
 
 def wall_tile(seed, size=128):
-    """A seamless tile for wall tops - lighter and coarser than the floor."""
+    """A seamless tile for wall tops: courses of laid stone, not a noise field.
+
+    What was here before was two octaves of fbm and nothing else, so a wall
+    came out as an evenly speckled slab with a line drawn round it - which is
+    what made a room read as a set of cardboard boxes rather than as masonry.
+    Stone laid by hand has courses, staggered joints, and blocks that differ
+    from their neighbours, and it is those three things the eye uses to tell
+    stone from paper.
+
+    Each block also gets a lit top arris and a shaded bottom one. That reads
+    as relief by itself, and it feeds `normal_map`, so the lantern rakes
+    across the individual stones as the player walks past them.
+    """
     seed = int(seed) % WALL_TILE_VARIANTS
     key = ('walltile', seed, size)
     hit = _pil_cache.get(key)
     if hit is not None:
         return hit
-    size = px(size)
+    n = px(size)
     rng = np.random.default_rng(seed)
-    base = noise.fbm(size, size, 3, 4, rng, tileable=True)
-    grit = noise.fbm(size, size, 3, 18, rng, tileable=True)
-    v = 0.45 * base + 0.55 * grit
-    out = np.empty((size, size, 4), np.uint8)
-    out[..., 0] = np.clip(48.0 + v * 46.0, 0, 255).astype(np.uint8)
-    out[..., 1] = np.clip(58.0 + v * 52.0, 0, 255).astype(np.uint8)
-    out[..., 2] = np.clip(80.0 + v * 62.0, 0, 255).astype(np.uint8)
+
+    # Both counts must be even, or the half-block stagger does not line up
+    # with itself across the seam and the courses jog where tiles meet.
+    rows, cols = 6, 4
+    ch, cw = n / rows, n / cols
+    yy, xx = np.mgrid[0:n, 0:n].astype(np.float32)
+    row = np.floor(yy / ch)
+    stagger = (row % 2.0) * (cw * 0.5)
+    sx = np.mod(xx + stagger, float(n))
+    col = np.floor(sx / cw)
+
+    # Position within a block, 0..1 on each axis.
+    fy = np.mod(yy / ch, 1.0)
+    fx = np.mod(sx / cw, 1.0)
+
+    # A per-block value that is stable for the block and unrelated to its
+    # neighbours, so no two beside each other read as the same stone.
+    h = np.mod(row * 131.0 + col * 977.0, 1013.0)
+    tone = np.mod(h * 0.61803399, 1.0) - 0.5
+
+    base = noise.fbm(n, n, 3, 4, rng, tileable=True)
+    grit = noise.fbm(n, n, 4, 22, rng, tileable=True)
+    v = 0.40 * base + 0.60 * grit
+
+    joint_y = ch * 0.055 / ch          # mortar, as a fraction of a block
+    joint_x = cw * 0.055 / cw
+    mortar = np.minimum(np.minimum(fy / joint_y, (1.0 - fy) / joint_y),
+                        np.minimum(fx / joint_x, (1.0 - fx) / joint_x))
+    mortar = np.clip(mortar, 0.0, 1.0)          # 0 in the joint, 1 in the face
+
+    # The arrises: bright where the stone turns up into the light, dark where
+    # it turns away. Narrow, or the blocks look inflated rather than cut.
+    lip = np.clip(1.0 - (fy - joint_y) / 0.20, 0.0, 1.0) * (fy > joint_y)
+    heel = np.clip((fy - 0.80) / 0.20, 0.0, 1.0)
+
+    shade = (0.50 + 0.34 * v                     # the stone's own mottling
+             + 0.30 * tone                       # this block against the next
+             + 0.30 * lip - 0.30 * heel)         # cut edges
+    shade = shade * (0.34 + 0.66 * mortar)       # sink the joints
+    shade = np.clip(shade, 0.0, 1.35)
+
+    out = np.empty((n, n, 4), np.uint8)
+    # Cooler in the joints, warmer on the faces, which is what damp stone
+    # does and what keeps a wall from being one flat hue.
+    warm = 0.35 + 0.65 * mortar
+    out[..., 0] = np.clip(30.0 + shade * 84.0 * (0.82 + 0.30 * warm), 0, 255)
+    out[..., 1] = np.clip(38.0 + shade * 88.0 * (0.86 + 0.22 * warm), 0, 255)
+    out[..., 2] = np.clip(54.0 + shade * 92.0, 0, 255)
     out[..., 3] = 255
     img = Image.fromarray(out, 'RGBA')
     _pil_cache[key] = img
