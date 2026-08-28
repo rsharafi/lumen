@@ -259,6 +259,34 @@ class Game:
         if not self.fullscreen and runtime.own_window() is not None:
             self.windowed_size = tuple(runtime.own_window().size)
 
+    def ensure_display(self, app):
+        """One-time display setup, done once whichever host gets here first.
+
+        Under cmu-graphics this cannot run from `onAppStart`: there is no
+        display surface until the framework's loop has started, so the first
+        `step` triggers it. The native host owns its loop and calls this
+        before entering it, which is also what lets it check that a renderer
+        actually came up.
+        """
+        if self._blit_checked:
+            return
+        self._blit_checked = True
+        verbose = bool(os.environ.get('LUMEN_DEBUG'))
+        # Ask before the takeover: the framework's window is still up, and
+        # that is the one query that needs a window of its own.
+        self._match_display_rate(app, verbose)
+        self._take_over_window(app, verbose)
+        if not gpu.active():
+            # Both of these tune cmu-graphics' own present path, which the
+            # GPU backend replaces outright.
+            runtime.enable(verbose=verbose)
+            runtime.enable_adaptive_wait(verbose=verbose)
+        try:
+            import pygame
+            pygame.mouse.set_visible(False)
+        except Exception:
+            pass
+
     def _take_over_window(self, app, verbose=False):
         """Replace the framework's window with a high-DPI one.
 
@@ -439,25 +467,7 @@ class Game:
         self.t += dt
         self.frames += 1
 
-        if not self._blit_checked:
-            # The display surface only exists once the framework's loop has
-            # started, so this cannot run from onAppStart.
-            self._blit_checked = True
-            verbose = bool(os.environ.get('LUMEN_DEBUG'))
-            # Ask before the takeover: the framework's window is still up, and
-            # that is the one query that needs a window of its own.
-            self._match_display_rate(app, verbose)
-            self._take_over_window(app, verbose)
-            if not gpu.active():
-                # Both of these tune cmu-graphics' own present path, which the
-                # GPU backend replaces outright.
-                runtime.enable(verbose=verbose)
-                runtime.enable_adaptive_wait(verbose=verbose)
-            try:
-                import pygame
-                pygame.mouse.set_visible(False)
-            except Exception:
-                pass
+        self.ensure_display(app)
         if self.selftest_frames and dt_arg is None:
             self._frame_marks.append(now)
         if (self.selftest_frames and dt_arg is None

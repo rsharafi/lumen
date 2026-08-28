@@ -31,4 +31,40 @@ if [ ! -d .venv ]; then
     ./.venv/bin/pip install --quiet -r requirements.txt
 fi
 
-exec ./.venv/bin/python main.py "$@"
+# Two independent choices: which loop hosts the game, and what draws it.
+# Defaults are unchanged - cmu-graphics hosting, SDL's renderer drawing.
+ENTRY=main.py
+PASS=""
+for arg in "$@"; do
+    case "$arg" in
+        --native)  ENTRY=native.py ;;
+        --cmu)     ENTRY=main.py ;;
+        --gl)      ENTRY=native.py; export LUMEN_RENDERER=gl ;;
+        --sdl)     export LUMEN_RENDERER=gpu ;;
+        --cpu)     ENTRY=main.py; export LUMEN_RENDERER=cpu ;;
+        --help|-h)
+            cat <<'USAGE'
+LUMEN
+
+  ./run.sh                 cmu-graphics hosting it, SDL drawing  (default)
+  ./run.sh --native        our own loop, SDL drawing
+  ./run.sh --gl            our own loop, OpenGL drawing (shaders, HDR)
+  ./run.sh --cpu           cmu-graphics hosting *and* drawing (the original)
+
+  --cmu / --native pick the host, --cpu / --sdl / --gl pick the renderer.
+  Anything else is passed through. The same choices are available directly:
+
+      LUMEN_RENDERER=gl python native.py
+
+  In game, the DISPLAY row on the title screen changes resolution and
+  VISUALS switches between the lit pipeline and the original look. Those
+  are settings; the host and renderer are chosen at launch, because the
+  renderer binds at import.
+USAGE
+            exit 0 ;;
+        *) PASS="$PASS $arg" ;;
+    esac
+done
+
+echo "LUMEN: $ENTRY, renderer=${LUMEN_RENDERER:-gpu}" >&2
+exec ./.venv/bin/python "$ENTRY" $PASS

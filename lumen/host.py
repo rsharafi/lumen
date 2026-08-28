@@ -137,6 +137,9 @@ def run(game, width, height, title='LUMEN'):
     pygame.init()
     app = NativeApp(width, height, title)
     game.start(app)
+    # The window and renderer come up here rather than on the first tick, so
+    # that the check below is meaningful.
+    game.ensure_display(app)
 
     if not gpu.active():
         # `LUMEN_RENDERER=cpu` asks for cmu-graphics' own rasteriser, and that
