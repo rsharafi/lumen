@@ -2,6 +2,12 @@
 
 Run with:  python main.py
 
+pip install pillow
+
+pip install numpy
+
+pip install cmu-graphics
+
 A top-down roguelite built on the CMU CS Academy graphics library, with
 real-time 2D shadowcasting, procedurally generated chambers, procedurally
 generated art, and procedurally synthesised sound. No asset files.
