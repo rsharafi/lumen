@@ -364,15 +364,25 @@ def _push_solid_tri(a, b, c, col):
         _solid.extend((x, y, r, g, bl, al))
 
 
-def _push_tex_quad(tex, corners, col):
+def _push_tex_quad(tex, corners, col, flip_v=False):
+    """A textured quad. `flip_v` is for sampling a render target.
+
+    A sprite and a render target do not agree on which way up they are. A
+    sprite is uploaded with its first row first, and GL calls that row v=0, so
+    mapping v=0 to the top of the quad draws it the right way up. A target is
+    *rendered into* through this same shader, which puts screen-y 0 at the top
+    of the viewport - and the top of the viewport is v=1. Sampling it with the
+    sprite convention therefore draws the world upside down.
+    """
     global _tex_current
     if tex is not _tex_current:
         flush()
         _tex_current = tex
     r, g, b, a = col
     (p0, p1, p2, p3) = corners
-    for (x, y), (u, v) in ((p0, (0.0, 0.0)), (p1, (1.0, 0.0)), (p2, (1.0, 1.0)),
-                           (p0, (0.0, 0.0)), (p2, (1.0, 1.0)), (p3, (0.0, 1.0))):
+    v0, v1 = (1.0, 0.0) if flip_v else (0.0, 1.0)
+    for (x, y), (u, v) in ((p0, (0.0, v0)), (p1, (1.0, v0)), (p2, (1.0, v1)),
+                           (p0, (0.0, v0)), (p2, (1.0, v1)), (p3, (0.0, v1))):
         _tex.extend((x, y, u, v, r, g, b, a))
 
 
@@ -704,7 +714,7 @@ def _blit_target(name, mode, tint=1.0, target_size=None):
     set_mode(mode)
     w, h = target_size or _viewport
     _push_tex_quad(tex, ((0, 0), (w, 0), (w, h), (0, h)),
-                   (tint, tint, tint, tint))
+                   (tint, tint, tint, tint), flip_v=True)
     flush()
     set_mode(NORMAL)
 
