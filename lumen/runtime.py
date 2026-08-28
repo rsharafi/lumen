@@ -281,7 +281,15 @@ def _shim_display(pygame):
     def flip():
         if _win is None:
             return real_flip()
-        if _renderer is not None:
+        if gpu.active():
+            # The GPU backend presents its own frames, once, from the hook in
+            # `install_gpu_hooks` or from the native loop. cmu-graphics has a
+            # second caller of `display.flip` - modal.py, for its update and
+            # error dialogs - and letting that reach the renderer presents a
+            # drawable that has already been presented, which Metal does not
+            # warn about but aborts on.
+            return None
+        if _renderer is not None and _texture is not None:
             # Reduced render scale: hand the frame to the GPU and let it do
             # the upscale. Scaling on the CPU costs 4-5 ms at this size, and
             # doing it here costs nothing that is not already being paid.

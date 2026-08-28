@@ -635,8 +635,13 @@ def set_window(window):
 
 
 def present():
+    """Show the frame. Refuses to present one that was not drawn.
+
+    Same reasoning as the SDL backend: more than one thing can reach a
+    present, and showing a buffer nobody drew into is at best a stale frame.
+    """
     global _frame_open
-    if _ctx is None:
+    if _ctx is None or not _frame_open:
         return False
     flush()
     STATS['frames'] += 1

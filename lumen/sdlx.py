@@ -218,8 +218,16 @@ def begin_frame(background):
 
 
 def present():
+    """Show the frame. Refuses to present one that was not drawn.
+
+    Metal aborts - not warns, aborts - if a drawable is presented twice, and
+    more than one thing has historically been able to reach this: the frame
+    hook, the native loop, and cmu-graphics' own `display.flip` by way of a
+    shim. Making a present impossible unless a frame was opened for it closes
+    that off at the single point they all go through.
+    """
     global _frame_open
-    if _renderer is None:
+    if _renderer is None or not _frame_open:
         return False
     _renderer.present()
     _frame_open = False
