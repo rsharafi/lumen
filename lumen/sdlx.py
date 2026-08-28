@@ -318,6 +318,11 @@ SHADOW_PASSES = 3
 _shadow_fill = (255, 255, 255)
 
 
+def glow_points(xs, ys, radii, color, alphas, power=2.0, core=0.0):
+    """Not available here: no analytic glow to batch."""
+    return False
+
+
 def scene_coverage(on):
     """No spare channel to record it in here; the bleed lands on everything."""
 

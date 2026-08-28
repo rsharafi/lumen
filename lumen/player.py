@@ -342,8 +342,10 @@ class Player:
 
         # A near-black silhouette one size up keeps the figure legible
         # against the bright floor right under the lantern.
-        _cloak(sx, sy, ca, sa, self.radius + 6.0, palette.VOID,
-               int(opacity * 0.9))
+        # Full strength. At 90% the floor's carving was legible straight
+        # through the one part of the figure whose whole job is to be a solid
+        # edge against a bright floor.
+        _cloak(sx, sy, ca, sa, self.radius + 6.0, palette.VOID, opacity)
         _cloak(sx, sy, ca, sa, self.radius + 2.5, cloak_color, opacity)
 
         # Torso: a broad wedge pointing along the aim, so facing is readable

@@ -382,6 +382,57 @@ def lantern_glow(color, size=GLOW_BASE):
                               np.full(a.shape, b, np.float32)), a))
 
 
+def scorch(seed, size=110):
+    """A burn left on the floor, as an irregular sooty blotch.
+
+    Two things make a decal look painted on rather than left behind: a round
+    outline, and an edge that stops. This one is a radial falloff pushed
+    around by low-frequency noise, so its outline wanders, and its alpha runs
+    to nothing well before the sprite does.
+    """
+    key = ('scorch', int(seed) % 16, int(size))
+    hit = _cache.get(key)
+    if hit is not None:
+        return hit
+    n = px(size)
+    rng = np.random.default_rng(int(seed) % 16 + 7717)
+    f = noise.radial_falloff(n, 1.0)
+    warp = noise.fbm(n, n, 3, 5, rng, tileable=False)
+    grit = noise.fbm(n, n, 4, 17, rng, tileable=False)
+    # The outline wanders by up to a third of the radius.
+    edge = np.clip(f * (0.72 + 0.55 * warp) - 0.18, 0.0, 1.0)
+    a = np.clip(edge ** 1.5 * (0.55 + 0.65 * grit), 0.0, 1.0) * 0.92
+    v = np.clip(0.18 + 0.42 * grit * edge, 0.0, 1.0)
+    r = np.clip(26.0 + v * 46.0, 0, 255)
+    g = np.clip(20.0 + v * 34.0, 0, 255)
+    b = np.clip(20.0 + v * 30.0, 0, 255)
+    return _store(key, _rgba((r.astype(np.float32), g.astype(np.float32),
+                              b.astype(np.float32)), a.astype(np.float32)))
+
+
+def scorch_normal(seed, size=110):
+    """The same burn as a surface: soot sits in a shallow hollow."""
+    key = ('scorchn', int(seed) % 16, int(size))
+    hit = _cache.get(key)
+    if hit is not None:
+        return hit
+    n = px(size)
+    rng = np.random.default_rng(int(seed) % 16 + 7717)
+    f = noise.radial_falloff(n, 1.0)
+    warp = noise.fbm(n, n, 3, 5, rng, tileable=False)
+    grit = noise.fbm(n, n, 4, 17, rng, tileable=False)
+    edge = np.clip(f * (0.72 + 0.55 * warp) - 0.18, 0.0, 1.0)
+    a = np.clip(edge ** 1.5 * (0.55 + 0.65 * grit), 0.0, 1.0) * 0.92
+    # Height falls into the middle of the burn, so the lantern catches its
+    # far rim and loses its near one, the way a scoop out of stone does.
+    height = np.clip(1.0 - edge * (0.75 + 0.45 * grit), 0.0, 1.0)
+    h255 = (height * 255.0).astype(np.uint8)
+    rgba = np.dstack([h255, h255, h255,
+                      (a * 255.0).astype(np.uint8)])
+    nm = normal_map(Image.fromarray(rgba, 'RGBA'), 1.5)
+    return _store(key, nm)
+
+
 def normal_map(pil, strength=1.0):
     """A surface normal for every pixel, read out of the art's own shading.
 

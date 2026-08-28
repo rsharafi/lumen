@@ -43,7 +43,7 @@ class Brazier:
     """A static light the player can ignite by walking into it."""
 
     __slots__ = ('x', 'y', 'lit', 'flicker', 'ignite_t', 'edges',
-                 'edges_rich')
+                 'edges_rich', 'shape')
 
     def __init__(self, x, y):
         self.x = x
@@ -57,6 +57,9 @@ class Brazier:
         # Which renderer that cache was resolved for; the two forms carry
         # different tuples and the setting can change while it is lit.
         self.edges_rich = False
+        # The polygon its light can actually reach. A brazier and the walls
+        # are both nailed down, so this is cast once and kept.
+        self.shape = None
 
 
 class Level:
@@ -434,6 +437,13 @@ def _ensure_connected(level, rng):
 # landed on them.
 WALL_ALBEDO = 0.50
 
+# How much of each wall's footprint is given over to the side face you can
+# actually see from above, in design units, and which way that face points.
+# The normal is mostly down-screen with a little lift, which is what a
+# vertical surface looks like to a camera hanging over the room.
+WALL_FACE = 19.0
+WALL_FACE_NORMAL = (0.0, 0.90, 0.44)
+
 
 def _bake_layers(level, rng, seed):
     """Bake the chamber into two images: floor beneath the light, walls above.
@@ -550,30 +560,57 @@ def _bake_layers(level, rng, seed):
     pixels = np.asarray(body, dtype=np.float32) * WALL_ALBEDO
     body = Image.fromarray(np.clip(pixels, 0, 255).astype(np.uint8), 'RGB')
 
-    # A wall is a block of stone with a top, not a rectangle with a border
-    # drawn round it. What sells that is the arris: the outer face falls away
-    # into shadow, and a narrow chamfer just inside the top edge catches the
-    # light. Drawn per wall rather than in the tile, because it belongs to the
-    # block's own edges and not to the courses running through it.
+    # A wall is a block of stone, and a block has a side. Seen from above the
+    # only side you can see is the one facing down the screen, so the bottom
+    # of each wall's footprint is given over to it: the top face stops short,
+    # and the band below it is the face falling away to the floor. That band
+    # is what turns a lid into a wall - and because it is given a normal that
+    # points down-screen rather than up, it takes light from a completely
+    # different direction than the top does, so the lantern picks out whichever
+    # faces it happens to be standing in front of.
     wdraw = ImageDraw.Draw(body, 'RGBA')
     rim = max(1, int(round(q(1.5))))
     cham = max(1, int(round(q(4.0))))
-    base = max(2, int(round(q(5.0))))
     for rc in level.rects:
         x0, y0 = q(rc.x), q(rc.y)
         x1, y1 = q(rc.right) - 1, q(rc.bottom) - 1
-        # The chamfer, brightest along the top where a top-down view sees
-        # most of it, fading down the sides.
+        # The arris along the top edge, brightest at the edge itself.
         for i in range(cham):
             f = 1.0 - i / max(1.0, cham - 1.0)
             wdraw.rectangle([x0 + rim + i, y0 + rim + i,
                              x1 - rim - i, y1 - rim - i],
                             outline=(74, 88, 118, int(30 + 84 * f * f)),
                             width=1)
-        # Where the wall meets the floor: its own face, always unlit.
-        wdraw.rectangle([x0, y1 - base, x1, y1], fill=(3, 4, 9, 236))
-        # And a hard outer rim so one block reads as separate from the next.
         wdraw.rectangle([x0, y0, x1, y1], outline=(2, 3, 8, 255), width=rim)
+
+    # ---- the side face ---------------------------------------------------
+    face_px = max(3, int(round(q(WALL_FACE))))
+    arr = np.asarray(body, dtype=np.float32).copy()
+    face_t = np.zeros(arr.shape[:2], np.float32)     # 0 at the top of the face
+    is_face = np.zeros(arr.shape[:2], bool)
+    for rc in level.rects:
+        x0, x1 = int(q(rc.x)), int(q(rc.right))
+        yb = int(q(rc.bottom))
+        yt = max(int(q(rc.y)), yb - face_px)
+        if yb - yt < 2:
+            continue
+        col = np.linspace(0.0, 1.0, yb - yt, dtype=np.float32)[:, None]
+        face_t[yt:yb, x0:x1] = col
+        is_face[yt:yb, x0:x1] = True
+
+    t = face_t[..., None]
+    # Courses running along the face, so it is stone rather than a gradient.
+    yy = np.arange(arr.shape[0], dtype=np.float32)[:, None, None]
+    course = 0.5 + 0.5 * np.cos(yy * (2.0 * np.pi / max(2.0, q(9.0))))
+    lit = np.clip(1.0 - t * 1.35, 0.0, 1.0) ** 1.4        # falls into shadow
+    shade = 0.20 + 0.62 * lit + 0.10 * course * (1.0 - t)
+    faced = arr[..., :3] * shade
+    # The arris where the face meets the top, and the dark line at the floor.
+    faced += 92.0 * np.clip(1.0 - t / 0.10, 0.0, 1.0)
+    faced *= np.clip(0.35 + 0.65 * (1.0 - t) / 0.22, 0.35, 1.0) ** 0.5
+    arr[..., :3] = np.where(is_face[..., None], np.clip(faced, 0, 255),
+                            arr[..., :3])
+    body = Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8), 'RGB')
 
     mask = Image.new('L', (w, h), 0)
     mdraw = ImageDraw.Draw(mask)
@@ -589,8 +626,19 @@ def _bake_layers(level, rng, seed):
     level.wall_image = art.wrap(walls, key_wall)
     # Shallower than the floor: a wall top is dressed stone, and the courses
     # in it are joints rather than the broken surface a floor has.
-    level.wall_normal = art.wrap(art.normal_map(walls, 0.7),
-                                 key_wall + ('normal',))
+    # The top's relief comes out of its own shading, but the face is a
+    # vertical surface and its normal cannot be derived from a picture of it:
+    # it points down the screen, away from the block, and that is what makes
+    # a wall light up when the lantern comes round in front of it.
+    wall_n = np.asarray(art.normal_map(walls, 0.7), dtype=np.float32).copy()
+    fn = np.array(WALL_FACE_NORMAL, dtype=np.float32)
+    fn = fn / np.linalg.norm(fn)
+    for i in range(3):
+        wall_n[..., i] = np.where(is_face, fn[i] * 127.5 + 127.5,
+                                  wall_n[..., i])
+    level.wall_normal = art.wrap(
+        Image.fromarray(np.clip(wall_n, 0, 255).astype(np.uint8), 'RGBA'),
+        key_wall + ('normal',))
 
     _bake_minimap(level, seed)
 

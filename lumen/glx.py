@@ -196,6 +196,7 @@ void main() { gl_Position = vec4(in_pos, 0.0, 1.0); v_uv = in_uv; }
 _POST_FS = '''#version 330
 uniform sampler2D scene;
 uniform sampler2D bloom;
+uniform sampler2D extra;      // the anamorphic streak, at the tone map
 uniform float bloom_amount;
 uniform float exposure;
 uniform int mode;          // 0 tone map, 1 bright, 2 blur, 3 copy, 4 shadow
@@ -206,6 +207,11 @@ uniform vec2 light_xy;     // key light, in this target's pixels
 uniform float light_h;     // and how far above the floor it hangs
 uniform float relief;      // how much of the surface slope to believe
 uniform vec2 target_px;
+uniform float streak_amount;
+uniform vec3 streak_tint;
+uniform vec3 grade_shadow;    // what the bottom of the range is tinted toward
+uniform vec3 grade_high;      // and the top
+uniform float saturation;
 in vec2 v_uv;
 out vec4 frag;
 
@@ -248,6 +254,35 @@ void main() {
         frag = vec4(acc / wsum, 1.0);
     } else if (mode == 3) {
         frag = texture(scene, v_uv);
+    } else if (mode == 7) {
+        // A tent, for folding a small bloom level back into a larger one. A
+        // straight bilinear blit leaves the box the hardware sampled with;
+        // nine taps in a 3x3 tent is the standard fix and costs nothing at
+        // these sizes.
+        vec3 acc = texture(scene, v_uv).rgb * 4.0;
+        acc += texture(scene, v_uv + vec2(texel.x, 0.0)).rgb * 2.0;
+        acc += texture(scene, v_uv - vec2(texel.x, 0.0)).rgb * 2.0;
+        acc += texture(scene, v_uv + vec2(0.0, texel.y)).rgb * 2.0;
+        acc += texture(scene, v_uv - vec2(0.0, texel.y)).rgb * 2.0;
+        acc += texture(scene, v_uv + texel).rgb;
+        acc += texture(scene, v_uv - texel).rgb;
+        acc += texture(scene, v_uv + vec2(texel.x, -texel.y)).rgb;
+        acc += texture(scene, v_uv + vec2(-texel.x, texel.y)).rgb;
+        frag = vec4(acc / 16.0, 1.0);
+    } else if (mode == 8) {
+        // The streak: a long blur on one axis only. A lantern carried in the
+        // dark is the brightest thing on screen by a wide margin, and a lens
+        // in front of it would smear it sideways; without this the bloom is
+        // a symmetric halo, which reads as a glow effect rather than as a
+        // very bright object being looked at.
+        vec3 acc = vec3(0.0);
+        float wsum = 0.0;
+        for (int i = -12; i <= 12; ++i) {
+            float w = exp(-float(i * i) * 0.022);
+            acc += texture(scene, v_uv + vec2(float(i) * texel.x, 0.0)).rgb * w;
+            wsum += w;
+        }
+        frag = vec4(acc / wsum, 1.0);
     } else if (mode == 6) {
         // `scene` is the light here and `bloom` is the albedo buffer, whose
         // alpha says whether a solid thing stands at this pixel.
@@ -289,7 +324,16 @@ void main() {
     } else {
         vec3 c = texture(scene, v_uv).rgb;
         c += texture(bloom, v_uv).rgb * bloom_amount;
+        c += texture(extra, v_uv).rgb * streak_amount * streak_tint;
         vec3 col = tonemap(c);
+        // Grade. Split-toning the ends of the range against each other is
+        // what gives a picture a temperature rather than a tint: the dark of
+        // this game goes further blue, the lantern's own light further amber,
+        // and the distance between them is the whole mood.
+        float l = dot(col, vec3(0.2126, 0.7152, 0.0722));
+        col = mix(vec3(l), col, saturation);
+        col *= mix(grade_shadow, grade_high, smoothstep(0.0, 0.72, l));
+        col = clamp(col, 0.0, 1.0);
         // Everything up to here is float, and none of it bands. The screen
         // is not: it takes eight bits, and the lantern's falloff crosses a
         // level every few pixels near its reach, which is exactly the
@@ -369,7 +413,9 @@ def attach(context):
         _tex_prog, [(_tex_vbo, '2f 2f 4f', 'in_pos', 'in_uv', 'in_col')])
     _glow_prog = context.program(vertex_shader=_GLOW_VS,
                                  fragment_shader=_GLOW_FS)
-    _glow_vbo = context.buffer(reserve=11 * 4 * 6 * 512)
+    # Sized for the dust field, which is the only thing that fills it:
+    # thousands of points, six vertices each.
+    _glow_vbo = context.buffer(reserve=11 * 4 * 6 * 12000)
     _glow_vao = context.vertex_array(
         _glow_prog, [(_glow_vbo, '2f 2f 4f 3f',
                       'in_pos', 'in_local', 'in_col', 'in_shape')])
@@ -637,6 +683,58 @@ def radial_fan(cx, cy, radius, points, color, opacity=100, power=2.4):
         flush()
 
 
+def glow_points(xs, ys, radii, color, alphas, power=2.0, core=0.0):
+    """Thousands of small lights in one call.
+
+    `radial_glow` is fine for the handful of lights a chamber has, but a
+    Python-level call per mote is the whole cost when there are two thousand
+    of them. The vertex data is built with numpy here and handed to the batch
+    as bytes, which is the same trick the draw batches use on the arrays they
+    already keep.
+    """
+    if _ctx is None or len(xs) == 0:
+        return
+    x = np.asarray(xs, dtype=np.float32)
+    y = np.asarray(ys, dtype=np.float32)
+    r = np.asarray(radii, dtype=np.float32)
+    a = np.clip(np.asarray(alphas, dtype=np.float32), 0.0, 1.0)
+    keep = (r > 0.35) & (a > 0.004)
+    if not keep.any():
+        return
+    x, y, r, a = x[keep], y[keep], r[keep], a[keep]
+    n = x.size
+    cr, cg, cb = (c / 255.0 for c in color[:3])
+
+    # Two triangles per point: corners in the order (0,1,2) and (0,2,3).
+    sx = np.array([-1.0, 1.0, 1.0, -1.0, -1.0, 1.0], dtype=np.float32)
+    sy = np.array([-1.0, -1.0, 1.0, 1.0, -1.0, 1.0], dtype=np.float32)
+    order = np.array([0, 1, 2, 0, 2, 3])
+    lx = sx[order][None, :]
+    ly = sy[order][None, :]
+
+    v = np.empty((n, 6, 11), dtype=np.float32)
+    v[:, :, 0] = x[:, None] + lx * r[:, None]
+    v[:, :, 1] = y[:, None] + ly * r[:, None]
+    v[:, :, 2] = lx
+    v[:, :, 3] = ly
+    v[:, :, 4] = cr
+    v[:, :, 5] = cg
+    v[:, :, 6] = cb
+    v[:, :, 7] = a[:, None]
+    v[:, :, 8] = POWER_PROFILE
+    v[:, :, 9] = power
+    v[:, :, 10] = core
+    if len(_glow):
+        flush()
+    # One buffer write is the point of this call, but the buffer has a size;
+    # anything past it goes in a second pass rather than being dropped.
+    cap = 12000
+    for lo in range(0, n, cap):
+        del _glow[:]
+        _glow.frombytes(v[lo:lo + cap].tobytes())
+        flush()
+
+
 # --------------------------------------------------------------------------
 # Shadow coverage
 # --------------------------------------------------------------------------
@@ -739,18 +837,19 @@ def begin_normal():
     return True
 
 
-def apply_relief(light_x, light_y, height, strength):
+def apply_relief(light_x, light_y, height, strength, target='scene'):
     """Fold the stone's own relief into the light buffer.
 
-    Runs before the composite, so both the multiply and the bleed see the same
-    lit surface. The key light is the lantern: it is the only light bright
-    enough for a facet turned away from it to read as shadowed, and doing this
-    per light would mean a pass and a buffer each.
+    Applied to the albedo, between the stone going down and anything standing
+    on it. `albedo * ratio * light` and `albedo * (light * ratio)` are the
+    same product, so the stone is lit identically either way - but done here,
+    the floor's own courses cannot be printed across the face of whatever is
+    standing on the floor, which is what putting it in the light buffer did.
     """
     if _ctx is None or not _targets or strength <= 0.0:
         return
     flush()
-    _use('light')
+    _use(target)
     _ctx.blend_equation = _ctx.FUNC_ADD
     _ctx.blend_func = (_ctx.ZERO, _ctx.SRC_COLOR)
     tex = _targets['normal'][0]
@@ -931,6 +1030,10 @@ def lighting_ready(size=None):
             tex.filter = (_ctx.LINEAR, _ctx.LINEAR)
             made[name] = (tex, _ctx.framebuffer(color_attachments=[tex]))
         w, h = size
+        sw, sh = max(8, size[0] // 4), max(8, size[1] // 4)
+        stex = _ctx.texture((sw, sh), 4, dtype='f2')
+        stex.filter = (_ctx.LINEAR, _ctx.LINEAR)
+        made['streak'] = (stex, _ctx.framebuffer(color_attachments=[stex]))
         for i in range(BLOOM_LEVELS):
             w, h = max(4, w // 2), max(4, h // 2)
             tex = _ctx.texture((w, h), 4, dtype='f2')
@@ -1139,8 +1242,10 @@ def composite(bloom=0.0, bleed=0.0, dither=None):
 
     if bloom > 0.0:
         _bloom_chain()
+        _streak_pass()
         _use(None)
-        _post(scene='final', bloom='bloom0', mode=0, amount=bloom)
+        _post(scene='final', bloom='bloom0', mode=0, amount=bloom,
+              streak=STREAK)
     else:
         _use(None)
         _post(scene='final', bloom='final', mode=0, amount=0.0)
@@ -1149,7 +1254,7 @@ def composite(bloom=0.0, bleed=0.0, dither=None):
 # What share of the added light still lands on a solid thing. Not zero: a
 # figure standing in the middle of a lit room is in that light too, and
 # cutting it out entirely puts a hole in the pool in the shape of the player.
-BLEED_ON_SOLIDS = 0.30
+BLEED_ON_SOLIDS = 0.10
 
 
 def _bleed_pass(amount, size):
@@ -1171,20 +1276,46 @@ def _bleed_pass(amount, size):
     _apply_blend()
 
 
-def _post(scene, bloom, mode, amount=0.0, threshold=1.0, texel=(0.0, 0.0)):
+def _streak_pass():
+    """Smear the bright pass sideways, twice, for the lens streak."""
+    tex, fbo = _targets['streak']
+    src = _targets['bloom0'][0]
+    fbo.use()
+    _viewport_set(tex.size)
+    _ctx.clear(0.0, 0.0, 0.0, 1.0)
+    _post(scene='bloom0', bloom='bloom0', mode=8,
+          texel=(1.6 / src.size[0], 0.0))
+    # A second, wider pass over the result: two cheap blurs reach much
+    # further than one, which is what makes a streak a streak.
+    _post(scene='streak', bloom='streak', mode=8,
+          texel=(5.0 / tex.size[0], 0.0))
+
+
+def _post(scene, bloom, mode, amount=0.0, threshold=1.0, texel=(0.0, 0.0),
+          streak=0.0, additive=False):
     flush()
     _ctx.blend_equation = _ctx.FUNC_ADD
-    _ctx.blend_func = (_ctx.ONE, _ctx.ZERO)
+    # Most passes own their target outright; folding a bloom level back into
+    # a bigger one has to add to what is already there.
+    _ctx.blend_func = ((_ctx.ONE, _ctx.ONE) if additive
+                       else (_ctx.ONE, _ctx.ZERO))
     _targets[scene][0].use(0)
     _targets[bloom][0].use(1)
+    _targets['streak'][0].use(2)
     _post_prog['scene'].value = 0
     _post_prog['bloom'].value = 1
+    _set('extra', 2)
     _post_prog['mode'].value = mode
     _post_prog['bloom_amount'].value = amount
     _post_prog['exposure'].value = _EXPOSURE
     _post_prog['threshold'].value = threshold
     _post_prog['texel'].value = texel
     _post_prog['dither'].value = _DITHER
+    _set('streak_amount', streak)
+    _set('streak_tint', STREAK_TINT)
+    _set('grade_shadow', GRADE_SHADOW)
+    _set('grade_high', GRADE_HIGH)
+    _set('saturation', SATURATION)
     _quad_vao.render(vertices=3)
     _apply_blend()
 
@@ -1197,6 +1328,16 @@ _BLOOM_THRESHOLD = 0.75
 # level is 1/255; a touch over half that either side is enough to destroy a
 # contour without being visible as grain.
 _DITHER = 0.6 / 255.0
+
+# The grade. Shadows toward slate, highlights toward the lantern's amber, and
+# a touch under full saturation so nothing in the palette shouts.
+GRADE_SHADOW = (0.86, 0.94, 1.12)
+GRADE_HIGH = (1.06, 1.00, 0.93)
+SATURATION = 0.94
+
+# The anamorphic streak: how much of it reaches the picture, and its colour.
+STREAK = 0.5
+STREAK_TINT = (1.0, 0.86, 0.66)
 
 
 def _bloom_chain():
@@ -1219,7 +1360,9 @@ def _bloom_chain():
         tex, fbo = _targets['bloom0']
         fbo.use()
         _viewport_set(tex.size)
-        _blit_target(f'bloom{i}', ADD, 1.0, tex.size)
+        src = _targets[f'bloom{i}'][0]
+        _post(scene=f'bloom{i}', bloom=f'bloom{i}', mode=7, additive=True,
+              texel=(1.0 / src.size[0], 1.0 / src.size[1]))
 
 
 def _viewport_set(size):

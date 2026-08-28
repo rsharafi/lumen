@@ -12,6 +12,7 @@ import os
 from . import draw, gpu
 from .draw import drawImage, drawLine, drawPolygon
 
+from . import motes as motes_mod
 from . import (art, audio, boss, enemies as enemy_mod, flow as flow_mod,
                level as level_mod, lighting, palette,
                particles as particle_mod, pickups as pickup_mod,
@@ -42,6 +43,8 @@ class Rift:
         self.open_t = 0.0
         self.hold = 0.0
         self.entered = False
+        # What its light can reach, cast once - it does not move either.
+        self.shape = None
 
 
 class World:
@@ -82,10 +85,16 @@ class World:
         self.light_radius = 0.0
         self.last_wedges = 0
         self.last_edges = 0
+        self.last_motes = 0
+        # Marks a fight leaves on the floor. Bounded, oldest first out: a
+        # long fight in one room should not end up drawing a hundred sprites
+        # over the same square metre.
+        self.decals = []
         self.hunt_timer = 0.0
         self.banner = ''
         self.banner_t = 0.0
 
+        self.motes = motes_mod.Motes(fxrng, view_w, view_h)
         self.overlay = art.screen_overlay(view_w, view_h, 0.94, 0.6, 0.05,
                                           0.1, 4)
         # Set by `Game` from the player's settings.
@@ -104,6 +113,7 @@ class World:
             self.camera.snap_to(self.player.x, self.player.y)
         self.overlay = art.screen_overlay(view_w, view_h, 0.94, 0.6, 0.05,
                                           0.1, 4)
+        self.motes.resize(view_w, view_h)
         # A resize that changed the render scale emptied the sprite cache, so
         # every lantern size has to be baked again here. Leaving it to the
         # first frame that needs one costs a 4-7 ms rasterisation mid-frame.
@@ -252,14 +262,40 @@ class World:
             self.pickups.spawn(pickup_mod.HEART, enemy.x, enemy.y, 18, self.rng,
                                count=3, speed=(90, 220))
             audio.play_at('boom', enemy.x, enemy.y, 1.0)
+            self.add_decal(enemy.x, enemy.y, 1.6)
         else:
             audio.play_at('kill', enemy.x, enemy.y, 0.4)
+            if self.rng.chance(0.34):
+                self.add_decal(enemy.x, enemy.y, 0.72)
+
+    def add_decal(self, x, y, scale=1.0):
+        """Leave a burn where something went off."""
+        lo, hi = self.DECAL_SIZE
+        size = self.fxrng.uniform(lo, hi) * scale
+        self.decals.append((float(x), float(y), size,
+                            self.fxrng.randint(0, 15)))
+        if len(self.decals) > self.DECAL_MAX:
+            del self.decals[0]
+
+    def _draw_decals(self, ox, oy, normals=False):
+        if not self.decals:
+            return
+        for x, y, size, seed in self.decals:
+            sx = x - ox - size * 0.5
+            sy = y - oy - size * 0.5
+            if (sx < -size or sy < -size
+                    or sx > self.view_w or sy > self.view_h):
+                continue
+            sprite = (art.scorch_normal(seed) if normals
+                      else art.scorch(seed))
+            drawImage(sprite, sx, sy, width=size, height=size)
 
     # ------------------------------------------------------------- update --
     def update(self, dt, keys, aim_world, firing):
         scale = self.effects.update(dt)
         sdt = dt * scale
         self.run_time += dt
+        self.motes.step(dt)
         self.floor_time += dt
         self.banner_t = max(0.0, self.banner_t - dt)
 
@@ -525,6 +561,7 @@ class World:
         self.effects.add_light(x, y, radius * 2.4, 0.2, (255, 170, 90))
         self.effects.add_shake(2.6)
         audio.play('boom', 0.42)
+        self.add_decal(x, y, 1.15)
         for e in self.enemies:
             if not e.alive:
                 continue
@@ -665,6 +702,16 @@ class World:
 
     # The rift's own light. Cold, so it reads against the lantern at a
     # glance, and far-reaching, because its whole job is to be findable.
+    # Dust is only worth drawing where the light is strong enough to pick it
+    # out, so it reaches less far than the light itself does.
+    MOTE_REACH = 0.82
+    MOTE_STRENGTH = 1.0
+
+    # Burns left on the floor. Few enough to stay cheap, large enough that a
+    # room you have fought in looks like it.
+    DECAL_MAX = 26
+    DECAL_SIZE = (52.0, 104.0)
+
     RIFT_LIGHT = (122, 190, 255)
     RIFT_LIGHT_RADIUS = 300.0
     RIFT_LIGHT_STRENGTH = 54.0
@@ -690,14 +737,31 @@ class World:
         player = self.player
         flicker = self.lantern_flicker()
 
+        # ---- what shape the surfaces are ----------------------------------
+        # First, because the relief is folded into the stone's own albedo
+        # before anything is standing on it.
+        scale = draw.SCALE
+        has_normals = gpu.begin_normal() and lv.floor_normal is not None
+        if has_normals:
+            drawImage(lv.floor_normal, -ox, -oy)
+            # Burns are part of the surface, so they shape the light too.
+            self._draw_decals(ox, oy, normals=True)
+            if lv.wall_normal is not None:
+                drawImage(lv.wall_normal, -ox, -oy)
+
         # ---- what is there ------------------------------------------------
         gpu.begin_scene(palette.VOID_RGB)
         # The room itself. It takes the added light in full, because that
         # light is in the air above it and this is what it lands on.
         drawImage(lv.floor_image, -ox, -oy)
+        self._draw_decals(ox, oy)
         self._draw_rift(ox, oy)
         self.pickups.draw(ox, oy, self.view_w, self.view_h)
         drawImage(lv.wall_image, -ox, -oy)
+        # The stone's relief, folded into the stone and nothing else.
+        if has_normals:
+            gpu.apply_relief((player.x - ox) * scale, (player.y - oy) * scale,
+                             self.LIGHT_HEIGHT * scale, self.RELIEF)
         # Everything from here on is a thing standing in the room rather than
         # the room, and is marked as such so the added light does not wash it
         # out. See `gpu.scene_coverage`.
@@ -718,31 +782,25 @@ class World:
 
         if player.alive:
             player.draw(ox, oy)
+        # A bolt and a spark are light rather than things standing in the
+        # room, so they go back to taking the room's share of it.
+        gpu.scene_coverage(False)
         self.projectiles.draw(ox, oy, self.view_w, self.view_h)
         self.particles.draw(ox, oy, self.view_w, self.view_h)
+        # Dust, last of all and in front of everything, because it is hanging
+        # in the air between the room and the eye. Drawn into the albedo, so
+        # the lighting decides whether any of it is visible: in the dark there
+        # is no dust, and the beam fills as the lantern comes into a room.
+        self.last_motes = self.motes.draw(
+            ox, oy, LANTERN_GLOW, player.x, player.y,
+            self.light_radius * self.MOTE_REACH, flicker * self.MOTE_STRENGTH)
 
-        gpu.scene_coverage(False)
         gpu.amplify_scene(self.ALBEDO_GAIN)
-
-        # ---- what shape the surfaces are ----------------------------------
-        # The stone's own relief, so the lantern rakes across the courses and
-        # the blotches instead of washing a flat disc over them. Only the two
-        # stone layers have one: an enemy or a bullet is not a surface the
-        # floor light should be picking out.
-        if gpu.begin_normal() and lv.floor_normal is not None:
-            drawImage(lv.floor_normal, -ox, -oy)
-            if lv.wall_normal is not None:
-                drawImage(lv.wall_normal, -ox, -oy)
 
         # ---- what lights it -----------------------------------------------
         gpu.begin_light()
         self._draw_light(ox, oy)
         self._draw_point_lights(ox, oy, flicker)
-        # Before the ambient, so the relief shapes the lantern's light and not
-        # the flat fill that keeps unlit corners from being pure black.
-        scale = draw.SCALE
-        gpu.apply_relief((player.x - ox) * scale, (player.y - oy) * scale,
-                         self.LIGHT_HEIGHT * scale, self.RELIEF)
         gpu.add_ambient(self.AMBIENT)
 
         # ---- and the two together -----------------------------------------
@@ -791,19 +849,21 @@ class World:
                     < self.view_h + self.RIFT_LIGHT_RADIUS):
                 t = ease_out_cubic(rift.open_t)
                 breathe = 0.84 + 0.16 * math.sin(self.run_time * 2.1)
-                art.draw_glow(self.RIFT_LIGHT, sx, sy,
-                              self.RIFT_LIGHT_RADIUS * t * breathe,
-                              clamp(self.RIFT_LIGHT_STRENGTH * t * breathe,
-                                    0, 100), power=2.0)
+                self._static_light(rift, rift.x, rift.y, ox, oy,
+                                   self.RIFT_LIGHT_RADIUS, self.RIFT_LIGHT,
+                                   self.RIFT_LIGHT_STRENGTH * t * breathe,
+                                   power=2.0, spread=t * breathe)
         for b in self.level.braziers:
             if not b.lit:
                 continue
             sx, sy = b.x - ox, b.y - oy
             if sx < -260 or sy < -260 or sx > self.view_w + 260 or sy > self.view_h + 260:
                 continue
-            r = 150.0 * (0.85 + 0.15 * math.sin(self.run_time * 7.0 + b.x))
-            art.draw_glow(palette.LIGHT_DEEP, sx, sy, r,
-                          clamp(64 * b.ignite_t * flicker, 0, 100), power=2.2)
+            wobble = 0.85 + 0.15 * math.sin(self.run_time * 7.0 + b.x)
+            self._static_light(b, b.x, b.y, ox, oy, self.BRAZIER_REACH,
+                               palette.LIGHT_DEEP,
+                               64 * b.ignite_t * flicker,
+                               power=2.2, spread=wobble)
         self.projectiles.draw_lights(ox, oy, self.view_w, self.view_h)
         self.effects.draw_lights(ox, oy, self.view_w, self.view_h)
         # Eyes throw just enough light to catch the ground under them. Any
@@ -818,6 +878,44 @@ class World:
             art.draw_glow(art.rgb_tuple(e.eye_color), sx, sy, 15.0, 13,
                           power=3.0)
         gpu.set_mode(gpu.NORMAL)
+
+    # How far a brazier throws. Fixed, because its shadow is cast once at
+    # this radius and then reused; the flame's wobble scales the brightness
+    # and the visible reach, not the geometry.
+    BRAZIER_REACH = 172.0
+
+    def _static_light(self, owner, wx, wy, ox, oy, reach, color, strength,
+                      power=2.2, spread=1.0):
+        """A light that does not move, cast through the walls that block it.
+
+        Braziers and the rift used to be plain radial glows, which meant they
+        shone straight through masonry: a brazier on the far side of a wall
+        lit the floor on this side of it. Only the lantern had ever cast a
+        shadow, because only the lantern was worth a visibility sweep every
+        frame.
+
+        Neither of these moves, though, and neither do the walls, so the sweep
+        is cast once the first time the light is drawn and kept. After that it
+        costs one triangle per ray, which is the same thing the shafts do.
+        """
+        strength = clamp(strength, 0.0, 100.0)
+        if strength <= 0.0:
+            return
+        if not hasattr(gpu, 'radial_fan') or not getattr(
+                gpu, 'ANALYTIC_LIGHTS', False):
+            art.draw_glow(art.rgb_tuple(color), wx - ox, wy - oy,
+                          reach * spread, strength, power=power)
+            return
+        shape = owner.shape
+        if shape is None:
+            fan = lighting.visibility_fan(self.level, wx, wy, reach)
+            shape = owner.shape = fan.points
+        if len(shape) < 3:
+            return
+        scale = draw.SCALE
+        screen = [((x - ox) * scale, (y - oy) * scale) for x, y in shape]
+        gpu.radial_fan((wx - ox) * scale, (wy - oy) * scale, reach * scale,
+                       screen, art.rgb_tuple(color), strength, power=power)
 
     def _draw_flat(self, app):
         """The original single-pass path, for the cmu-graphics renderer."""

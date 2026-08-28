@@ -9,6 +9,12 @@ only light**, and everything you cannot see is still there.
 No asset files ship with the game. Every texture, sprite, glow and item icon,
 and all 21 sound effects, are generated at startup from numpy and PIL.
 
+It runs on three renderers behind one interface — cmu-graphics' own
+rasteriser, SDL's renderer, and OpenGL. On the last of those the lighting is
+deferred and runs in float: analytic lights, saturating shadow coverage,
+per-pixel volumetrics, surface relief taken from the art's own shading, dust
+in the air, and a filmic tone map. See [Deferred lighting](#deferred-lighting).
+
 ![The vault, lit only by your lantern](docs/gameplay.png)
 
 <p align="center">
@@ -406,6 +412,101 @@ crash: the title screen's logo was baked once in `__init__`, so changing
 resolution on the title screen killed the app. `tools/playtest.py` has
 `resize-title`, `resize-help` and `resize-play` scenarios to keep it fixed.
 
+### Deferred lighting
+
+`LUMEN_RENDERER=gl` swaps SDL's fixed-function renderer for OpenGL with real
+shaders and float16 render targets, and the whole lighting model changes with
+it. Nothing is drawn lit. Everything solid goes into a **scene** buffer at its
+own unlit colour, every light goes into a **light** buffer, and the composite
+multiplies the two. That is what makes an enemy fade up as the lantern reaches
+it instead of popping on when a visibility test flips, and what lets masonry
+catch light without a rim stroke painted along each edge by hand.
+
+Because the targets are float, a light is allowed to be brighter than the
+screen. An ACES filmic curve brings the result back down at the end, so the
+flame at the centre of the lantern rolls off instead of clipping to a white
+slab, and the hand-dimmed emissives the 8-bit path needed are gone.
+
+**Lights are maths, not pictures.** A glow used to be a radial ramp baked into
+8-bit RGBA and stretched to whatever radius the lantern currently had, which
+quantises the profile at the source and then resamples it. It is evaluated per
+pixel now, from the pixel's own distance to the light. But the screen is still
+eight bits, and a falloff that crosses a level every few pixels contours no
+matter how exact the buffer feeding it is — so triangular sub-level noise goes
+in just before the hardware rounds. Measured over the part of the radius that
+is actually a gradient, 11.8% of it fell in flat 8-bit bands; with the dither,
+0.0%. (Worth recording: the analytic curve made banding *worse* on its own.
+The baked sprite's own dither had been breaking contours up by accident.)
+
+**Occlusion does not compound.** Shadows were multiplied straight into the
+light buffer, three offset copies per occluder for the penumbra — right for
+one occluder and wrong for two, because where two shadows crossed the multiply
+compounded. Counting coverage per pixel found 0.52% of a frame taking four to
+six passes instead of three: `0.41**6` against an intended `0.41**3`, fourteen
+times too dark, and clearly visible as a black wedge running out of every
+corner where two shadows met. Coverage is collected in its own buffer now, one
+offset pass per colour channel under MAX blending, and the light is multiplied
+down once by the shade raised to the number of passes that reached the pixel.
+Two overlapping shadows now measure 1.0000x the darkness of one.
+
+**Every light that stands still casts one.** Only the lantern was ever worth a
+visibility sweep per frame, so braziers and the rift shone straight through
+masonry. Neither of them moves and neither do the walls, so their sweep is
+cast once and kept, and the light is drawn as one triangle per ray with the
+falloff evaluated per pixel — the same thing the volumetric shafts do.
+
+**The shafts** fill the visibility fan so the lit cone squeezes through a
+doorway with the light. On the SDL path that is forty concentric bands of
+quads per ray, which cost 3.3 ms of a 9.3 ms frame and still banded, because
+each band carries a single integer opacity over a profile spanning about eight
+of them. Here it is one triangle per ray. A fortieth of the geometry, and
+continuous rather than in eight steps.
+
+**Surfaces have shape.** The stone was drawn as if lit from nowhere in
+particular, which means its own light and dark already describe its relief — so
+a normal map is derived from the luminance of each stone layer as it is baked,
+and the resulting N·L is folded into the stone's albedo before anything is
+standing on it. The ratio is taken against what a flat surface at the same
+spot would receive, so a floor with no slope comes back at exactly 1.0 and the
+scene's exposure does not move; only the parts that are shaped change. Wall
+side faces get a normal pointing down-screen instead of up, so the lantern
+picks out whichever faces it happens to be standing in front of.
+
+**A lit floor is mostly not floor.** Measured in a pool, two thirds of what
+you see there is light added over the stone rather than the stone itself.
+That term is why a lit floor reads as lit instead of merely visible — but the
+same amount was added over everything else, and a figure whose whole design is
+a near-black silhouette has almost no albedo to compete with it. The player
+came out as a warm haze in the shape of a person, with the floor's carving
+legible through it. The scene buffer's alpha was carrying nothing, so it
+carries **coverage**: the room leaves it alone, things standing in the room
+set it, and the composite holds the added light back to a tenth where it is
+set. The lit floor moves by about a level; a washed-out cloak edge drops
+forty-four.
+
+> One trap worth writing down: moderngl applies a framebuffer's colour mask
+> when the framebuffer is **bound**, not when it is set. Set the mask, draw
+> without rebinding, and alpha is written anyway.
+
+**Dust** hangs in the air in world space and is drawn into the albedo, not the
+light — so a mote is a bright speck of nothing and the lighting decides
+whether you can see it. In the dark there is no dust; walk the lantern into a
+room and the air fills. Seven thousand of them, built with numpy and handed to
+the batch as bytes, because a Python-level call per mote is the entire cost.
+
+**Burns** left by explosions write to both the albedo and the normal buffer,
+so a scorch mark has a hollow in it and catches the lantern like everything
+else does.
+
+**At the end**: a bright pass, a bloom chain folded back with a tent filter,
+an anamorphic streak (a lantern in the dark is the brightest thing on screen
+by a wide margin, and a symmetric halo reads as a glow effect rather than as a
+very bright object), and a split-tone grade — shadows toward slate, highlights
+toward amber. The distance between those two is the mood.
+
+In play at 1800x1120 this holds about 120 fps, with roughly a third of the
+frame left over.
+
 ### Pathfinding
 
 Steering straight at the player is what made enemies press into walls and
@@ -516,12 +617,18 @@ does not dip.
 
 ```
 main.py              entry point — binds cmu-graphics handlers to Game
+native.py            entry point — hosts the same Game directly on pygame
 lumen/
   app.py             top-level state machine (title, run, draft, endings)
   world.py           one floor: simulation and world rendering
   lighting.py        numpy shadowcasting — visibility fans and LOS tests
   flow.py            breadth-first distance field: enemy and pickup pathing
   runtime.py         host-level tuning of the framework's present path
+  host.py            the native pygame loop: fixed timestep, no framework
+  gpu.py             picks a renderer at import; the rest of the game asks it
+  glx.py             OpenGL backend — shaders, float16 targets, the pipeline
+  sdlx.py            SDL backend — textured quads and fixed-function blending
+  motes.py           the dust field
   level.py           chamber generation, collision, baked floor/wall images
   art.py             procedural sprites, textures, and baked text
   noise.py           vectorised value noise / fbm
@@ -540,6 +647,8 @@ lumen/
   config.py          all tuning constants
 tools/
   playtest.py        headless driver: scripted input, autopilot, screenshots
+  gpu_smoke.py       drives the GPU path under the native host, on either
+                     backend — the branches playtest structurally cannot reach
   shoot.py           generic harness for prototyping a scene in isolation
 ```
 
@@ -560,6 +669,23 @@ runs are reproducible:
 .venv/bin/python tools/playtest.py --scenario firstframe --auto \
     --stop-at draft --settle 30 --out shots/draft.png
 ```
+
+`playtest.py` hosts the game inside cmu-graphics, where the renderer takeover
+only ever reaches the SDL backend — so every branch behind `gpu.active()` on
+the OpenGL path goes undrawn by the suite. `tools/gpu_smoke.py` runs the same
+`Game` through `lumen/host.py` on a chosen backend and draws what the suite
+cannot: braziers lit and mid-ignition, seen close and from across the floor,
+across two resolution changes and both visual settings. It exits non-zero with
+a traceback rather than skipping a frame.
+
+```bash
+.venv/bin/python tools/gpu_smoke.py --renderer gl
+.venv/bin/python tools/gpu_smoke.py --renderer sdl
+```
+
+That gap was not hypothetical: a lit brazier went on referencing two constants
+that had been deleted for weeks, and the first thing to notice was a player
+walking into one.
 
 Each run reports frame timings, peak draw-call drivers, and the slowest frames.
 With a fixed timestep and a pinned seed, renders are **pixel-reproducible** -
