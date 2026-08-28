@@ -382,6 +382,44 @@ def lantern_glow(color, size=GLOW_BASE):
                               np.full(a.shape, b, np.float32)), a))
 
 
+def normal_map(pil, strength=1.0):
+    """A surface normal for every pixel, read out of the art's own shading.
+
+    The stone was drawn with its mortar courses and its blotches already in
+    it, and those are exactly the places the surface is not flat. Rather than
+    author a second set of art by hand, the height is taken to be the
+    luminance that is already there and the normal is its slope - which is the
+    oldest trick there is for this, and it works because the art was drawn as
+    if lit from nowhere in particular, so its light and dark *are* its relief.
+
+    The result is a normal in the usual packing (a flat surface is
+    (0.5, 0.5, 1)), carrying the source's alpha so that a layer only claims
+    the pixels it actually covers.
+    """
+    rgba = pil.convert('RGBA')
+    a = np.asarray(rgba, dtype=np.float32)
+    lum = (a[..., 0] * 0.2126 + a[..., 1] * 0.7152 + a[..., 2] * 0.0722) / 255.0
+    # A wide slope, not a one-pixel difference: at native scale the art is
+    # already several pixels per design unit, and a tight kernel picks up the
+    # bake's own noise instead of the shapes drawn into it.
+    k = 2
+    gx = np.zeros_like(lum)
+    gy = np.zeros_like(lum)
+    gx[:, k:-k] = lum[:, 2 * k:] - lum[:, :-2 * k]
+    gy[k:-k, :] = lum[2 * k:, :] - lum[:-2 * k, :]
+    scale = 3.4 * float(strength)
+    nx = -gx * scale
+    ny = -gy * scale
+    nz = np.ones_like(nx)
+    inv = 1.0 / np.sqrt(nx * nx + ny * ny + nz * nz)
+    out = np.empty(a.shape, dtype=np.uint8)
+    out[..., 0] = np.clip((nx * inv) * 127.5 + 127.5, 0, 255)
+    out[..., 1] = np.clip((ny * inv) * 127.5 + 127.5, 0, 255)
+    out[..., 2] = np.clip((nz * inv) * 127.5 + 127.5, 0, 255)
+    out[..., 3] = a[..., 3]
+    return Image.fromarray(out, 'RGBA')
+
+
 def dither_tile(size=256):
     """A tile of ordered dither, laid over the finished frame.
 

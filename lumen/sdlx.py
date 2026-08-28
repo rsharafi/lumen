@@ -318,6 +318,20 @@ SHADOW_PASSES = 3
 _shadow_fill = (255, 255, 255)
 
 
+def radial_fan(cx, cy, radius, points, color, opacity=100, power=2.4):
+    """Not available here; `world` fills the cone with bands instead."""
+    return False
+
+
+def begin_normal():
+    """No shader to read a normal buffer back, so none is kept."""
+    return False
+
+
+def apply_relief(light_x, light_y, height, strength):
+    """Surface relief needs a per-pixel pass; not available on this backend."""
+
+
 def radial_glow(cx, cy, radius, color, opacity=100, profile=0.0,
                 power=2.0, core=0.0):
     """Not available here; `art` blits a baked sprite instead."""

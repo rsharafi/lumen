@@ -76,8 +76,10 @@ class Level:
         self.seg_by = None
         self.corners = None         # numpy (N, 2) of wall corners
         self.floor_image = None
+        self.floor_normal = None
         self.floor_key = None
         self.wall_image = None
+        self.wall_normal = None
         self.wall_key = None
         self.minimap_image = None
         self.minimap_rect = None    # (offset_x, offset_y, width, height)
@@ -522,6 +524,10 @@ def _bake_layers(level, rng, seed):
     key_floor = ('level', 'floor', seed, level.cols, level.rows, level.archetype)
     level.floor_key = key_floor
     level.floor_image = art.wrap(floor, key_floor)
+    # The relief the lantern picks out of the stone. Derived from the layer
+    # that was just baked, so it lines up with it exactly.
+    level.floor_normal = art.wrap(art.normal_map(floor),
+                                  key_floor + ('normal',))
 
     # ---- walls -----------------------------------------------------------
     wall_tex = art.wall_tile(seed * 13 + 5).convert('RGB')
@@ -560,6 +566,10 @@ def _bake_layers(level, rng, seed):
     key_wall = ('level', 'wall', seed, level.cols, level.rows, level.archetype)
     level.wall_key = key_wall
     level.wall_image = art.wrap(walls, key_wall)
+    # Shallower than the floor: a wall top is dressed stone, and the courses
+    # in it are joints rather than the broken surface a floor has.
+    level.wall_normal = art.wrap(art.normal_map(walls, 0.7),
+                                 key_wall + ('normal',))
 
     _bake_minimap(level, seed)
 

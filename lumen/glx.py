@@ -202,6 +202,10 @@ uniform int mode;          // 0 tone map, 1 bright, 2 blur, 3 copy, 4 shadow
 uniform vec2 texel;
 uniform float threshold;
 uniform float dither;
+uniform vec2 light_xy;     // key light, in this target's pixels
+uniform float light_h;     // and how far above the floor it hangs
+uniform float relief;      // how much of the surface slope to believe
+uniform vec2 target_px;
 in vec2 v_uv;
 out vec4 frag;
 
@@ -244,6 +248,27 @@ void main() {
         frag = vec4(acc / wsum, 1.0);
     } else if (mode == 3) {
         frag = texture(scene, v_uv);
+    } else if (mode == 5) {
+        // Surface relief. The normal buffer holds the slope of the stone;
+        // this works out how much more or less light a facet takes than the
+        // flat floor beside it would, and hands back that ratio for the light
+        // buffer to be multiplied by. Centring on the flat case is what keeps
+        // the overall exposure of the scene where it was - a floor with no
+        // slope in it comes back exactly 1.0 and is left alone.
+        vec4 texel_n = texture(scene, v_uv);
+        vec3 n = texel_n.xyz * 2.0 - 1.0;
+        if (texel_n.a < 0.02 || dot(n, n) < 0.04) {
+            frag = vec4(1.0, 1.0, 1.0, 1.0);
+        } else {
+            n = normalize(n);
+            vec2 p = v_uv * target_px;
+            vec3 L = normalize(vec3(light_xy - p, light_h));
+            float ndl = dot(n, L);
+            float flat_lit = max(L.z, 1e-3);
+            float ratio = clamp(ndl / flat_lit, 0.0, 2.2);
+            float f = mix(1.0, ratio, relief);
+            frag = vec4(f, f, f, 1.0);
+        }
     } else if (mode == 4) {
         // The shadow buffer holds one pass per channel, each already
         // saturated by MAX blending, so overlapping occluders cannot darken
@@ -572,6 +597,40 @@ def radial_glow(cx, cy, radius, color, opacity=100, profile=LANTERN_PROFILE,
             _glow.extend((x, y, lx, ly, r, g, b, a, profile, power, core))
 
 
+def radial_fan(cx, cy, radius, points, color, opacity=100, power=2.4):
+    """The lit cone, as one triangle per ray of the visibility sweep.
+
+    The CPU version of this fills the cone with forty concentric bands of
+    quads, because a flat polygon is the only thing that renderer can draw and
+    a single flat fill would end in a hard circle at the light's reach. That
+    costs forty quads per ray - measured at 3.3 ms of a 9.3 ms frame - and it
+    still bands, because each band is one integer opacity and the whole
+    profile spans about eight of them.
+
+    Here each ray is one triangle carrying its own distance from the flame,
+    and the falloff is evaluated per pixel by the same shader the lights use.
+    One fortieth of the geometry, and continuous rather than in eight steps.
+    """
+    if _ctx is None or radius <= 0.5 or opacity <= 0 or len(points) < 2:
+        return
+    a = _alpha(opacity)
+    if a <= 0.0:
+        return
+    r, g, b = (c / 255.0 for c in color[:3])
+    inv = 1.0 / radius
+    ext = _glow.extend
+    for i in range(len(points) - 1):
+        ax, ay = points[i]
+        bx, by = points[i + 1]
+        lax, lay = (ax - cx) * inv, (ay - cy) * inv
+        lbx, lby = (bx - cx) * inv, (by - cy) * inv
+        ext((cx, cy, 0.0, 0.0, r, g, b, a, POWER_PROFILE, power, 0.0,
+             ax, ay, lax, lay, r, g, b, a, POWER_PROFILE, power, 0.0,
+             bx, by, lbx, lby, r, g, b, a, POWER_PROFILE, power, 0.0))
+    if len(_glow) >= _GLOW_BATCH_MAX * 11 * 6:
+        flush()
+
+
 # --------------------------------------------------------------------------
 # Shadow coverage
 # --------------------------------------------------------------------------
@@ -646,6 +705,63 @@ def end_shadow():
     _post_prog['threshold'].value = _shadow_shade
     _post_prog['texel'].value = (0.0, 0.0)
     _post_prog['dither'].value = 0.0
+    _quad_vao.render(vertices=3)
+    set_mode(NORMAL)
+    _apply_blend()
+
+
+def _set(name, value):
+    """Set a post uniform, tolerating one the compiler dropped."""
+    try:
+        _post_prog[name].value = value
+    except KeyError:
+        pass
+
+
+def begin_normal():
+    """Start the surface-normal buffer.
+
+    Cleared to nothing rather than to a flat normal: a pixel no layer covers
+    has no surface, and the relief pass leaves those alone instead of lighting
+    an imaginary floor behind them.
+    """
+    if _ctx is None or not _targets:
+        return False
+    _use('normal')
+    set_mode(NORMAL)
+    _ctx.clear(0.0, 0.0, 0.0, 0.0)
+    return True
+
+
+def apply_relief(light_x, light_y, height, strength):
+    """Fold the stone's own relief into the light buffer.
+
+    Runs before the composite, so both the multiply and the bleed see the same
+    lit surface. The key light is the lantern: it is the only light bright
+    enough for a facet turned away from it to read as shadowed, and doing this
+    per light would mean a pass and a buffer each.
+    """
+    if _ctx is None or not _targets or strength <= 0.0:
+        return
+    flush()
+    _use('light')
+    _ctx.blend_equation = _ctx.FUNC_ADD
+    _ctx.blend_func = (_ctx.ZERO, _ctx.SRC_COLOR)
+    tex = _targets['normal'][0]
+    tex.use(0)
+    tex.use(1)
+    _set('scene', 0)
+    _set('bloom', 1)
+    _set('mode', 5)
+    _set('bloom_amount', 0.0)
+    _set('exposure', _EXPOSURE)
+    _set('threshold', 1.0)
+    _set('texel', (0.0, 0.0))
+    _set('dither', 0.0)
+    _set('light_xy', (float(light_x), float(light_y)))
+    _set('light_h', float(height))
+    _set('relief', float(strength))
+    _set('target_px', (float(tex.size[0]), float(tex.size[1])))
     _quad_vao.render(vertices=3)
     set_mode(NORMAL)
     _apply_blend()
@@ -803,7 +919,8 @@ def lighting_ready(size=None):
         return True
     try:
         made = {}
-        for name in ('scene', 'light', 'final', 'edge', 'shadow'):
+        for name in ('scene', 'light', 'final', 'edge', 'shadow',
+                     'normal'):
             tex = _ctx.texture(size, 4, dtype='f2')
             tex.filter = (_ctx.LINEAR, _ctx.LINEAR)
             made[name] = (tex, _ctx.framebuffer(color_attachments=[tex]))

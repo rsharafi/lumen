@@ -653,6 +653,16 @@ class World:
     BLOOM = 0.16
     ALBEDO_GAIN = 0.58
 
+    # How far above the floor the lantern hangs, in design units. It sets how
+    # steeply the light rakes across the stone: low, and every blemish throws
+    # a hard edge; high, and the surface flattens out again. About a third of
+    # a tile reads as a lamp carried at waist height.
+    LIGHT_HEIGHT = 22.0
+
+    # How much of the stone's slope to believe. All of it lights the floor
+    # like corrugated iron; none of it is the flat pool this replaces.
+    RELIEF = 0.45
+
     def draw(self, app):
         if self.deferred and gpu.lighting_ready():
             self._draw_lit(app)
@@ -701,10 +711,25 @@ class World:
 
         gpu.amplify_scene(self.ALBEDO_GAIN)
 
+        # ---- what shape the surfaces are ----------------------------------
+        # The stone's own relief, so the lantern rakes across the courses and
+        # the blotches instead of washing a flat disc over them. Only the two
+        # stone layers have one: an enemy or a bullet is not a surface the
+        # floor light should be picking out.
+        if gpu.begin_normal() and lv.floor_normal is not None:
+            drawImage(lv.floor_normal, -ox, -oy)
+            if lv.wall_normal is not None:
+                drawImage(lv.wall_normal, -ox, -oy)
+
         # ---- what lights it -----------------------------------------------
         gpu.begin_light()
         self._draw_light(ox, oy)
         self._draw_point_lights(ox, oy, flicker)
+        # Before the ambient, so the relief shapes the lantern's light and not
+        # the flat fill that keeps unlit corners from being pure black.
+        scale = draw.SCALE
+        gpu.apply_relief((player.x - ox) * scale, (player.y - oy) * scale,
+                         self.LIGHT_HEIGHT * scale, self.RELIEF)
         gpu.add_ambient(self.AMBIENT)
 
         # ---- and the two together -----------------------------------------
@@ -961,6 +986,9 @@ class World:
     # put a visible ring every few percent of the radius.
     SHAFT_BAND_COUNT = 40
     SHAFT_STRENGTH = 7.0
+    # How fast the air stops catching light with distance from the flame.
+    # This was the band weighting; on the GPU it is the profile itself.
+    SHAFT_FALLOFF = 2.4
 
     def _draw_shafts(self, fan, ox, oy, flicker):
         """The lit cone, added faintly - light with some air in it.
@@ -976,6 +1004,18 @@ class World:
             return
         px, py = fan.ox, fan.oy
         tint = palette.LIGHT_WARM
+        if getattr(gpu, 'ANALYTIC_LIGHTS', False):
+            # One triangle per ray, with the falloff evaluated per pixel. The
+            # bands below exist only because the other renderer cannot do
+            # that; this is the same profile without the forty steps.
+            scale = draw.SCALE
+            reach = max(1.0, self.light_radius)
+            strength = clamp(self.SHAFT_STRENGTH * flicker, 0.0, 100.0)
+            screen = [((x - ox) * scale, (y - oy) * scale) for x, y in pts]
+            gpu.radial_fan((px - ox) * scale, (py - oy) * scale, reach * scale,
+                           screen, (tint.red, tint.green, tint.blue),
+                           strength, power=self.SHAFT_FALLOFF)
+            return
         bands = self.SHAFT_BAND_COUNT
         step = 2
         for b in range(bands):
