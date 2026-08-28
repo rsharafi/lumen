@@ -144,10 +144,10 @@ uniform vec2 viewport;
 in vec2 in_pos;
 in vec2 in_local;        // -1..1 across the light's own square
 in vec4 in_col;
-in vec3 in_shape;        // profile, power, core
+in vec4 in_shape;        // profile, power, core, height/radius
 out vec2 v_local;
 out vec4 v_col;
-out vec3 v_shape;
+out vec4 v_shape;
 void main() {
     vec2 ndc = vec2(in_pos.x / viewport.x * 2.0 - 1.0,
                     1.0 - in_pos.y / viewport.y * 2.0);
@@ -159,9 +159,12 @@ void main() {
 '''
 
 _GLOW_FS = '''#version 330
+uniform sampler2D normals;
+uniform vec2 target_px;
+uniform float relief;
 in vec2 v_local;
 in vec4 v_col;
-in vec3 v_shape;
+in vec4 v_shape;
 out vec4 frag;
 void main() {
     float d = length(v_local);
@@ -182,6 +185,32 @@ void main() {
         a = pow(clamp(t, 0.0, 1.0), v_shape.y);
     }
     a = clamp(a, 0.0, 1.0) * v_col.a;
+
+    // How this light meets the surface it lands on. `v_local` is already the
+    // offset from the light in units of its own radius, so the direction back
+    // to the flame is just its negation, and the fourth shape term is how
+    // high the light hangs in the same units. Every light does this for
+    // itself, which is the point: a brazier off to one side rakes the stone
+    // from the side, and the courses it picks out are not the ones the
+    // lantern picks out from where the player is standing.
+    //
+    // A height of zero opts out - dust hanging in the air is not lying on
+    // anything, and neither is a bolt in flight.
+    if (v_shape.w > 0.0 && relief > 0.0) {
+        vec4 nt = texture(normals, gl_FragCoord.xy / target_px);
+        if (nt.a > 0.02) {
+            vec3 nrm = nt.xyz * 2.0 - 1.0;
+            if (dot(nrm, nrm) > 0.04) {
+                nrm = normalize(nrm);
+                vec3 L = normalize(vec3(-v_local, v_shape.w));
+                // Against what a flat surface at the same spot would take, so
+                // unshaped ground comes back at exactly 1.0 and the exposure
+                // of the room does not move with this.
+                float ratio = clamp(dot(nrm, L) / max(L.z, 1e-3), 0.0, 2.2);
+                a *= mix(1.0, ratio, relief);
+            }
+        }
+    }
     frag = vec4(v_col.rgb * a, a);      // premultiplied, like every sprite
 }
 '''
@@ -199,14 +228,14 @@ uniform sampler2D bloom;
 uniform sampler2D extra;      // the anamorphic streak, at the tone map
 uniform float bloom_amount;
 uniform float exposure;
-uniform int mode;          // 0 tone map, 1 bright, 2 blur, 3 copy, 4 shadow
+uniform int mode;          // 0 tone map, 1 bright, 2 blur, 3 copy,
+                           // 4 shadow, 6 masked bleed, 7 tent, 8 streak
 uniform vec2 texel;
 uniform float threshold;
 uniform float dither;
 uniform vec2 light_xy;     // key light, in this target's pixels
 uniform float light_h;     // and how far above the floor it hangs
 uniform float relief;      // how much of the surface slope to believe
-uniform vec2 target_px;
 uniform float streak_amount;
 uniform vec3 streak_tint;
 uniform vec3 grade_shadow;    // what the bottom of the range is tinted toward
@@ -289,27 +318,6 @@ void main() {
         float solid = texture(bloom, v_uv).a;
         float k = mix(1.0, threshold, clamp(solid, 0.0, 1.0));
         frag = vec4(texture(scene, v_uv).rgb * bloom_amount * k, 1.0);
-    } else if (mode == 5) {
-        // Surface relief. The normal buffer holds the slope of the stone;
-        // this works out how much more or less light a facet takes than the
-        // flat floor beside it would, and hands back that ratio for the light
-        // buffer to be multiplied by. Centring on the flat case is what keeps
-        // the overall exposure of the scene where it was - a floor with no
-        // slope in it comes back exactly 1.0 and is left alone.
-        vec4 texel_n = texture(scene, v_uv);
-        vec3 n = texel_n.xyz * 2.0 - 1.0;
-        if (texel_n.a < 0.02 || dot(n, n) < 0.04) {
-            frag = vec4(1.0, 1.0, 1.0, 1.0);
-        } else {
-            n = normalize(n);
-            vec2 p = v_uv * target_px;
-            vec3 L = normalize(vec3(light_xy - p, light_h));
-            float ndl = dot(n, L);
-            float flat_lit = max(L.z, 1e-3);
-            float ratio = clamp(ndl / flat_lit, 0.0, 2.2);
-            float f = mix(1.0, ratio, relief);
-            frag = vec4(f, f, f, 1.0);
-        }
     } else if (mode == 4) {
         // The shadow buffer holds one pass per channel, each already
         // saturated by MAX blending, so overlapping occluders cannot darken
@@ -415,9 +423,9 @@ def attach(context):
                                  fragment_shader=_GLOW_FS)
     # Sized for the dust field, which is the only thing that fills it:
     # thousands of points, six vertices each.
-    _glow_vbo = context.buffer(reserve=11 * 4 * 6 * 12000)
+    _glow_vbo = context.buffer(reserve=12 * 4 * 6 * 12000)
     _glow_vao = context.vertex_array(
-        _glow_prog, [(_glow_vbo, '2f 2f 4f 3f',
+        _glow_prog, [(_glow_vbo, '2f 2f 4f 4f',
                       'in_pos', 'in_local', 'in_col', 'in_shape')])
     quad = context.buffer(_SCREEN_QUAD.tobytes())
     _quad_vao = context.vertex_array(
@@ -538,7 +546,18 @@ def flush():
         STATS['flush'] += 1
         _glow_vbo.write(_glow.tobytes())
         _glow_prog['viewport'].value = _viewport
-        _glow_vao.render(vertices=len(_glow) // 11)
+        # Lights read the surface they are landing on, so the normal buffer
+        # has to be bound whenever one is drawn.
+        if _targets:
+            _targets['normal'][0].use(3)
+            try:
+                _glow_prog['normals'].value = 3
+                _glow_prog['target_px'].value = (float(_targets_size[0]),
+                                                 float(_targets_size[1]))
+                _glow_prog['relief'].value = RELIEF
+            except KeyError:
+                pass
+        _glow_vao.render(vertices=len(_glow) // 12)
         del _glow[:]
     _tex_current = None
 
@@ -617,13 +636,17 @@ def blit_rot(sprite, cx, cy, width, height, degrees, color=None, opacity=None):
 LANTERN_PROFILE = 0.0
 POWER_PROFILE = 1.0
 
+# How much of a surface's slope each light believes. All of it lights stone
+# like corrugated iron; none of it is the flat pool this replaces.
+RELIEF = 0.45
+
 # One light's square is 6 vertices; beyond this many in a frame the batch is
 # flushed early rather than grown.
 _GLOW_BATCH_MAX = 500
 
 
 def radial_glow(cx, cy, radius, color, opacity=100, profile=LANTERN_PROFILE,
-                power=2.0, core=0.0):
+                power=2.0, core=0.0, height=0.0):
     """A light as an analytic falloff rather than a stretched sprite.
 
     Draws the light's bounding square and lets the fragment shader work out
@@ -639,17 +662,21 @@ def radial_glow(cx, cy, radius, color, opacity=100, profile=LANTERN_PROFILE,
     r, g, b = (c / 255.0 for c in color[:3])
     left, top = cx - radius, cy - radius
     right, bottom = cx + radius, cy + radius
-    if len(_glow) >= _GLOW_BATCH_MAX * 11 * 6:
+    if len(_glow) >= _GLOW_BATCH_MAX * 12 * 6:
         flush()
+    # In units of the light's own radius, which is the frame the shader works
+    # in; zero means this light does not shade what it lands on.
+    k_h = (height / radius) if (height > 0.0 and radius > 0.0) else 0.0
     corners = ((left, top, -1.0, -1.0), (right, top, 1.0, -1.0),
                (right, bottom, 1.0, 1.0), (left, bottom, -1.0, 1.0))
     for i, j, k in ((0, 1, 2), (0, 2, 3)):
         for idx in (i, j, k):
             x, y, lx, ly = corners[idx]
-            _glow.extend((x, y, lx, ly, r, g, b, a, profile, power, core))
+            _glow.extend((x, y, lx, ly, r, g, b, a, profile, power, core, k_h))
 
 
-def radial_fan(cx, cy, radius, points, color, opacity=100, power=2.4):
+def radial_fan(cx, cy, radius, points, color, opacity=100, power=2.4,
+               height=0.0):
     """The lit cone, as one triangle per ray of the visibility sweep.
 
     The CPU version of this fills the cone with forty concentric bands of
@@ -670,20 +697,27 @@ def radial_fan(cx, cy, radius, points, color, opacity=100, power=2.4):
         return
     r, g, b = (c / 255.0 for c in color[:3])
     inv = 1.0 / radius
+    k_h = (height / radius) if height > 0.0 else 0.0
     ext = _glow.extend
-    for i in range(len(points) - 1):
+    # Round the whole circle, last point back to first. The sweep hands its
+    # rays back sorted from angle zero, so stopping one short leaves the
+    # wedge that straddles zero undrawn - a hard-edged bite out of the light
+    # on the right-hand side of every static light in the game.
+    n = len(points)
+    for i in range(n):
         ax, ay = points[i]
-        bx, by = points[i + 1]
+        bx, by = points[(i + 1) % n]
         lax, lay = (ax - cx) * inv, (ay - cy) * inv
         lbx, lby = (bx - cx) * inv, (by - cy) * inv
-        ext((cx, cy, 0.0, 0.0, r, g, b, a, POWER_PROFILE, power, 0.0,
-             ax, ay, lax, lay, r, g, b, a, POWER_PROFILE, power, 0.0,
-             bx, by, lbx, lby, r, g, b, a, POWER_PROFILE, power, 0.0))
-    if len(_glow) >= _GLOW_BATCH_MAX * 11 * 6:
+        ext((cx, cy, 0.0, 0.0, r, g, b, a, POWER_PROFILE, power, 0.0, k_h,
+             ax, ay, lax, lay, r, g, b, a, POWER_PROFILE, power, 0.0, k_h,
+             bx, by, lbx, lby, r, g, b, a, POWER_PROFILE, power, 0.0, k_h))
+    if len(_glow) >= _GLOW_BATCH_MAX * 12 * 6:
         flush()
 
 
-def glow_points(xs, ys, radii, color, alphas, power=2.0, core=0.0):
+def glow_points(xs, ys, radii, color, alphas, power=2.0, core=0.0,
+                height=0.0):
     """Thousands of small lights in one call.
 
     `radial_glow` is fine for the handful of lights a chamber has, but a
@@ -712,7 +746,7 @@ def glow_points(xs, ys, radii, color, alphas, power=2.0, core=0.0):
     lx = sx[order][None, :]
     ly = sy[order][None, :]
 
-    v = np.empty((n, 6, 11), dtype=np.float32)
+    v = np.empty((n, 6, 12), dtype=np.float32)
     v[:, :, 0] = x[:, None] + lx * r[:, None]
     v[:, :, 1] = y[:, None] + ly * r[:, None]
     v[:, :, 2] = lx
@@ -724,6 +758,9 @@ def glow_points(xs, ys, radii, color, alphas, power=2.0, core=0.0):
     v[:, :, 8] = POWER_PROFILE
     v[:, :, 9] = power
     v[:, :, 10] = core
+    # Dust is in the air, not lying on the floor: it takes no surface term.
+    v[:, :, 11] = np.where(r > 0.0, height / np.maximum(r, 1e-4), 0.0)[:, None] \
+        if height > 0.0 else 0.0
     if len(_glow):
         flush()
     # One buffer write is the point of this call, but the buffer has a size;
@@ -835,41 +872,6 @@ def begin_normal():
     set_mode(NORMAL)
     _ctx.clear(0.0, 0.0, 0.0, 0.0)
     return True
-
-
-def apply_relief(light_x, light_y, height, strength, target='scene'):
-    """Fold the stone's own relief into the light buffer.
-
-    Applied to the albedo, between the stone going down and anything standing
-    on it. `albedo * ratio * light` and `albedo * (light * ratio)` are the
-    same product, so the stone is lit identically either way - but done here,
-    the floor's own courses cannot be printed across the face of whatever is
-    standing on the floor, which is what putting it in the light buffer did.
-    """
-    if _ctx is None or not _targets or strength <= 0.0:
-        return
-    flush()
-    _use(target)
-    _ctx.blend_equation = _ctx.FUNC_ADD
-    _ctx.blend_func = (_ctx.ZERO, _ctx.SRC_COLOR)
-    tex = _targets['normal'][0]
-    tex.use(0)
-    tex.use(1)
-    _set('scene', 0)
-    _set('bloom', 1)
-    _set('mode', 5)
-    _set('bloom_amount', 0.0)
-    _set('exposure', _EXPOSURE)
-    _set('threshold', 1.0)
-    _set('texel', (0.0, 0.0))
-    _set('dither', 0.0)
-    _set('light_xy', (float(light_x), float(light_y)))
-    _set('light_h', float(height))
-    _set('relief', float(strength))
-    _set('target_px', (float(tex.size[0]), float(tex.size[1])))
-    _quad_vao.render(vertices=3)
-    set_mode(NORMAL)
-    _apply_blend()
 
 
 def _convex(points):

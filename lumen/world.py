@@ -12,6 +12,7 @@ import os
 from . import draw, gpu
 from .draw import drawImage, drawLine, drawPolygon
 
+from . import level as level_mod
 from . import motes as motes_mod
 from . import (art, audio, boss, enemies as enemy_mod, flow as flow_mod,
                level as level_mod, lighting, palette,
@@ -267,6 +268,40 @@ class World:
             audio.play_at('kill', enemy.x, enemy.y, 0.4)
             if self.rng.chance(0.34):
                 self.add_decal(enemy.x, enemy.y, 0.72)
+
+    # A flat surface, in the normal map's own packing: straight up out of
+    # the floor. Anything standing on the ground gets one, or every light in
+    # the room rakes it with the courses of the stone underneath it - which
+    # is the floor's texture printed across a person.
+    FLAT_NORMAL = (128, 128, 255)
+
+    def _draw_entity_normals(self, ox, oy):
+        """Give everything standing on the floor a surface of its own."""
+        flat = palette.rgb(*self.FLAT_NORMAL)
+        gpu.set_mode(gpu.REPLACE)
+        for e in self.enemies:
+            if not e.alive:
+                continue
+            sx, sy = e.x - ox, e.y - oy
+            if sx < -90 or sy < -90 or sx > self.view_w + 90 or sy > self.view_h + 90:
+                continue
+            self._normal_disc(sx, sy, e.radius * 1.35, flat)
+        for b in self.level.braziers:
+            self._normal_disc(b.x - ox, b.y - oy, 15.0, flat)
+        if self.player.alive:
+            self._normal_disc(self.player.x - ox, self.player.y - oy,
+                              self.player.radius * 1.9, flat)
+        gpu.set_mode(gpu.NORMAL)
+
+    @staticmethod
+    def _normal_disc(sx, sy, r, fill):
+        """A ten-sided stand-in for a body. Nobody sees this buffer."""
+        pts = []
+        for i in range(10):
+            a = i * math.tau / 10.0
+            pts.append(sx + math.cos(a) * r)
+            pts.append(sy + math.sin(a) * r)
+        drawPolygon(*pts, fill=fill, opacity=100)
 
     def add_decal(self, x, y, scale=1.0):
         """Leave a burn where something went off."""
@@ -691,14 +726,13 @@ class World:
     ALBEDO_GAIN = 0.58
 
     # How far above the floor the lantern hangs, in design units. It sets how
-    # steeply the light rakes across the stone: low, and every blemish throws
+    # steeply its light rakes across the stone: low, and every blemish throws
     # a hard edge; high, and the surface flattens out again. About a third of
-    # a tile reads as a lamp carried at waist height.
+    # a tile reads as a lamp carried at waist height. Every light has one -
+    # see `BRAZIER_HEIGHT` and `RIFT_HEIGHT` - and they differ, which is why
+    # a brazier off to one side picks out courses the lantern does not.
     LIGHT_HEIGHT = 22.0
 
-    # How much of the stone's slope to believe. All of it lights the floor
-    # like corrugated iron; none of it is the flat pool this replaces.
-    RELIEF = 0.45
 
     # The rift's own light. Cold, so it reads against the lantern at a
     # glance, and far-reaching, because its whole job is to be findable.
@@ -748,6 +782,7 @@ class World:
             self._draw_decals(ox, oy, normals=True)
             if lv.wall_normal is not None:
                 drawImage(lv.wall_normal, -ox, -oy)
+            self._draw_entity_normals(ox, oy)
 
         # ---- what is there ------------------------------------------------
         gpu.begin_scene(palette.VOID_RGB)
@@ -758,10 +793,6 @@ class World:
         self._draw_rift(ox, oy)
         self.pickups.draw(ox, oy, self.view_w, self.view_h)
         drawImage(lv.wall_image, -ox, -oy)
-        # The stone's relief, folded into the stone and nothing else.
-        if has_normals:
-            gpu.apply_relief((player.x - ox) * scale, (player.y - oy) * scale,
-                             self.LIGHT_HEIGHT * scale, self.RELIEF)
         # Everything from here on is a thing standing in the room rather than
         # the room, and is marked as such so the added light does not wash it
         # out. See `gpu.scene_coverage`.
@@ -852,7 +883,8 @@ class World:
                 self._static_light(rift, rift.x, rift.y, ox, oy,
                                    self.RIFT_LIGHT_RADIUS, self.RIFT_LIGHT,
                                    self.RIFT_LIGHT_STRENGTH * t * breathe,
-                                   power=2.0, spread=t * breathe)
+                                   power=2.0, spread=t * breathe,
+                                   height=self.RIFT_HEIGHT)
         for b in self.level.braziers:
             if not b.lit:
                 continue
@@ -863,7 +895,8 @@ class World:
             self._static_light(b, b.x, b.y, ox, oy, self.BRAZIER_REACH,
                                palette.LIGHT_DEEP,
                                64 * b.ignite_t * flicker,
-                               power=2.2, spread=wobble)
+                               power=2.2, spread=wobble,
+                               height=self.BRAZIER_HEIGHT)
         self.projectiles.draw_lights(ox, oy, self.view_w, self.view_h)
         self.effects.draw_lights(ox, oy, self.view_w, self.view_h)
         # Eyes throw just enough light to catch the ground under them. Any
@@ -883,9 +916,15 @@ class World:
     # this radius and then reused; the flame's wobble scales the brightness
     # and the visible reach, not the geometry.
     BRAZIER_REACH = 172.0
+    # How high each light hangs above the floor, in design units. It decides
+    # how steeply that light rakes: a brazier's bowl sits higher than a
+    # carried lantern, and the rift is a hole in the floor, so its light comes
+    # from very nearly floor level and picks out every ridge it crosses.
+    BRAZIER_HEIGHT = 30.0
+    RIFT_HEIGHT = 9.0
 
     def _static_light(self, owner, wx, wy, ox, oy, reach, color, strength,
-                      power=2.2, spread=1.0):
+                      power=2.2, spread=1.0, height=0.0):
         """A light that does not move, cast through the walls that block it.
 
         Braziers and the rift used to be plain radial glows, which meant they
@@ -904,7 +943,8 @@ class World:
         if not hasattr(gpu, 'radial_fan') or not getattr(
                 gpu, 'ANALYTIC_LIGHTS', False):
             art.draw_glow(art.rgb_tuple(color), wx - ox, wy - oy,
-                          reach * spread, strength, power=power)
+                          reach * spread, strength, power=power,
+                          height=height)
             return
         shape = owner.shape
         if shape is None:
@@ -915,7 +955,8 @@ class World:
         scale = draw.SCALE
         screen = [((x - ox) * scale, (y - oy) * scale) for x, y in shape]
         gpu.radial_fan((wx - ox) * scale, (wy - oy) * scale, reach * scale,
-                       screen, art.rgb_tuple(color), strength, power=power)
+                       screen, art.rgb_tuple(color), strength, power=power,
+                       height=height * scale)
 
     def _draw_flat(self, app):
         """The original single-pass path, for the cmu-graphics renderer."""
@@ -1069,7 +1110,8 @@ class World:
         gpu.set_mode(gpu.ADD)
         if not NO_LANTERN:
             art.draw_lantern(LANTERN_GLOW, px - ox, py - oy, radius,
-                             clamp(96 * flicker, 0, 100))
+                             clamp(96 * flicker, 0, 100),
+                             height=self.LIGHT_HEIGHT)
             if self.volumetric:
                 self._draw_shafts(fan, ox, oy, flicker)
 
@@ -1166,6 +1208,18 @@ class World:
     # How deep the light lying on a wall reaches, in design units. The split
     # either side of the edge lives with the profile itself, in `art`.
     EDGE_LIGHT_DEPTH = art.EDGE_LIGHT_DEPTH
+    # How much of the painted-on wall light survives. It was written when a
+    # wall had no shape for a light to find; now every light shades by the
+    # surface it lands on, and most of this is doing that job twice.
+    EDGE_LIGHT_STRENGTH = 1.0
+    # How far past the wall's own edge the brightest line of that light sits.
+    # It used to land on the edge itself, which since walls grew a side face
+    # means it landed on the face - painting a flat warm stripe over the one
+    # surface whose whole shape the per-light shading had just worked out.
+    # Pushed back by the height of the face, it lands on the arris where the
+    # face meets the top, which is where the brightest line on a lit block
+    # actually is.
+    EDGE_LIGHT_BIAS = level_mod.WALL_FACE
 
     def _draw_wall_light_rich(self, ox, oy, flicker):
         """The light lying along a lit wall edge, as one gradient per piece.
@@ -1200,7 +1254,7 @@ class World:
         depth = self.EDGE_LIGHT_DEPTH
         # The gradient's bright line sits a fraction of the way down the
         # texture, so the quad is pushed forward to put that line on the edge.
-        offset = depth * (art.EDGE_LIGHT_PEAK - 0.5)
+        offset = depth * (art.EDGE_LIGHT_PEAK - 0.5) - self.EDGE_LIGHT_BIAS
         # A quad reaches `depth` out from its edge and half a piece along it,
         # so this margin cannot clip one that would have been visible.
         margin = depth + lighting.WALL_PIECE_LENGTH + 2.0
@@ -1233,7 +1287,7 @@ class World:
                          (length + lighting.WALL_PIECE_OVERLAP) * scale,
                          depth * scale, degrees,
                          color=(color.red, color.green, color.blue),
-                         opacity=int(6 + 74 * s))
+                         opacity=int((6 + 74 * s) * self.EDGE_LIGHT_STRENGTH))
 
     def _draw_wall_light_flat(self, ox, oy):
         # One stroke per edge, not two. `drawLine` builds a rotated quad and

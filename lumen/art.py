@@ -504,8 +504,13 @@ def dither_tile(size=256):
 # wall's top surface, and a wall is a whole tile thick - so sizing that part
 # in tiles rather than in a fixed handful of units is the difference between
 # seeing the top of a wall and seeing a bright line with blackness above it.
-EDGE_LIGHT_FLOOR = 4.5                  # design units in front of the edge
-EDGE_LIGHT_STONE = 62.0                 # and behind it, across the wall top
+# Measured from the brightest line, which sits on the arris where the wall's
+# side face meets its top - the same place the brightest line on a real lit
+# block is. In front of that is the face itself (a tile's worth of vertical
+# stone, lit but falling away) and then a little spill onto the floor; behind
+# it is the top, reaching about a tile back.
+EDGE_LIGHT_FLOOR = 23.5                 # face + floor spill, ahead of the arris
+EDGE_LIGHT_STONE = 45.0                 # the top, behind it
 EDGE_LIGHT_DEPTH = EDGE_LIGHT_FLOOR + EDGE_LIGHT_STONE
 EDGE_LIGHT_PEAK = EDGE_LIGHT_FLOOR / EDGE_LIGHT_DEPTH
 # Tall enough that the tail has a sample every half design unit at native
@@ -532,8 +537,10 @@ def edge_light():
     peak = EDGE_LIGHT_PEAK
     a = np.empty(n, dtype=np.float32)
     front = t < peak
-    # Onto the floor: a short, steep spill.
-    a[front] = np.clip(t[front] / peak, 0.0, 1.0) ** 2.1
+    # Across the face and onto the floor in front of it. Gentle rather than
+    # steep: the face is a real surface a tile high, and a steep ramp leaves
+    # it black with a bright line on top of it.
+    a[front] = np.clip(t[front] / peak, 0.0, 1.0) ** 1.45
     # Into the stone: a long tail, so the wall face is lit and not just its
     # corner.
     back = ~front
@@ -556,7 +563,7 @@ def edge_light():
 LANTERN_EXACT_MAX = 900
 
 
-def draw_lantern(color, cx, cy, radius, opacity):
+def draw_lantern(color, cx, cy, radius, opacity, height=0.0):
     """The lantern's pool of light.
 
     Where the renderer can evaluate the falloff per pixel it does, and the
@@ -569,7 +576,8 @@ def draw_lantern(color, cx, cy, radius, opacity):
     if getattr(gpu, 'ANALYTIC_LIGHTS', False) and gpu.active():
         gpu.radial_glow(cx * draw.SCALE, cy * draw.SCALE, radius * draw.SCALE,
                         rgb_tuple(color), min(100, int(opacity)),
-                        profile=gpu.LANTERN_PROFILE)
+                        profile=gpu.LANTERN_PROFILE,
+                        height=height * draw.SCALE)
         return
     size = int(radius * 2.0)
     # The *size* is quantised, because only baked sizes may be used. The
@@ -602,7 +610,8 @@ def prewarm_lantern(color, radii):
             lantern_glow(color, size)
 
 
-def draw_glow(color, cx, cy, radius, opacity, power=2.2, core=0.0):
+def draw_glow(color, cx, cy, radius, opacity, power=2.2, core=0.0,
+              height=0.0):
     """Draw a radial glow of arbitrary radius from one cached sprite.
 
     Rasterising a fresh sprite for every radius is what a naive implementation
@@ -619,7 +628,8 @@ def draw_glow(color, cx, cy, radius, opacity, power=2.2, core=0.0):
         # in the game is one of these.
         gpu.radial_glow(cx * draw.SCALE, cy * draw.SCALE, radius * draw.SCALE,
                         rgb_tuple(color), min(100, int(opacity)),
-                        profile=gpu.POWER_PROFILE, power=power, core=core)
+                        profile=gpu.POWER_PROFILE, power=power, core=core,
+                        height=height * draw.SCALE)
         return
     # Size is quantised so one cached sprite serves many radii; the position
     # is not - rounding it to whole design units makes a moving light judder

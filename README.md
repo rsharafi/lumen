@@ -455,6 +455,12 @@ masonry. Neither of them moves and neither do the walls, so their sweep is
 cast once and kept, and the light is drawn as one triangle per ray with the
 falloff evaluated per pixel — the same thing the volumetric shafts do.
 
+> A sweep hands its rays back sorted from angle zero, so a fan drawn as
+> `range(len(points) - 1)` leaves the wedge that straddles zero undrawn: a
+> hard-edged bite out of the light on the right-hand side of every static
+> light in the game. Sweeping the light's own brightness by angle finds it as
+> a single dark sector at exactly +0°.
+
 **The shafts** fill the visibility fan so the lit cone squeezes through a
 doorway with the light. On the SDL path that is forty concentric bands of
 quads per ray, which cost 3.3 ms of a 9.3 ms frame and still banded, because
@@ -462,15 +468,43 @@ each band carries a single integer opacity over a profile spanning about eight
 of them. Here it is one triangle per ray. A fortieth of the geometry, and
 continuous rather than in eight steps.
 
-**Surfaces have shape.** The stone was drawn as if lit from nowhere in
-particular, which means its own light and dark already describe its relief — so
-a normal map is derived from the luminance of each stone layer as it is baked,
-and the resulting N·L is folded into the stone's albedo before anything is
-standing on it. The ratio is taken against what a flat surface at the same
-spot would receive, so a floor with no slope comes back at exactly 1.0 and the
-scene's exposure does not move; only the parts that are shaped change. Wall
-side faces get a normal pointing down-screen instead of up, so the lantern
-picks out whichever faces it happens to be standing in front of.
+**Surfaces have shape, and every light finds it separately.** The stone was
+drawn as if lit from nowhere in particular, which means its own light and dark
+already describe its relief — so a normal map is derived from the luminance of
+each stone layer as it is baked. The N·L is then evaluated **per light, in the
+glow shader**: a glow's vertices already carry the offset from the light in
+units of its own radius, so the direction back to the flame is just that
+negated, and one more term carries how high the light hangs. The ratio is
+taken against what a flat surface at the same spot would receive, so unshaped
+ground comes back at exactly 1.0 and the exposure of the room does not move
+with it.
+
+That per-light part matters more than it sounds. A single key light means
+every light rakes the stone from the same direction, which is the one
+arrangement guaranteed to look wrong the moment there are two of them.
+Measured with two lights of equal radius placed on opposite sides of the same
+patch of floor, the raking patterns correlate at **−0.149** — anti-correlated,
+as two real lights would be. A shared key light gives +1.000.
+
+Each light carries its own height, and they differ: a carried lantern at about
+a third of a tile, a brazier's bowl higher, the rift at very nearly floor level
+because it *is* the floor. Dust and bolts pass a height of zero and opt out —
+neither is lying on anything.
+
+Anything standing on the ground writes a flat normal of its own into that
+buffer first, or every light in the room would rake a person with the courses
+of the stone underneath them, which is the floor's texture printed across a
+figure.
+
+**Walls have a side.** A wall used to be a lid — a top face with a line drawn
+round it. The bottom of each footprint is now given over to the one side a
+top-down camera can see, and its normal points *down-screen* rather than up, so
+it takes light from a completely different direction than the top does. The
+light lying along a wall is aimed at that geometry: its brightest line sits on
+the arris where the face meets the top, with the face falling away in front of
+it and the top reaching about a tile back. Landing that line on the wall's
+outer edge instead — where it was before the face existed — painted a flat warm
+stripe across the one surface the shading had just worked out.
 
 **A lit floor is mostly not floor.** Measured in a pool, two thirds of what
 you see there is light added over the stone rather than the stone itself.
