@@ -21,7 +21,7 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
 from cmu_graphics import CMUImage, getImageSize
 
-from . import gpu
+from . import draw, gpu
 from .draw import drawImage
 
 from . import noise
@@ -410,8 +410,18 @@ def dither_tile(size=256):
 # Where the lit edge itself sits inside the profile below, as a fraction of
 # its depth: a quarter of it spills forward onto the floor, the rest carries
 # back across the stone.
-EDGE_LIGHT_PEAK = 0.26
-_EDGE_LIGHT_DEPTH = 128
+# The cross-section of light lying on a wall, split either side of the lit
+# edge itself. What is in front spills onto the floor; what is behind is the
+# wall's top surface, and a wall is a whole tile thick - so sizing that part
+# in tiles rather than in a fixed handful of units is the difference between
+# seeing the top of a wall and seeing a bright line with blackness above it.
+EDGE_LIGHT_FLOOR = 4.5                  # design units in front of the edge
+EDGE_LIGHT_STONE = 62.0                 # and behind it, across the wall top
+EDGE_LIGHT_DEPTH = EDGE_LIGHT_FLOOR + EDGE_LIGHT_STONE
+EDGE_LIGHT_PEAK = EDGE_LIGHT_FLOOR / EDGE_LIGHT_DEPTH
+# Tall enough that the tail has a sample every half design unit at native
+# scale; the texture is stretched across `EDGE_LIGHT_DEPTH` units.
+_EDGE_LIGHT_DEPTH = 256
 
 
 def edge_light():
@@ -438,7 +448,14 @@ def edge_light():
     # Into the stone: a long tail, so the wall face is lit and not just its
     # corner.
     back = ~front
-    a[back] = np.clip(1.0 - (t[back] - peak) / (1.0 - peak), 0.0, 1.0) ** 1.7
+    # Across the wall top. Two terms: a bright shoulder just behind the edge,
+    # where the stone is nearly facing the flame, and a long dim reach over
+    # the rest of the tile so the top reads as a surface with light falling
+    # across it rather than as a strip. A single exponent cannot do both -
+    # low, and the light runs off the far side of the wall; high, and it is
+    # back to a line at the edge.
+    u = np.clip(1.0 - (t[back] - peak) / (1.0 - peak), 0.0, 1.0)
+    a[back] = np.clip(0.62 * u ** 3.4 + 0.38 * u ** 1.25, 0.0, 1.0)
     plane = np.repeat(a[:, None], 4, axis=1)
     white = np.full(plane.shape, 255.0, np.float32)
     return _store(key, _rgba((white, white, white), plane), keep_source=False)
@@ -451,8 +468,19 @@ LANTERN_EXACT_MAX = 900
 
 
 def draw_lantern(color, cx, cy, radius, opacity):
-    """Blit the lantern glow, using an exact-size sprite where one exists."""
+    """The lantern's pool of light.
+
+    Where the renderer can evaluate the falloff per pixel it does, and the
+    result is exact: no bake, no 8-bit alpha, no resample from one baked size
+    to another, and so no rings at any radius. The sprite path below is what
+    the SDL renderer still uses, and what CLASSIC visuals ask for.
+    """
     if radius <= 1.0 or opacity <= 0:
+        return
+    if getattr(gpu, 'ANALYTIC_LIGHTS', False) and gpu.active():
+        gpu.radial_glow(cx * draw.SCALE, cy * draw.SCALE, radius * draw.SCALE,
+                        rgb_tuple(color), min(100, int(opacity)),
+                        profile=gpu.LANTERN_PROFILE)
         return
     size = int(radius * 2.0)
     # The *size* is quantised, because only baked sizes may be used. The
@@ -495,6 +523,14 @@ def draw_glow(color, cx, cy, radius, opacity, power=2.2, core=0.0):
     the same as an exact-size blit - so one sprite serves every size.
     """
     if radius <= 1.0 or opacity <= 0:
+        return
+    if getattr(gpu, 'ANALYTIC_LIGHTS', False) and gpu.active():
+        # Same reasoning as the lantern: a glow stretched from one 256px
+        # sprite to twelve hundred is a resampled 8-bit ramp, and every light
+        # in the game is one of these.
+        gpu.radial_glow(cx * draw.SCALE, cy * draw.SCALE, radius * draw.SCALE,
+                        rgb_tuple(color), min(100, int(opacity)),
+                        profile=gpu.POWER_PROFILE, power=power, core=core)
         return
     # Size is quantised so one cached sprite serves many radii; the position
     # is not - rounding it to whole design units makes a moving light judder

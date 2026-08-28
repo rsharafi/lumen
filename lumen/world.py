@@ -919,12 +919,17 @@ class World:
             if self.volumetric:
                 self._draw_shafts(fan, ox, oy, flicker)
 
-        gpu.set_mode(gpu.MOD)
         ribbons = fan.shadow_ribbons()
         self.last_wedges = len(ribbons)
-        shade = palette.rgb(self.SHADOW_PASS, self.SHADOW_PASS,
-                            self.SHADOW_PASS)
-        for spread in (-self.SHADOW_SPREAD, 0.0, self.SHADOW_SPREAD):
+        # Occlusion is collected rather than multiplied in as it is drawn, so
+        # that two shadows crossing leave the floor as dark as one of them
+        # would rather than compounding into a black wedge. See
+        # `gpu.begin_shadow`.
+        scale = draw.SCALE
+        gpu.begin_shadow(self.SHADOW_PASS / 255.0)
+        spreads = (-self.SHADOW_SPREAD, 0.0, self.SHADOW_SPREAD)
+        for k, spread in enumerate(spreads):
+            gpu.shadow_pass(k)
             cos_s, sin_s = math.cos(spread), math.sin(spread)
             for inner, outer in ribbons:
                 for i in range(len(inner) - 1):
@@ -932,9 +937,11 @@ class World:
                     bx, by = inner[i + 1]
                     cx, cy = self._swing(outer[i + 1], px, py, cos_s, sin_s)
                     dx, dy = self._swing(outer[i], px, py, cos_s, sin_s)
-                    drawPolygon(ax - ox, ay - oy, bx - ox, by - oy,
-                                cx - ox, cy - oy, dx - ox, dy - oy,
-                                fill=shade, opacity=100)
+                    gpu.shadow_quad((((ax - ox) * scale, (ay - oy) * scale),
+                                     ((bx - ox) * scale, (by - oy) * scale),
+                                     ((cx - ox) * scale, (cy - oy) * scale),
+                                     ((dx - ox) * scale, (dy - oy) * scale)))
+        gpu.end_shadow()
         gpu.set_mode(gpu.NORMAL)
 
     @staticmethod
@@ -987,9 +994,9 @@ class World:
                             px + (ax - px) * hi - ox, py + (ay - py) * hi - oy,
                             fill=tint, opacity=opacity)
 
-    # How deep the light lying on a wall reaches, in design units, and how
-    # much of that is in front of the edge rather than behind it.
-    EDGE_LIGHT_DEPTH = 15.0
+    # How deep the light lying on a wall reaches, in design units. The split
+    # either side of the edge lives with the profile itself, in `art`.
+    EDGE_LIGHT_DEPTH = art.EDGE_LIGHT_DEPTH
 
     def _draw_wall_light_rich(self, ox, oy, flicker):
         """The light lying along a lit wall edge, as one gradient per piece.

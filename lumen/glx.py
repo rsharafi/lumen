@@ -39,6 +39,11 @@ MAX = 3
 
 BLOOM_LEVELS = 5
 
+# This backend evaluates lights per pixel in float; see `radial_glow`.
+ANALYTIC_LIGHTS = True
+# ...and collects occlusion where it cannot compound; see `begin_shadow`.
+SATURATING_SHADOWS = True
+
 _ctx = None
 _generation = 0
 _mode = NORMAL
@@ -49,9 +54,12 @@ _error_banner = None
 _solid_prog = None
 _tex_prog = None
 _post_prog = None
+_glow_prog = None
 _solid_vbo = _solid_vao = None
 _tex_vbo = _tex_vao = None
+_glow_vbo = _glow_vao = None
 _quad_vao = None
+_shadow_open = False
 
 # C-backed float arrays, not Python lists. A busy frame pushes a few hundred
 # thousand floats through here, and `np.asarray` on a list of that many is
@@ -59,6 +67,7 @@ _quad_vao = None
 # `array('f')` extends at C speed and hands its bytes straight to the buffer.
 _solid = array('f')         # pending solid vertices
 _tex = array('f')           # pending textured vertices
+_glow = array('f')          # pending analytic lights
 _tex_current = None         # texture the pending batch belongs to
 
 _targets = {}
@@ -117,6 +126,66 @@ void main() { frag = texture(tex0, v_uv) * v_col; }
 
 # The whole reason for this backend. The scene is lit in linear light with no
 # ceiling; this is where it becomes a picture.
+# A light drawn as maths rather than as a picture.
+#
+# The lantern used to be a baked sprite: a radial ramp rasterised into 8-bit
+# RGBA and stretched to the radius. Eight bits over a 250-pixel radius is
+# about one level of alpha every three pixels, and the eye finds those steps
+# without any trouble at all - they are the rings. Dithering the bake scatters
+# the step but cannot add levels that are not there, and stretching one sprite
+# to many radii resamples whatever contour it has.
+#
+# Here the falloff is evaluated at every pixel in float, from the pixel's own
+# distance to the light. There is no texture, no quantisation and no resample,
+# so there is nothing left to band: the profile is exactly the curve, to the
+# precision of the render target. The curve itself is unchanged.
+_GLOW_VS = '''#version 330
+uniform vec2 viewport;
+in vec2 in_pos;
+in vec2 in_local;        // -1..1 across the light's own square
+in vec4 in_col;
+in vec3 in_shape;        // profile, power, core
+out vec2 v_local;
+out vec4 v_col;
+out vec3 v_shape;
+void main() {
+    vec2 ndc = vec2(in_pos.x / viewport.x * 2.0 - 1.0,
+                    1.0 - in_pos.y / viewport.y * 2.0);
+    gl_Position = vec4(ndc, 0.0, 1.0);
+    v_local = in_local;
+    v_col = in_col;
+    v_shape = in_shape;
+}
+'''
+
+_GLOW_FS = '''#version 330
+in vec2 v_local;
+in vec4 v_col;
+in vec3 v_shape;
+out vec4 frag;
+void main() {
+    float d = length(v_local);
+    if (d >= 1.0) discard;
+    float f = 1.0 - d;
+    float a;
+    if (v_shape.x < 0.5) {
+        // The lantern. Three terms: a hot core, the usable pool, and a tail
+        // that reaches zero with zero slope - which is what keeps the light
+        // from ending in a visible circle.
+        a = 0.44 * pow(f, 1.7) + 0.34 * pow(f, 3.2) + 0.26 * pow(f, 6.5);
+    } else {
+        // Everything else: one power curve, with an optional flat core.
+        float core = v_shape.z;
+        float t = core > 0.0 ? clamp((1.0 - d - core) / max(1e-4, 1.0 - core),
+                                     0.0, 1.0) + (d < core ? 1.0 : 0.0)
+                             : f;
+        a = pow(clamp(t, 0.0, 1.0), v_shape.y);
+    }
+    a = clamp(a, 0.0, 1.0) * v_col.a;
+    frag = vec4(v_col.rgb * a, a);      // premultiplied, like every sprite
+}
+'''
+
 _POST_VS = '''#version 330
 in vec2 in_pos;
 in vec2 in_uv;
@@ -129,11 +198,19 @@ uniform sampler2D scene;
 uniform sampler2D bloom;
 uniform float bloom_amount;
 uniform float exposure;
-uniform int mode;          // 0 tone map, 1 bright pass, 2 blur, 3 copy
+uniform int mode;          // 0 tone map, 1 bright, 2 blur, 3 copy, 4 shadow
 uniform vec2 texel;
 uniform float threshold;
+uniform float dither;
 in vec2 v_uv;
 out vec4 frag;
+
+// Interleaved gradient noise: one cheap hash whose output is spatially well
+// spread, so the error it scatters looks like fine grain rather than like a
+// pattern laid over the picture.
+float ign(vec2 p) {
+    return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715))));
+}
 
 vec3 tonemap(vec3 x) {
     // The ACES filmic approximation. Plain Reinhard - c / (1 + c) - rolls
@@ -167,10 +244,33 @@ void main() {
         frag = vec4(acc / wsum, 1.0);
     } else if (mode == 3) {
         frag = texture(scene, v_uv);
+    } else if (mode == 4) {
+        // The shadow buffer holds one pass per channel, each already
+        // saturated by MAX blending, so overlapping occluders cannot darken
+        // a pixel more than one of them would. The sum is how many of the
+        // three offset passes reached this pixel - 3 in the umbra, 1 or 2
+        // through the penumbra, 0 in the open - and `threshold` carries the
+        // darkening one pass is worth.
+        vec3 s = texture(scene, v_uv).rgb;
+        float n = s.r + s.g + s.b;
+        float f = pow(threshold, n);
+        frag = vec4(f, f, f, 1.0);
     } else {
         vec3 c = texture(scene, v_uv).rgb;
         c += texture(bloom, v_uv).rgb * bloom_amount;
-        frag = vec4(tonemap(c), 1.0);
+        vec3 col = tonemap(c);
+        // Everything up to here is float, and none of it bands. The screen
+        // is not: it takes eight bits, and the lantern's falloff crosses a
+        // level every few pixels near its reach, which is exactly the
+        // condition that draws a contour ring. Rounding is what makes the
+        // ring - every pixel in a band commits the same error - so the error
+        // is scattered instead, by less than one level, before the hardware
+        // rounds. Two samples summed give a triangular distribution, which
+        // leaves no residual pattern of its own.
+        float r0 = ign(gl_FragCoord.xy);
+        float r1 = ign(gl_FragCoord.xy + vec2(37.0, 17.0));
+        col += vec3((r0 + r1 - 1.0) * dither);
+        frag = vec4(col, 1.0);
     }
 }
 '''
@@ -208,8 +308,9 @@ def generation():
 def attach(context):
     """Adopt a GL context. Every texture built for the previous one is void."""
     global _ctx, _generation, _mode, _frame_open, _error_banner
-    global _solid_prog, _tex_prog, _post_prog
+    global _solid_prog, _tex_prog, _post_prog, _glow_prog
     global _solid_vbo, _solid_vao, _tex_vbo, _tex_vao, _quad_vao
+    global _glow_vbo, _glow_vao, _shadow_open
     _ctx = context
     _generation += 1
     _mode = NORMAL
@@ -217,9 +318,11 @@ def attach(context):
     _error_banner = None
     del _solid[:]
     del _tex[:]
+    del _glow[:]
+    _shadow_open = False
     _drop_targets()
     if context is None:
-        _solid_prog = _tex_prog = _post_prog = None
+        _solid_prog = _tex_prog = _post_prog = _glow_prog = None
         return
     context.enable(context.BLEND)
     _solid_prog = context.program(vertex_shader=_SOLID_VS,
@@ -233,6 +336,12 @@ def attach(context):
     _tex_vbo = context.buffer(reserve=8 * 4 * 60000)
     _tex_vao = context.vertex_array(
         _tex_prog, [(_tex_vbo, '2f 2f 4f', 'in_pos', 'in_uv', 'in_col')])
+    _glow_prog = context.program(vertex_shader=_GLOW_VS,
+                                 fragment_shader=_GLOW_FS)
+    _glow_vbo = context.buffer(reserve=11 * 4 * 6 * 512)
+    _glow_vao = context.vertex_array(
+        _glow_prog, [(_glow_vbo, '2f 2f 4f 3f',
+                      'in_pos', 'in_local', 'in_col', 'in_shape')])
     quad = context.buffer(_SCREEN_QUAD.tobytes())
     _quad_vao = context.vertex_array(
         _post_prog, [(quad, '2f 2f', 'in_pos', 'in_uv')])
@@ -348,6 +457,12 @@ def flush():
         _tex_prog['tex0'].value = 0
         _tex_vao.render(vertices=len(_tex) // 8)
         del _tex[:]
+    if len(_glow):
+        STATS['flush'] += 1
+        _glow_vbo.write(_glow.tobytes())
+        _glow_prog['viewport'].value = _viewport
+        _glow_vao.render(vertices=len(_glow) // 11)
+        del _glow[:]
     _tex_current = None
 
 
@@ -420,6 +535,120 @@ def blit_rot(sprite, cx, cy, width, height, degrees, color=None, opacity=None):
     for dx, dy in ((-hw, -hh), (hw, -hh), (hw, hh), (-hw, hh)):
         pts.append((cx + dx * ca - dy * sa, cy + dx * sa + dy * ca))
     _push_tex_quad(tex, pts, col)
+
+
+LANTERN_PROFILE = 0.0
+POWER_PROFILE = 1.0
+
+# One light's square is 6 vertices; beyond this many in a frame the batch is
+# flushed early rather than grown.
+_GLOW_BATCH_MAX = 500
+
+
+def radial_glow(cx, cy, radius, color, opacity=100, profile=LANTERN_PROFILE,
+                power=2.0, core=0.0):
+    """A light as an analytic falloff rather than a stretched sprite.
+
+    Draws the light's bounding square and lets the fragment shader work out
+    every pixel's distance for itself, so the profile has as many levels as
+    the render target does instead of the 256 an 8-bit sprite can hold. That
+    is the whole difference between this and `blit`: same curve, no rings.
+    """
+    if _ctx is None or radius <= 0.5 or opacity <= 0:
+        return
+    a = _alpha(opacity)
+    if a <= 0.0:
+        return
+    r, g, b = (c / 255.0 for c in color[:3])
+    left, top = cx - radius, cy - radius
+    right, bottom = cx + radius, cy + radius
+    if len(_glow) >= _GLOW_BATCH_MAX * 11 * 6:
+        flush()
+    corners = ((left, top, -1.0, -1.0), (right, top, 1.0, -1.0),
+               (right, bottom, 1.0, 1.0), (left, bottom, -1.0, 1.0))
+    for i, j, k in ((0, 1, 2), (0, 2, 3)):
+        for idx in (i, j, k):
+            x, y, lx, ly = corners[idx]
+            _glow.extend((x, y, lx, ly, r, g, b, a, profile, power, core))
+
+
+# --------------------------------------------------------------------------
+# Shadow coverage
+# --------------------------------------------------------------------------
+# Shadows used to be drawn straight into the light buffer, three offset copies
+# of every occluder multiplying it down as they went. That is right for one
+# occluder and wrong for two: where two shadows overlap the multiply compounds,
+# so a sliver covered by six passes came out `shade**6` instead of `shade**3` -
+# measured at fourteen times too dark, and clearly visible as a dark wedge
+# running out of every corner where two shadows met.
+#
+# Occlusion does not compound. Two walls blocking the same patch of floor leave
+# it exactly as dark as one of them would. So coverage is collected here
+# instead, one pass per colour channel, with MAX blending - a channel that is
+# already 1 stays 1 however many occluders land on it - and the light is
+# multiplied down once, by `shade` raised to the number of passes that reached
+# it. Three offset passes still give the penumbra; overlapping them no longer
+# gives a hole.
+_SHADOW_CHANNELS = ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))
+_shadow_channel = _SHADOW_CHANNELS[0]
+_shadow_shade = 1.0
+
+SHADOW_PASSES = len(_SHADOW_CHANNELS)
+
+
+def begin_shadow(shade):
+    """Start collecting occlusion, away from the light buffer."""
+    global _shadow_open, _shadow_shade
+    if _ctx is None or not _targets:
+        return False
+    _shadow_shade = max(0.0, min(1.0, float(shade)))
+    _use('shadow')
+    _ctx.clear(0.0, 0.0, 0.0, 1.0)
+    set_mode(MAX)
+    _shadow_open = True
+    return True
+
+
+def shadow_pass(index):
+    """Which of the offset passes the quads that follow belong to."""
+    global _shadow_channel
+    _shadow_channel = _SHADOW_CHANNELS[index % len(_SHADOW_CHANNELS)]
+
+
+def shadow_quad(points):
+    """One occluded quad, in pixels, into the current pass."""
+    if _ctx is None or not _shadow_open or len(points) < 3:
+        return
+    r, g, b = _shadow_channel
+    col = (r, g, b, 1.0)
+    for i in range(1, len(points) - 1):
+        _push_solid_tri(points[0], points[i], points[i + 1], col)
+
+
+def end_shadow():
+    """Apply the collected occlusion to the light buffer, once."""
+    global _shadow_open
+    if _ctx is None or not _shadow_open:
+        return
+    flush()
+    _shadow_open = False
+    _use('light')
+    _ctx.blend_equation = _ctx.FUNC_ADD
+    _ctx.blend_func = (_ctx.ZERO, _ctx.SRC_COLOR)
+    tex = _targets['shadow'][0]
+    tex.use(0)
+    tex.use(1)
+    _post_prog['scene'].value = 0
+    _post_prog['bloom'].value = 1
+    _post_prog['mode'].value = 4
+    _post_prog['bloom_amount'].value = 0.0
+    _post_prog['exposure'].value = _EXPOSURE
+    _post_prog['threshold'].value = _shadow_shade
+    _post_prog['texel'].value = (0.0, 0.0)
+    _post_prog['dither'].value = 0.0
+    _quad_vao.render(vertices=3)
+    set_mode(NORMAL)
+    _apply_blend()
 
 
 def _convex(points):
@@ -574,7 +803,7 @@ def lighting_ready(size=None):
         return True
     try:
         made = {}
-        for name in ('scene', 'light', 'final', 'edge'):
+        for name in ('scene', 'light', 'final', 'edge', 'shadow'):
             tex = _ctx.texture(size, 4, dtype='f2')
             tex.filter = (_ctx.LINEAR, _ctx.LINEAR)
             made[name] = (tex, _ctx.framebuffer(color_attachments=[tex]))
@@ -772,6 +1001,7 @@ def _post(scene, bloom, mode, amount=0.0, threshold=1.0, texel=(0.0, 0.0)):
     _post_prog['exposure'].value = _EXPOSURE
     _post_prog['threshold'].value = threshold
     _post_prog['texel'].value = texel
+    _post_prog['dither'].value = _DITHER
     _quad_vao.render(vertices=3)
     _apply_blend()
 
@@ -780,6 +1010,10 @@ def _post(scene, bloom, mode, amount=0.0, threshold=1.0, texel=(0.0, 0.0)):
 # control rather than the two hand-tuned constants the 8-bit path needs.
 _EXPOSURE = 1.05
 _BLOOM_THRESHOLD = 0.75
+# Sub-level noise applied just before the screen's own 8-bit rounding. One
+# level is 1/255; a touch over half that either side is enough to destroy a
+# contour without being visible as grain.
+_DITHER = 0.6 / 255.0
 
 
 def _bloom_chain():

@@ -305,6 +305,54 @@ def blit_rot(sprite, cx, cy, width, height, degrees, color=None, opacity=None):
     tex.alpha = 255
 
 
+# Neither of the GL backend's two lighting tricks is available here: there is
+# no shader to evaluate a falloff per pixel, and no spare render target to
+# collect occlusion in. Both calls exist anyway so the game has one code path,
+# and both flags are False so it knows to use the baked sprite instead.
+ANALYTIC_LIGHTS = False
+LANTERN_PROFILE = 0.0
+POWER_PROFILE = 1.0
+SATURATING_SHADOWS = False
+
+SHADOW_PASSES = 3
+_shadow_fill = (255, 255, 255)
+
+
+def radial_glow(cx, cy, radius, color, opacity=100, profile=0.0,
+                power=2.0, core=0.0):
+    """Not available here; `art` blits a baked sprite instead."""
+    return False
+
+
+def begin_shadow(shade):
+    """Shadows go straight into the light buffer, as they always have.
+
+    Overlapping occluders therefore compound, which is the artefact the GL
+    backend's shadow buffer exists to remove. Reproducing it without a shader
+    would cost a second pass over the light buffer on a renderer that is
+    already the slower of the two, and this is the compatibility path.
+    """
+    global _shadow_fill
+    level = int(round(max(0.0, min(1.0, float(shade))) * 255.0))
+    _shadow_fill = (level, level, level)
+    set_mode(MOD)
+    return True
+
+
+def shadow_pass(index):
+    """One buffer, so every pass lands in the same place."""
+
+
+def shadow_quad(points):
+    if len(points) < 3:
+        return
+    polygon(points, fill=_shadow_fill, opacity=100)
+
+
+def end_shadow():
+    set_mode(NORMAL)
+
+
 def _convex(points):
     """True if the polygon turns the same way at every vertex."""
     n = len(points)
