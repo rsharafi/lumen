@@ -251,9 +251,9 @@ class World:
             self.effects.add_flash(0.9, palette.BOSS_EYE, wash=True)
             self.pickups.spawn(pickup_mod.HEART, enemy.x, enemy.y, 18, self.rng,
                                count=3, speed=(90, 220))
-            audio.play('boom', 1.0)
+            audio.play_at('boom', enemy.x, enemy.y, 1.0)
         else:
-            audio.play('kill', 0.4)
+            audio.play_at('kill', enemy.x, enemy.y, 0.4)
 
     # ------------------------------------------------------------- update --
     def update(self, dt, keys, aim_world, firing):
@@ -266,6 +266,10 @@ class World:
         shake = self.effects.take_shake()
         if shake:
             self.camera.add_shake(shake)
+
+        # So anything that makes a noise only has to know where it is.
+        audio.set_listener(self.camera.ox, self.camera.oy,
+                           self.view_w, self.view_h)
 
         if sdt <= 0.0:
             self.camera.follow(self.player.x, self.player.y, 0.0, 0.0, dt)
@@ -565,7 +569,7 @@ class World:
                                      self.fxrng, speed=(80, 260),
                                      life=(0.3, 0.7), size=(2, 4.4))
                 self.score += 25
-                audio.play('brazier', 0.55)
+                audio.play_at('brazier', b.x, b.y, 0.55)
 
     def _ambient_dust(self, dt):
         if self.fxrng.chance(12.0 * dt):

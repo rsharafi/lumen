@@ -916,6 +916,22 @@ class Game:
             self.world.deferred = self.deferred
             self.world.volumetric = self.volumetric
 
+    def renderer_label(self):
+        """What is actually drawing, and what is hosting it.
+
+        Not a setting - both are chosen at launch, because the renderer binds
+        at import. It is here because four combinations look similar enough in
+        a still frame that it is genuinely easy to be running one and think
+        you are running another.
+        """
+        if not gpu.active():
+            drawing = 'CMU-GRAPHICS'
+        else:
+            drawing = 'OPENGL' if getattr(gpu, 'BACKEND', '') == 'gl' else 'SDL'
+        app = self._app_ref
+        hosting = 'NATIVE' if getattr(app, 'is_native', False) else 'CMU'
+        return f'{drawing} / {hosting}'
+
     def visuals_label(self):
         return 'LIT' if self.deferred else 'CLASSIC'
 
@@ -965,7 +981,8 @@ class Game:
         if self.state == TITLE:
             self.title_screen.draw(self.sound_on, self.display_label(),
                                    self.visuals_label(),
-                                   self.volumetric_label())
+                                   self.volumetric_label(),
+                                   self.renderer_label())
         elif self.state == HELP:
             self.help_screen.draw()
         elif self.state == ENDED:
@@ -1018,7 +1035,7 @@ class Game:
 
     def _draw_debug(self):
         world = self.world
-        lines = [f'draw {self.frame_ms:5.2f} ms']
+        lines = [self.renderer_label(), f'draw {self.frame_ms:5.2f} ms']
         if world is not None:
             lines.append(f'particles {world.particles.live}')
             lines.append(f'enemies {len(world.enemies)}')

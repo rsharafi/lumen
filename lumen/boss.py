@@ -122,7 +122,7 @@ class HollowChoir(Enemy):
             self.vx = self.charge_dir[0] * 720.0
             self.vy = self.charge_dir[1] * 720.0
             ctx.effects.add_shake(5.0)
-            audio.play('dash', 0.8)
+            audio.play_at('dash', self.x, self.y, 0.8)
         elif self.attack == 'summon':
             self.shots_left = 2 + self.tier
             self.shot_timer = 0.0
@@ -159,7 +159,7 @@ class HollowChoir(Enemy):
             self.shot_timer = 0.42
             self.shots_left -= 1
             ctx.effects.add_light(self.x, self.y, 240, 0.22, self.eye_color)
-            audio.play('enemy_shoot', 0.5)
+            audio.play_at('enemy_shoot', self.x, self.y, 0.5)
 
         elif self.attack == 'spiral':
             arms = 2 + self.tier
@@ -170,7 +170,7 @@ class HollowChoir(Enemy):
             self.shot_timer = 0.055
             self.shots_left -= 1
             if self.shots_left % 8 == 0:
-                audio.play('enemy_shoot', 0.24)
+                audio.play_at('enemy_shoot', self.x, self.y, 0.24)
 
         elif self.attack == 'summon':
             from .enemies import Crawler, Wisp
@@ -191,7 +191,7 @@ class HollowChoir(Enemy):
                 self._bullet(ctx, a + k * 0.14, 430.0, 12.0, life=2.4)
             self.shot_timer = 0.16
             self.shots_left -= 1
-            audio.play('enemy_shoot', 0.4)
+            audio.play_at('enemy_shoot', self.x, self.y, 0.4)
 
     def _bullet(self, ctx, angle, speed, damage, life=3.4):
         ctx.projectiles.spawn(

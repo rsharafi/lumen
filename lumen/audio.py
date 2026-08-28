@@ -375,25 +375,75 @@ def _write_wav(path, mono):
 # --------------------------------------------------------------------------
 # Bank
 # --------------------------------------------------------------------------
+def _read_wav(path):
+    """A cached effect back as float32 mono."""
+    with wave.open(path, 'rb') as f:
+        frames = f.getnframes()
+        raw = np.frombuffer(f.readframes(frames), dtype='<i2')
+    if f.getnchannels() == 2:
+        raw = raw.reshape(-1, 2)[:, 0]
+    return raw.astype(np.float32) / 32768.0
+
+
+def _resample(sig, factor):
+    """Shift pitch by resampling. Above 1.0 is higher and shorter."""
+    if abs(factor - 1.0) < 1e-4:
+        return sig
+    n = int(len(sig) / factor)
+    if n < 8:
+        return sig
+    src = np.arange(len(sig), dtype=np.float32)
+    dst = np.linspace(0.0, len(sig) - 1.0, n, dtype=np.float32)
+    return np.interp(dst, src, sig).astype(np.float32)
+
+
 class SoundBank:
-    # How many copies of an effect can be in the air at once. Sized against
-    # how long each one now *rings*, not how long its envelope is: putting
-    # these in a room roughly tripled their tails, and a voice is busy until
-    # its tail has finished. Too few and a fast weapon steals a voice
-    # mid-decay, which is audible as a click.
-    VOICES = {
-        'shoot': 7, 'shoot_scatter': 5, 'hit': 7, 'crit': 4, 'kill': 5,
-        'enemy_shoot': 5, 'boom': 3, 'pickup': 3,
+    """Effects, their variants, and the channels they play on.
+
+    Every effect used to be one fixed recording played on a fixed channel, so
+    forty shots in a row were forty identical waveforms - which is most of
+    what makes repeated fire sound mechanical rather than alive. Now each one
+    is baked into several takes at slightly different pitch and colour, and a
+    play picks one at random, sets its own gain, and pans it to wherever the
+    thing that made it was standing.
+
+    Channels come from a pool rather than one per sound: `find_channel(True)`
+    takes a free one or steals the oldest, which is both simpler than the
+    hand-sized voice pools this had before and correct when tails got longer.
+    """
+
+    CHANNELS = 48
+
+    # (takes, pitch spread, how much colour varies). Sounds you hear over and
+    # over get the most; a one-shot like the boss roar wants to be the same
+    # sound every time you hear it.
+    VARIATION = {
+        'shoot': (6, 0.085, 0.30),
+        'shoot_scatter': (5, 0.075, 0.30),
+        'shoot_beam': (4, 0.050, 0.20),
+        'enemy_shoot': (5, 0.090, 0.35),
+        'hit': (6, 0.110, 0.35),
+        'crit': (4, 0.060, 0.25),
+        'kill': (5, 0.080, 0.30),
+        'hurt': (4, 0.070, 0.25),
+        'dash': (4, 0.070, 0.30),
+        'pickup': (4, 0.055, 0.20),
+        'boom': (3, 0.060, 0.25),
+        'brazier': (3, 0.070, 0.25),
+        'flare': (3, 0.045, 0.15),
+        'charge': (2, 0.030, 0.10),
+        'ui_move': (1, 0.0, 0.0),
     }
+    DEFAULT_VARIATION = (2, 0.030, 0.10)
 
     def __init__(self, cache_dir, enabled=True):
         self.cache_dir = cache_dir
         self.enabled = enabled
         self.volume = 0.7
-        self._sounds = {}
-        self._cursor = {}
+        self._takes = {}
         self._ready = False
         self._failed = False
+        self._rng = np.random.default_rng(90210)
 
     def build(self):
         """Generate any missing WAVs. Safe to call more than once."""
@@ -406,61 +456,99 @@ class SoundBank:
         with open(stamp, 'w') as f:
             f.write('ok')
 
+    def _variants(self, name, signal):
+        takes, spread, colour = self.VARIATION.get(name,
+                                                   self.DEFAULT_VARIATION)
+        if takes <= 1:
+            return [signal]
+        out = []
+        for i in range(takes):
+            # Spread evenly rather than at random, so the set actually covers
+            # its range instead of clustering wherever the seed happened to
+            # land.
+            f = 1.0 + spread * (2.0 * i / (takes - 1) - 1.0)
+            take = _resample(signal, f)
+            if colour > 0.0:
+                # A little filtering as well as pitch. Two takes at the same
+                # loudness and different brightness read as two events; two at
+                # different pitch alone can still read as one sound stuttering.
+                cut = 2200.0 * (1.0 + colour * (2.0 * i / (takes - 1) - 1.0))
+                take = take * (1.0 - colour * 0.5) + \
+                    _filter(take, cut, 'low', 1.5) * (colour * 0.5)
+            out.append(_normalise(take, 0.9))
+        return out
+
     def load(self):
         if self._ready or self._failed:
             return
         try:
             import pygame
             if not pygame.mixer.get_init():
-                # Initialise before cmu-graphics does it for us, so we can ask
-                # for a small buffer - the default is large enough to put an
-                # audible delay on every shot.
+                # Before cmu-graphics gets to it, so the buffer is small
+                # enough not to put an audible delay on every shot.
                 pygame.mixer.pre_init(SAMPLE_RATE, -16, 2, 512)
                 pygame.mixer.init()
+            pygame.mixer.set_num_channels(self.CHANNELS)
         except Exception as exc:
             sys.stderr.write(f'[lumen] audio device unavailable: {exc}\n')
             self._failed = True
             return
         try:
-            from cmu_graphics import Sound
-        except Exception:
-            self._failed = True
-            return
-        try:
+            import pygame
             for entry in sorted(os.listdir(self.cache_dir)):
                 if not entry.endswith('.wav'):
                     continue
                 name = entry[:-4]
-                path = os.path.join(self.cache_dir, entry)
-                voices = self.VOICES.get(name, 1)
-                self._sounds[name] = [Sound(path) for _ in range(voices)]
-                self._cursor[name] = 0
+                signal = _read_wav(os.path.join(self.cache_dir, entry))
+                takes = []
+                for variant in self._variants(name, signal):
+                    pcm = np.clip(variant, -1.0, 1.0)
+                    stereo = np.repeat((pcm * 32767.0).astype('<i2')[:, None],
+                                       2, axis=1)
+                    takes.append(pygame.sndarray.make_sound(
+                        np.ascontiguousarray(stereo)))
+                self._takes[name] = takes
             self._ready = True
         except Exception as exc:  # pragma: no cover - audio device problems
             sys.stderr.write(f'[lumen] audio unavailable: {exc}\n')
             self._failed = True
 
-    def play(self, name, volume=1.0):
+    def play(self, name, volume=1.0, pan=0.0, pitch=None):
+        """`pan` is -1 hard left to +1 hard right."""
         if not self.enabled or self._failed:
-            return
+            return None
         if not self._ready:
             self.load()
             if not self._ready:
-                return
-        voices = self._sounds.get(name)
-        if not voices:
-            return
-        idx = self._cursor[name]
-        self._cursor[name] = (idx + 1) % len(voices)
-        snd = voices[idx]
+                return None
+        takes = self._takes.get(name)
+        if not takes:
+            return None
         try:
-            snd.setVolume(max(0.0, min(1.0, volume * self.volume)))
-            snd.play(restart=True)
+            import pygame
+            sound = takes[int(self._rng.integers(len(takes)))]
+            channel = pygame.mixer.find_channel(True)
+            if channel is None:
+                return None
+            gain = max(0.0, min(1.0, volume * self.volume))
+            # Constant-power either side of centre, so panning something does
+            # not make it quieter as it crosses the middle.
+            pan = max(-1.0, min(1.0, pan))
+            angle = (pan + 1.0) * 0.25 * math.pi
+            channel.set_volume(gain * math.cos(angle), gain * math.sin(angle))
+            channel.play(sound)
+            return channel
         except Exception:
-            pass
+            return None
 
     def set_enabled(self, value):
         self.enabled = bool(value)
+        if not value:
+            try:
+                import pygame
+                pygame.mixer.stop()
+            except Exception:
+                pass
 
 
 def bank():
@@ -472,5 +560,44 @@ def bank():
     return _bank
 
 
-def play(name, volume=1.0):
-    bank().play(name, volume)
+def play(name, volume=1.0, pan=0.0):
+    bank().play(name, volume, pan)
+
+
+# Beyond this much of a screen-width away, a sound is not worth hearing.
+_EARSHOT = 1.35
+
+# Where the view is, so a call site only has to know its own position.
+# (camera x, camera y, view width, view height) in design units.
+_listener = (0.0, 0.0, 1280.0, 720.0)
+
+
+def set_listener(ox, oy, view_w, view_h):
+    """Told once a frame by the world, so `play_at` can take world coords."""
+    global _listener
+    _listener = (ox, oy, max(view_w, 1.0), max(view_h, 1.0))
+
+
+def play_at(name, x, y, volume=1.0):
+    """An effect placed where it happened, in world coordinates.
+
+    Panned by how far it is from the middle of the view and quieter with
+    distance, so a shot from the left arrives from the left and something
+    dying off-screen is a thing you notice rather than a thing that startles
+    you at full volume.
+    """
+    ox, oy, view_w, view_h = _listener
+    half_w = max(view_w * 0.5, 1.0)
+    half_h = max(view_h * 0.5, 1.0)
+    dx = ((x - ox) - half_w) / half_w
+    dy = ((y - oy) - half_h) / half_h
+    distance = math.hypot(dx, dy)
+    if distance > _EARSHOT:
+        return
+    # Falls off with distance and stops entirely at the edge of earshot,
+    # rather than cutting out at some arbitrary volume.
+    falloff = max(0.0, 1.0 - (distance / _EARSHOT) ** 1.6)
+    if falloff <= 0.01:
+        return
+    bank().play(name, volume * (0.35 + 0.65 * falloff),
+                pan=max(-1.0, min(1.0, dx * 0.85)))

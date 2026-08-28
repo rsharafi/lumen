@@ -219,11 +219,11 @@ class Enemy:
             ctx.effects.add_text(self.x, self.y - self.radius - 8,
                                  f'{int(amount)}', palette.CRIT, 21, True)
             ctx.effects.add_hitstop(0.045)
-            audio.play('crit', 0.5)
+            audio.play_at('crit', self.x, self.y, 0.5)
         else:
             ctx.effects.add_text(self.x, self.y - self.radius - 6,
                                  f'{int(amount)}', palette.UI_TEXT, 15, False)
-            audio.play('hit', 0.32)
+            audio.play_at('hit', self.x, self.y, 0.32)
 
         if self.hp <= 0.0:
             self.die(ctx, angle)
@@ -454,7 +454,7 @@ class Spitter(Enemy):
                 glow_color=(255, 120, 70), length=13.0, width=10.0,
                 knockback=60.0)
         ctx.effects.add_light(self.x, self.y, 90, 0.16, (255, 130, 90))
-        audio.play('enemy_shoot', 0.3)
+        audio.play_at('enemy_shoot', self.x, self.y, 0.3)
 
     def face_velocity(self, dt, rate=10.0):
         pass  # Spitters always face the player, handled in behave.
@@ -574,7 +574,7 @@ class Warden(Enemy):
                 direction=angle + math.pi, spread=1.7)
             ctx.effects.add_text(self.x, self.y - self.radius - 6, 'BLOCKED',
                                  palette.WARDEN_SHIELD, 14, False)
-            audio.play('hit', 0.2)
+            audio.play_at('hit', self.x, self.y, 0.2)
             return 0.0
         return super().damage_by(amount, ctx, angle, knockback, crit)
 

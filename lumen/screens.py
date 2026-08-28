@@ -177,7 +177,7 @@ class TitleScreen:
         self.backdrop.update(dt)
 
     def draw(self, sound_on, display_label='', visuals_label='',
-             volumetric_label=''):
+             volumetric_label='', renderer_label=''):
         self.backdrop.draw()
         w, h = self.w, self.h
 
@@ -247,6 +247,12 @@ class TitleScreen:
         drawLabel('ARROWS / W S  MOVE     ENTER  SELECT     OR USE THE MOUSE',
                   w * 0.5, h - 32, size=11, fill=palette.UI_FAINT,
                   font=palette.FONT_UI, opacity=64)
+        if renderer_label:
+            # Which of the four host/renderer pairs is live. Informational -
+            # both are picked at launch, not from this menu.
+            drawLabel(renderer_label, w - 14, h - 14, size=10,
+                      fill=palette.UI_DIM, font=palette.FONT_UI,
+                      align='right', opacity=74)
 
 
 # --------------------------------------------------------------------------

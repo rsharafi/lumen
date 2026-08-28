@@ -483,6 +483,33 @@ is what stone and glass and metal actually do.
 `ui_move` is deliberately untouched: it is a 40 ms tick, it already sat right
 under the eye, and a tail on it would only smear the menu.
 
+#### Every shot a different shot
+
+One recording per effect means forty shots in a row are forty identical
+waveforms, which is most of what makes repeated fire sound mechanical. Each
+effect is now baked into several *takes* at slightly different pitch and
+colour — six for the ones you hear constantly, one for `ui_move`, which wants
+to be the same tick every time — and a play picks one at random. Measured, the
+six takes of `shoot` span 18.6% in pitch and the closest two differ by 0.36 in
+mean amplitude.
+
+Channels come from a pool rather than one per sound. `find_channel(True)` takes
+a free one or steals the oldest, which is simpler than hand-sized voice pools
+and stays correct now that tails are three times longer.
+
+And a sound happens *somewhere*. `audio.set_listener` is told where the view is
+once a tick, so a call site only has to know its own position:
+
+```python
+audio.play_at('crit', self.x, self.y, 0.5)
+```
+
+which pans it by how far it is from the middle of the frame, drops its volume
+with distance, and does not play it at all past the edge of earshot — so an
+enemy dying off-screen is something you notice rather than something that
+startles you at full volume. Panning is constant-power, so crossing the centre
+does not dip.
+
 ---
 
 ## Layout

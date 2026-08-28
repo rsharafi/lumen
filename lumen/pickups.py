@@ -102,7 +102,8 @@ class PickupField:
                 particles.burst(it.x, it.y, 6, _SPEC[it.kind][1], rng,
                                 speed=(60, 190), life=(0.14, 0.32),
                                 size=(1.6, 3.2))
-                audio.play('pickup', 0.32 if it.kind == EMBER else 0.5)
+                audio.play_at('pickup', it.x, it.y,
+                              0.32 if it.kind == EMBER else 0.5)
                 continue
 
             keep.append(it)
