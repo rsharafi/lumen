@@ -39,7 +39,11 @@ for arg in "$@"; do
     case "$arg" in
         --native)  ENTRY=native.py ;;
         --cmu)     ENTRY=main.py ;;
-        --gl)      ENTRY=native.py; export LUMEN_RENDERER=gl ;;
+        # OpenGL needs our own loop; cmu-graphics cannot host it. Set
+        # the renderer here and let the entry point follow below, so
+        # that `--gl --cmu` cannot end up asking for the one pairing
+        # that does not work.
+        --gl)      export LUMEN_RENDERER=gl ;;
         --sdl)     export LUMEN_RENDERER=gpu ;;
         --cpu)     ENTRY=main.py; export LUMEN_RENDERER=cpu ;;
         --help|-h)
@@ -65,6 +69,10 @@ USAGE
         *) PASS="$PASS $arg" ;;
     esac
 done
+
+# The OpenGL renderer only runs under our own loop, whatever order the
+# switches came in.
+if [ "${LUMEN_RENDERER:-}" = "gl" ]; then ENTRY=native.py; fi
 
 echo "LUMEN: $ENTRY, renderer=${LUMEN_RENDERER:-gpu}" >&2
 exec ./.venv/bin/python "$ENTRY" $PASS

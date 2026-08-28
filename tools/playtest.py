@@ -86,6 +86,17 @@ def cycle():
     return ('cycle',)
 
 
+def braziers(walk=True):
+    """Light every brazier on the floor, and stand on one.
+
+    Walking into a brazier is the only way to light one in play, and no
+    scenario here ever happened to do it - which is how a lit brazier came to
+    reference two constants that had been deleted, and crash the frame it
+    first appeared in. Lighting them on demand puts that path in the suite.
+    """
+    return ('braziers', walk)
+
+
 def tap(key, frame, hold=2):
     return [(frame, press(key)), (frame + hold, release(key))]
 
@@ -150,6 +161,15 @@ SCENARIOS = {
         [(30, press('d'))],
         [(60, press('space')), (63, release('space'))],
     ), 76),
+    # A lit brazier draws light onto every wall edge within reach of it,
+    # through the same path the lantern uses; `far` leaves the player across
+    # the floor from them so the off-screen cull is exercised too.
+    'brazier': (flatten(start_run(4), wander(24, 90),
+                        [(90, braziers())]), 150),
+    'brazier-far': (flatten(start_run(4), [(30, braziers(walk=False))],
+                            wander(40, 200)), 220),
+    'brazier-resize': (flatten(start_run(4), [(30, braziers())],
+                               [(50, cycle()), (80, cycle())]), 110),
     'lowfuel': (start_run(4), 900),
     'draft': (flatten(
         start_run(4),
@@ -345,6 +365,19 @@ def onStep(app):
             GAME.transition(lambda: GAME.finish_run(won=True))
         elif kind == 'cycle':
             GAME.cycle_display(GAME._app_ref)
+        elif kind == 'braziers':
+            world = getattr(GAME, 'world', None)
+            lit = 0
+            for b in getattr(world, 'level', None).braziers if world else ():
+                b.lit = True
+                b.ignite_t = 0.35
+                b.edges = None
+                lit += 1
+            if action[1] and lit:
+                first = world.level.braziers[0]
+                world.player.x, world.player.y = first.x, first.y
+            STATE['braziers'] = lit
+            sys.stderr.write(f'[playtest] lit {lit} brazier(s)\n')
 
     t0 = time.perf_counter()
     try:

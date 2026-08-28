@@ -1007,22 +1007,44 @@ class World:
         if not gpu.active():
             return self._draw_wall_light_flat(ox, oy)
 
+        self._draw_edge_pieces(pieces, ox, oy, flicker)
+
+    def _draw_edge_pieces(self, pieces, ox, oy, gain=1.0):
+        """One stretched gradient per lit piece of wall edge.
+
+        Every light in the game lands on masonry through here, and that is the
+        point: the profile is a baked texture stretched to the piece, so a
+        second copy of this loop written slightly differently would put two
+        visibly different kinds of light on the same stretch of wall. A
+        brazier and the lantern differ only in `gain` - the flame's flicker,
+        or how far through its ignition the brazier is.
+        """
         profile = art.edge_light()
         scale = draw.SCALE
         depth = self.EDGE_LIGHT_DEPTH
         # The gradient's bright line sits a fraction of the way down the
         # texture, so the quad is pushed forward to put that line on the edge.
         offset = depth * (art.EDGE_LIGHT_PEAK - 0.5)
+        # A quad reaches `depth` out from its edge and half a piece along it,
+        # so this margin cannot clip one that would have been visible.
+        margin = depth + lighting.WALL_PIECE_LENGTH + 2.0
         for ax, ay, bx, by, s, nx, ny in pieces:
-            s = s * flicker
+            s = s * gain
+            if s <= 0.0:
+                continue
             if s > 1.0:
                 s = 1.0
-            ex, ey = bx - ax, by - ay
-            length = math.hypot(ex, ey)
-            if length < 1e-6:
-                continue
             mx = (ax + bx) * 0.5 - ox + nx * offset
             my = (ay + by) * 0.5 - oy + ny * offset
+            # Braziers light walls anywhere on the floor, including well off
+            # the side of the screen; the lantern's own pieces are all near
+            # the player and this costs them nothing.
+            if (mx < -margin or my < -margin
+                    or mx > self.view_w + margin or my > self.view_h + margin):
+                continue
+            length = math.hypot(bx - ax, by - ay)
+            if length < 1e-6:
+                continue
             color = palette.wall_light(s)
             # The texture runs bright-edge-first down its own height, so the
             # quad is turned to put that axis along the outward normal.
@@ -1063,34 +1085,27 @@ class World:
         for b in self.level.braziers:
             if not b.lit:
                 continue
-            if b.edges is None:
+            # The cache is resolved for whichever renderer was live at
+            # ignition, and only the subdivided form carries a normal. The
+            # visual-quality setting can change under a lit brazier, so the
+            # form it was built in is checked rather than assumed.
+            if b.edges is None or b.edges_rich != rich:
                 if rich:
                     b.edges = lighting.lit_wall_segments(
                         self.level, b.x, b.y, 190)
                 else:
                     b.edges = lighting.lit_wall_edges(self.level, b.x, b.y, 190)
-            for piece in b.edges:
-                ax, ay, bx, by, s = piece[:5]
+                b.edges_rich = rich
+            if rich:
+                self._draw_edge_pieces(b.edges, ox, oy, b.ignite_t)
+                continue
+            for ax, ay, bx, by, s in b.edges:
                 sx = ax - ox
                 if sx < -260 or sx > self.view_w + 260:
                     continue
                 lit = s * b.ignite_t
-                color = palette.wall_light(lit)
-                # The cache was filled for whichever backend was live when the
-                # brazier was lit; only the subdivided form carries a normal.
-                if rich and len(piece) >= 7:
-                    nx, ny = piece[5], piece[6]
-                    drawLine(sx + nx * 1.4, ay - oy + ny * 1.4,
-                             bx - ox + nx * 1.4, by - oy + ny * 1.4,
-                             fill=color, lineWidth=6.0,
-                             opacity=int(2 + 10 * lit * lit))
-                    for dist, k in self.WALL_LIGHT_WASH:
-                        drawLine(sx - nx * dist, ay - oy - ny * dist,
-                                 bx - ox - nx * dist, by - oy - ny * dist,
-                                 fill=color,
-                                 lineWidth=self.WALL_LIGHT_WASH_WIDTH,
-                                 opacity=int(38 * lit * k))
-                drawLine(sx, ay - oy, bx - ox, by - oy, fill=color,
+                drawLine(sx, ay - oy, bx - ox, by - oy,
+                         fill=palette.wall_light(lit),
                          lineWidth=2, opacity=int(4 + 38 * lit))
 
     def _draw_braziers(self, ox, oy):

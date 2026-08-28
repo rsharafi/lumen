@@ -18,6 +18,19 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+# The OpenGL backend takes the window over outright, and cmu-graphics' own
+# redraw cannot survive that: it goes on blitting into a surface that stops
+# existing the moment the window is rebuilt for a resolution change, and the
+# frame after a resize dies with "Surface is not initialized". `--gl` runs
+# `native.py` for exactly that reason. Asked for it here anyway, say so and
+# use the SDL backend, which shares this window properly.
+if (os.environ.get('LUMEN_RENDERER') or '').strip().lower() in (
+        'gl', 'opengl', 'moderngl', 'shader'):
+    sys.stderr.write(
+        'LUMEN: the OpenGL renderer needs its own loop - run `./run.sh --gl`\n'
+        '  or `python native.py`. Drawing through SDL here instead.\n')
+    os.environ['LUMEN_RENDERER'] = 'gpu'
+
 # `app` must exist in this module's globals: cmu-graphics' setupMvc()
 # deletes it from __main__, assuming the usual `from cmu_graphics import *`.
 from cmu_graphics import app, runApp  # noqa: E402,F401

@@ -42,7 +42,8 @@ class Rect:
 class Brazier:
     """A static light the player can ignite by walking into it."""
 
-    __slots__ = ('x', 'y', 'lit', 'flicker', 'ignite_t', 'edges')
+    __slots__ = ('x', 'y', 'lit', 'flicker', 'ignite_t', 'edges',
+                 'edges_rich')
 
     def __init__(self, x, y):
         self.x = x
@@ -53,6 +54,9 @@ class Brazier:
         # Wall edges this brazier lights. Braziers and walls are both static,
         # so this is resolved once on ignition instead of every frame.
         self.edges = None
+        # Which renderer that cache was resolved for; the two forms carry
+        # different tuples and the setting can change while it is lit.
+        self.edges_rich = False
 
 
 class Level:
