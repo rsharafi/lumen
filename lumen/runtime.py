@@ -213,6 +213,7 @@ _surface = None             # what it blits into
 _shimmed = False
 _logical = None             # window size in points, for pointer mapping
 _win_high_dpi = [False]     # the flag the live window was created with
+_win_is_gl = [False]        # whether it carries an OpenGL context
 _renderer_for = [None]      # the window the live SDL renderer is bound to
 # The renderer's true framebuffer size. Once a logical size is set,
 # `get_viewport()` reports that instead, so the real one has to be remembered.
@@ -242,6 +243,8 @@ def backing_scale():
 
 def drawable_size():
     """The window's framebuffer size, in real pixels."""
+    if gpu.BACKEND == 'gl' and _render_size:
+        return _render_size
     if _renderer is not None:
         if _drawable_px[0] is not None:
             return _drawable_px[0]
@@ -410,10 +413,12 @@ def set_video_mode(app, size, fullscreen, quality=1.0):
     # renderer. SDL refuses to do both - asking a surface-mode window for a
     # renderer fails with "Surface already associated with window" - so a
     # change to either means building a new window.
-    wants_renderer = gpu.wanted() or render_scale < 0.999
+    wants_gl = gpu.BACKEND == 'gl' and gpu.wanted()
+    wants_renderer = (gpu.wanted() or render_scale < 0.999) and not wants_gl
     want_new = (_win is None
                 or high_dpi != _win_high_dpi[0]
-                or wants_renderer != (_renderer is not None))
+                or wants_gl != _win_is_gl[0]
+                or (not wants_gl and wants_renderer != (_renderer is not None)))
     if want_new:
         _drop_renderer(forget_window=True)
         if _win is None:
@@ -425,8 +430,20 @@ def set_video_mode(app, size, fullscreen, quality=1.0):
                 pass
             _win = None
         try:
+            if wants_gl:
+                # The context has to be asked for before the window exists,
+                # and a window is either a GL window or an SDL-renderer one -
+                # never both - which is why changing backend rebuilds it.
+                pygame.display.gl_set_attribute(
+                    pygame.GL_CONTEXT_MAJOR_VERSION, 3)
+                pygame.display.gl_set_attribute(
+                    pygame.GL_CONTEXT_MINOR_VERSION, 3)
+                pygame.display.gl_set_attribute(
+                    pygame.GL_CONTEXT_PROFILE_MASK,
+                    pygame.GL_CONTEXT_PROFILE_CORE)
             _win = pygame.Window(TITLE_TEXT, size, resizable=True,
-                                 allow_high_dpi=high_dpi)
+                                 allow_high_dpi=high_dpi, opengl=wants_gl)
+            _win_is_gl[0] = wants_gl
         except Exception as exc:
             if debug:
                 sys.stderr.write(f'[lumen] window{size}: {exc!r}\n')
@@ -486,6 +503,32 @@ def _attach_surface(pygame, render_scale, debug):
 
     _drop_renderer()
     scale = min(1.0, max(0.25, float(render_scale)))
+
+    if gpu.BACKEND == 'gl' and gpu.wanted():
+        try:
+            import moderngl
+            _win.opengl_make_current() if hasattr(
+                _win, 'opengl_make_current') else None
+            ctx = gpu.renderer()
+            if ctx is None or _renderer_for[0] is not _win:
+                ctx = moderngl.create_context()
+                gpu.attach(ctx)
+                _renderer_for[0] = _win
+            gpu.set_window(_win)
+            _render_size = tuple(ctx.screen.size)
+            gpu.set_viewport(_render_size)
+            gpu.lighting_ready(_render_size)
+            _surface = pygame.Surface((1, 1), 0, 32)
+            return True
+        except Exception as exc:
+            sys.stderr.write(f'[lumen] OpenGL renderer unavailable ({exc!r}); '
+                             f'falling back to the cmu-graphics renderer\n')
+            gpu.give_up()
+            try:
+                from . import art
+                art.clear_all()
+            except Exception:
+                pass
 
     if gpu.wanted():
         try:

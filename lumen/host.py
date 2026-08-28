@@ -138,6 +138,18 @@ def run(game, width, height, title='LUMEN'):
     app = NativeApp(width, height, title)
     game.start(app)
 
+    if not gpu.active():
+        # `LUMEN_RENDERER=cpu` asks for cmu-graphics' own rasteriser, and that
+        # only exists inside cmu-graphics' own loop. Say so rather than
+        # presenting empty frames.
+        sys.stderr.write(
+            'LUMEN: the native host draws through lumen/gpu.py, and no GPU\n'
+            '  renderer could be started. LUMEN_RENDERER=cpu selects\n'
+            "  cmu-graphics' rasteriser, which only runs under main.py.\n"
+            '  Use `python main.py` for that, or drop LUMEN_RENDERER.\n')
+        pygame.quit()
+        return
+
     # `start` asks runtime for the window, so by now there is one to pump.
     clock_last = time.perf_counter()
     accumulator = 0.0

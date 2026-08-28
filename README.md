@@ -24,6 +24,20 @@ and all 21 sound effects, are generated at startup from numpy and PIL.
 ./run.sh
 ```
 
+There are two front ends and three renderers, and they compose:
+
+```bash
+python main.py                     # cmu-graphics host
+python native.py                   # host it directly on pygame
+LUMEN_RENDERER=cpu  python main.py    # cmu-graphics' own rasteriser
+LUMEN_RENDERER=gpu  python native.py  # SDL's renderer (default)
+LUMEN_RENDERER=gl   python native.py  # OpenGL, with shaders and HDR
+```
+
+`main.py` is the original and is unchanged. `native.py` owns the loop
+outright - see `lumen/host.py` for what that buys, and `lumen/gpu.py` for how
+the renderer is chosen.
+
 That creates a virtualenv on first launch, installs the dependencies, and
 starts the game. It picks the newest suitable Python on `PATH`; override with
 `PYTHON=/path/to/python ./run.sh`. To do it by hand:

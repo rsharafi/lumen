@@ -9,3 +9,7 @@ numpy>=1.26
 # own CPU rasteriser - which works, but gives up native resolution and
 # roughly a third of the frame rate.
 pygame-ce>=2.5.2
+
+# Only needed for the OpenGL renderer (LUMEN_RENDERER=gl). The game runs
+# without it on either of the other two.
+moderngl>=5.8
