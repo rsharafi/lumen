@@ -107,6 +107,18 @@ ALL = [
          'Unseal the coil. Hold it, and it goes through everything.',
          [200], _nothing, palette.BEAM, unlocks='coil'),
 
+    Node('slug', 'HALLOWPOINT',
+         'Unseal the heavy round. One shot, and it moves what it hits.',
+         [180], _nothing, palette.SCATTER, unlocks='slug'),
+
+    Node('stitch', 'EMBERSTITCH',
+         'Unseal the stitcher. No reach at all, and it never stops.',
+         [240], _nothing, palette.LIGHT_WARM, unlocks='stitch'),
+
+    Node('glass', 'NIGHTGLASS',
+         'Unseal the shards. Three at a time, wide, and they pass through.',
+         [300], _nothing, palette.WARDEN_SHIELD, unlocks='glass'),
+
     Node('kindling', 'KINDLING',
          'Begin each descent already holding one offering.',
          [150, 340], _nothing, palette.LIGHT_WARM),

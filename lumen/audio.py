@@ -19,7 +19,7 @@ import wave
 import numpy as np
 
 SAMPLE_RATE = 44100
-CACHE_VERSION = 5
+CACHE_VERSION = 6
 
 _bank = None
 
@@ -246,6 +246,17 @@ def _make_sounds():
     out['shoot_beam'] = _normalise(
         _room(_soft_clip(_mix(beam * 0.7, ring)), 0.8, 5.0, 0.32, rng=rng), 0.62)
 
+    # A heavy slug leaving the barrel: low, short, and percussive, with none
+    # of the lance's crackle. It should sound like something expensive.
+    n = int(0.42 * SAMPLE_RATE)
+    slug = _mix(_filter(_sweep(0.42, 190, 46, 'saw', 1.2), 620, 'low', 2.2)
+                * _env(n, 0.001, 0.10, 0.12, 0.24),
+                _filter(_noise(n, rng), 1500, 'low', 1.4)
+                * _env(n, 0.0006, 0.05, 0.0, 0.1) * 0.7,
+                _struck(0.42, 128, (1.0, 2.1), (1.0, 2.4)) * 0.5)
+    out['shoot_heavy'] = _normalise(
+        _room(_soft_clip(slug), 0.55, 6.5, 0.26, rng=rng), 0.62)
+
     # Charging hum for the beam.
     n = int(0.75 * SAMPLE_RATE)
     hum = _filter(_sweep(0.75, 70, 420, 'saw', 1.8), 900, 'low', 2.0)
@@ -440,6 +451,7 @@ class SoundBank:
     VARIATION = {
         'shoot': (6, 0.085, 0.30),
         'shoot_scatter': (5, 0.075, 0.30),
+        'shoot_heavy': (5, 0.060, 0.26),
         'shoot_beam': (4, 0.050, 0.20),
         'enemy_shoot': (5, 0.090, 0.35),
         'hit': (6, 0.110, 0.35),

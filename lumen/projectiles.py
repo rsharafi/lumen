@@ -266,4 +266,34 @@ WEAPONS = [
            sound='shoot_beam', recoil=120.0, shake=2.6, light=260.0),
 ]
 
+
+# ---------------------------------------------------------------------------
+# The unsealed three. Every one of these answers a question the first three
+# leave open: what if a single shot mattered, what if you never stopped
+# firing, what if you wanted to hold a line rather than close on something.
+# ---------------------------------------------------------------------------
+WEAPONS += [
+    Weapon('slug', 'HALLOWPOINT',
+           'One heavy round. Slow, enormous, and it moves what it hits.',
+           cooldown=0.74, damage=38.0, speed=760, spread=0.012, life=1.3,
+           pierce=0, radius=8.5, length=22.0, width=9.5,
+           color=palette.SCATTER, glow=(255, 168, 96),
+           knockback=760.0, sound='shoot_heavy', recoil=280.0, shake=3.2,
+           light=210.0),
+
+    Weapon('stitch', 'EMBERSTITCH',
+           'A stream of small sparks. No reach, and it never stops.',
+           cooldown=0.052, damage=3.3, speed=880, spread=0.075, life=0.30,
+           pierce=0, radius=3.4, length=13.0, width=3.2,
+           color=palette.LIGHT_WARM, glow=(255, 214, 150),
+           knockback=42.0, recoil=14.0, shake=0.28, light=64.0),
+
+    Weapon('glass', 'NIGHTGLASS',
+           'Three shards, wide and far, and they pass through what they hit.',
+           cooldown=0.40, damage=8.0, speed=1040, pellets=3, spread=0.115,
+           life=1.5, pierce=3, radius=5.0, length=30.0, width=4.0,
+           color=palette.WARDEN_SHIELD, glow=(150, 235, 225),
+           knockback=90.0, recoil=70.0, shake=1.1, light=130.0),
+]
+
 WEAPONS_BY_KEY = {w.key: w for w in WEAPONS}

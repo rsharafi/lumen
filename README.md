@@ -2,13 +2,13 @@
 
 A top-down roguelite built on the CMU CS Academy graphics library
 (`cmu-graphics`). Twelve procedurally generated chambers across six layout
-archetypes, five enemy species with elite variants and a three-phase boss,
-three weapons, fifty run modifiers, a persistent progression track, and
+archetypes, five enemy species with elite variants and a four-phase boss,
+six weapons, fifty run modifiers, a persistent progression track, and
 real-time 2D shadowcasting — **you carry the only light**, and everything you
 cannot see is still there.
 
 No asset files ship with the game. Every texture, sprite, glow and item icon,
-and all 21 sound effects, are generated at startup from numpy and PIL.
+and all 24 sound effects, are generated at startup from numpy and PIL.
 
 It runs on three renderers behind one interface — cmu-graphics' own
 rasteriser, SDL's renderer, and OpenGL. On the last of those the lighting is
@@ -145,6 +145,14 @@ at the end of every run. They are banked now — won or lost — and buy eleven
 things across twenty-three ranks that are still there next time: health,
 lantern capacity, damage, speed, ember value, a redraw, a ward, a revive, the
 two other weapons, and starting a descent already holding an offering.
+
+Five of the six weapons are unsealed here, and they are answers to different
+questions rather than upgrades of each other: SCATTERLIGHT has no reach at
+all, COILBEAM charges and passes through everything, HALLOWPOINT fires one
+enormous round that moves what it hits, EMBERSTITCH never stops and cannot
+reach, NIGHTGLASS throws three shards wide and far. Their damage per second
+sits between 51 and 83 — what separates them is range, pierce and knockback,
+not output.
 
 Two rules keep it from becoming a waiting room. The vault is never gated: every
 floor and the boss are reachable on a first run with the starting weapon, so

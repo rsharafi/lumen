@@ -385,8 +385,21 @@ class World:
         weapon = player.weapon
         if firing:
             if weapon.charge_time > 0.0:
+                if not player.charging:
+                    # A charging hum has existed in the sound bank since the
+                    # coil was written and nothing ever played it, so holding
+                    # the trigger on the one weapon that asks you to hold it
+                    # was silent until the shot went off.
+                    audio.play('charge', 0.55)
                 player.charging = True
+                was = player.charge
                 player.charge = min(weapon.charge_time, player.charge + sdt)
+                if was < weapon.charge_time <= player.charge:
+                    # And a short cue at the top, so a full charge is
+                    # something you hear rather than something you count.
+                    audio.play('crit', 0.32)
+                    self.effects.add_light(player.x, player.y, 120.0, 0.18,
+                                           weapon.glow)
             elif player.can_fire():
                 player.fire(self.projectiles, self.particles, self.fxrng,
                             self.effects)
