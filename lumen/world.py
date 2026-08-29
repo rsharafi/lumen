@@ -598,16 +598,33 @@ class World:
             # inside one - where player shots cannot reach them and a floor
             # can never be cleared. Pull any flier that lingers back out.
             if e.flies:
-                if self.level.is_wall_tile(int(e.x // TILE), int(e.y // TILE)):
-                    e.wall_time = getattr(e, 'wall_time', 0.0) + dt
-                    if e.wall_time > 0.8:
+                # This used to ask whether the flier's *centre tile* was a
+                # wall, and then wait eight tenths of a second. A wisp whose
+                # centre sat on open floor with most of its body inside the
+                # stone never triggered it at all - measured, they were
+                # sitting eleven units deep, which is a target you cannot hit
+                # and a floor that cannot be cleared.
+                #
+                # Real overlap now, and a steady push rather than a timer:
+                # crossing a wall is still possible, resting inside one is
+                # not. The teleport stays as a backstop for anything that
+                # manages to get properly stuck.
+                ex, ey = self.level.collide_circle(e.x, e.y, e.radius)
+                if ex != e.x or ey != e.y:
+                    e.wall_time += dt
+                    # Crossing is the whole point of a flier, so a fast one
+                    # is left alone. Coming to rest in the stone is the bug -
+                    # you cannot shoot it and the floor cannot be cleared -
+                    # so anything slow inside a wall, or anything that has
+                    # been in there too long however fast, is put back out.
+                    slow = (e.vx * e.vx + e.vy * e.vy) < self.FLIER_REST_SPEED ** 2
+                    if slow or e.wall_time > self.FLIER_MAX_INSIDE:
                         e.wall_time = 0.0
-                        ex, ey = self.level.collide_circle(e.x, e.y,
-                                                           e.radius + 6.0)
+                        e.x, e.y = self.level.collide_circle(
+                            e.x, e.y, e.radius + 6.0)
                         self.particles.burst(e.x, e.y, 8, e.eye_color,
                                              self.fxrng, speed=(60, 200),
                                              life=(0.15, 0.35), size=(1.6, 3.2))
-                        e.x, e.y = ex, ey
                 else:
                     e.wall_time = 0.0
 
@@ -897,6 +914,12 @@ class World:
     ELITE_GLOW = 118.0
     ELITE_GLOW_STRENGTH = 26.0
     ELITE_LIGHT_HEIGHT = 16.0
+
+    # Below this speed a flier inside a wall counts as resting there rather
+    # than crossing, and is put back out at once; above it, it gets this long
+    # to finish the crossing.
+    FLIER_REST_SPEED = 90.0
+    FLIER_MAX_INSIDE = 0.45
 
     def draw(self, app):
         if self.deferred and gpu.lighting_ready():

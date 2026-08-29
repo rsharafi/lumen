@@ -562,36 +562,68 @@ def _bake_layers(level, rng, seed):
 
     # A wall is a block of stone, and a block has a side. Seen from above the
     # only side you can see is the one facing down the screen, so the bottom
-    # of each wall's footprint is given over to it: the top face stops short,
-    # and the band below it is the face falling away to the floor. That band
-    # is what turns a lid into a wall - and because it is given a normal that
-    # points down-screen rather than up, it takes light from a completely
-    # different direction than the top does, so the lantern picks out whichever
-    # faces it happens to be standing in front of.
+    # of each wall's *exposed* footprint is given over to it.
+    #
+    # Exposed is the operative word. This used to draw a rim, a chamfer and a
+    # face around every rectangle the generator produced, which meant two
+    # blocks sitting flush against each other got a seam down the join - an
+    # outline, a highlight and a shadow, in the middle of what is plainly one
+    # wall. The edges are worked out per tile now, from whether the neighbour
+    # on that side is stone: a shared edge is not an edge, so a run of blocks
+    # reads as one solid mass, and only the outside of the mass is drawn.
     wdraw = ImageDraw.Draw(body, 'RGBA')
     rim = max(1, int(round(q(1.5))))
     cham = max(1, int(round(q(4.0))))
-    for rc in level.rects:
-        x0, y0 = q(rc.x), q(rc.y)
-        x1, y1 = q(rc.right) - 1, q(rc.bottom) - 1
-        # The arris along the top edge, brightest at the edge itself.
-        for i in range(cham):
-            f = 1.0 - i / max(1.0, cham - 1.0)
-            wdraw.rectangle([x0 + rim + i, y0 + rim + i,
-                             x1 - rim - i, y1 - rim - i],
-                            outline=(74, 88, 118, int(30 + 84 * f * f)),
-                            width=1)
-        wdraw.rectangle([x0, y0, x1, y1], outline=(2, 3, 8, 255), width=rim)
+
+    def stone(r, c):
+        return (0 <= r < level.rows and 0 <= c < level.cols
+                and level.grid[r][c] != FLOOR)
+
+    exposed = []
+    for r in range(level.rows):
+        for c in range(level.cols):
+            if not stone(r, c):
+                continue
+            x0, y0 = q(c * TILE), q(r * TILE)
+            x1, y1 = q((c + 1) * TILE) - 1, q((r + 1) * TILE) - 1
+            up, down = not stone(r - 1, c), not stone(r + 1, c)
+            left, right = not stone(r, c - 1), not stone(r, c + 1)
+            if down:
+                exposed.append((x0, x1, y1))
+            # The arris, along whichever sides are actually outside faces.
+            for i in range(cham):
+                f = 1.0 - i / max(1.0, cham - 1.0)
+                a = int(30 + 84 * f * f)
+                if up:
+                    wdraw.rectangle([x0, y0 + rim + i, x1, y0 + rim + i],
+                                    fill=(74, 88, 118, a))
+                if down:
+                    wdraw.rectangle([x0, y1 - rim - i, x1, y1 - rim - i],
+                                    fill=(74, 88, 118, a))
+                if left:
+                    wdraw.rectangle([x0 + rim + i, y0, x0 + rim + i, y1],
+                                    fill=(74, 88, 118, a))
+                if right:
+                    wdraw.rectangle([x1 - rim - i, y0, x1 - rim - i, y1],
+                                    fill=(74, 88, 118, a))
+            # And a hard outer rim, again only where the mass actually ends.
+            if up:
+                wdraw.rectangle([x0, y0, x1, y0 + rim - 1], fill=(2, 3, 8, 255))
+            if down:
+                wdraw.rectangle([x0, y1 - rim + 1, x1, y1], fill=(2, 3, 8, 255))
+            if left:
+                wdraw.rectangle([x0, y0, x0 + rim - 1, y1], fill=(2, 3, 8, 255))
+            if right:
+                wdraw.rectangle([x1 - rim + 1, y0, x1, y1], fill=(2, 3, 8, 255))
 
     # ---- the side face ---------------------------------------------------
     face_px = max(3, int(round(q(WALL_FACE))))
     arr = np.asarray(body, dtype=np.float32).copy()
     face_t = np.zeros(arr.shape[:2], np.float32)     # 0 at the top of the face
     is_face = np.zeros(arr.shape[:2], bool)
-    for rc in level.rects:
-        x0, x1 = int(q(rc.x)), int(q(rc.right))
-        yb = int(q(rc.bottom))
-        yt = max(int(q(rc.y)), yb - face_px)
+    for x0, x1, yb in exposed:
+        x0, x1, yb = int(x0), int(x1) + 1, int(yb) + 1
+        yt = max(0, yb - face_px)
         if yb - yt < 2:
             continue
         col = np.linspace(0.0, 1.0, yb - yt, dtype=np.float32)[:, None]
