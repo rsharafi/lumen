@@ -420,13 +420,34 @@ class Game:
         audio.play('upgrade' if won else 'game_over', 0.8)
 
     def open_draft(self):
-        choices = upgrades.offer(self.stats, rng.world, UPGRADE_CHOICES)
+        choices = upgrades.offer(self.stats, rng.world, UPGRADE_CHOICES,
+                                 depth=self.world.depth)
         if not choices:
             self.next_floor()
             return
-        self.draft_screen.open(choices, self.world.depth)
+        self.draft_screen.open(choices, self.world.depth,
+                               rerolls=self.stats.rerolls)
         self.state = DRAFT
         audio.play('ui_select', 0.4)
+
+    def reroll_draft(self):
+        """Redraw the offering, if the run has a redraw left.
+
+        The offering is three cards and no agency: whatever comes up is what
+        the build becomes. A redraw is the smallest thing that turns it back
+        into a decision - you can refuse a hand once, at a cost you paid for
+        earlier.
+        """
+        if self.stats.rerolls <= 0 or self.state != DRAFT:
+            return
+        self.stats.rerolls -= 1
+        choices = upgrades.offer(self.stats, rng.world, UPGRADE_CHOICES,
+                                 depth=self.world.depth)
+        if not choices:
+            return
+        self.draft_screen.open(choices, self.world.depth,
+                               rerolls=self.stats.rerolls)
+        audio.play('ui_select', 0.5)
 
     def take_upgrade(self, index):
         choices = self.draft_screen.choices
@@ -728,6 +749,8 @@ class Game:
             self.take_upgrade(screen.index)
         elif key in ('1', '2', '3'):
             self.take_upgrade(int(key) - 1)
+        elif key == 'r':
+            self.reroll_draft()
 
     def _end_key(self, key):
         if key in ('enter', 'space'):

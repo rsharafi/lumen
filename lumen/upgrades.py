@@ -40,6 +40,24 @@ class Stats:
         self.kill_heal = 0.0
         self.slow_field = 0.0
         self.taken_mult = 1.0
+
+        # ---- axes that change how a run is played, not just its numbers ---
+        # Each of these is read somewhere specific; a stat nothing consumes is
+        # a lie told to the player on the draft screen.
+        self.dark_damage = 0.0      # bonus against enemies outside the light
+        self.first_strike = 0.0     # bonus against anything still at full hp
+        self.overcharge = 0.0       # bonus that grows as the lantern empties
+        self.momentum = 0.0         # bonus while you are moving
+        self.bulwark = 0.0          # damage reduction while you are not
+        self.siphon = 0.0           # fuel returned per kill
+        self.ember_gain = 1.0       # what a mote of ember is worth
+        self.dash_damage = 0.0      # a dash that hurts what it passes through
+        self.revives = 0            # survive one killing blow per charge
+        self.rerolls = 0            # redraws at the offering
+        self.swarm = 0              # extra shots per volley
+        self.gutter = 0.0           # lantern reach lost, in exchange
+        self.curses = 0             # pacts taken, for the run summary
+
         self.owned = []
 
     def describe(self):
@@ -68,6 +86,27 @@ class Upgrade:
         self.rarity = rarity
         self.repeatable = repeatable
         self.requires = requires
+
+
+def _pact(gain, cost):
+    """A bargain: something good, and something that is not.
+
+    The flat upgrades are all upside, which makes the offering a question of
+    which number you would like raised rather than a decision. A pact costs
+    something real, so taking one is a read on the run you are actually in.
+    """
+    def apply(stats):
+        gain(stats)
+        cost(stats)
+        stats.curses += 1
+    return apply
+
+
+def _both(*fns):
+    def apply(stats):
+        for fn in fns:
+            fn(stats)
+    return apply
 
 
 def _mul(attr, factor):
@@ -207,18 +246,163 @@ ALL = [
             repeatable=False),
 ]
 
+# ---------------------------------------------------------------------------
+# The second half of the pool: things that change how a floor is played.
+#
+# Everything above this line raises a number. That is fine as a foundation and
+# hopeless as a whole design - three offerings of "damage x1.22" in a row is
+# not a decision, and a run built entirely out of them plays exactly like a
+# run built out of any other three. What follows either asks something of the
+# player (a pact costs what it gives), or only pays out under a condition the
+# player has to steer the run into.
+# ---------------------------------------------------------------------------
+ALL += [
+    # ---- conditional damage: each one wants a different way of fighting ----
+    Upgrade('nightfeed', 'NIGHT-FED',
+            'Deal 55% more damage to anything outside your light.',
+            _add('dark_damage', 0.55), palette.WARDEN_EYE, rarity=2,
+            repeatable=False),
+
+    Upgrade('ambush', 'AMBUSHER',
+            'Deal 70% more damage to enemies still at full health.',
+            _add('first_strike', 0.70), palette.CRIT, rarity=2,
+            repeatable=False),
+
+    Upgrade('overcharge', 'OVERCHARGE',
+            'Up to 80% more damage as the lantern empties. Run it dry.',
+            _add('overcharge', 0.80), palette.LIGHT_CORE, rarity=1,
+            repeatable=False),
+
+    Upgrade('momentum', 'MOMENTUM',
+            'Deal 30% more damage while you are moving.',
+            _add('momentum', 0.30), palette.DASH_TRAIL, rarity=2,
+            repeatable=False),
+
+    Upgrade('bulwark', 'BULWARK',
+            'Take 35% less damage while you stand still.',
+            _add('bulwark', 0.35), palette.UI_ACCENT, rarity=2,
+            repeatable=False),
+
+    # ---- the lantern as a resource you spend and win back ------------------
+    Upgrade('siphon', 'SIPHON',
+            'Every kill returns 2.5 fuel to the lantern.',
+            _add('siphon', 2.5), palette.LIGHT_WARM, rarity=2),
+
+    Upgrade('kindler', 'KINDLER',
+            'Embers are worth 60% more.',
+            _mul('ember_gain', 1.6), palette.XP, rarity=2),
+
+    Upgrade('flarestorm', 'FLARE STORM',
+            'The flare recharges 45% sooner and hits 40% harder.',
+            _both(_mul('flare_cooldown_mult', 0.55),
+                  _mul('flare_damage_mult', 1.40)),
+            palette.LIGHT_CORE, rarity=1, repeatable=False),
+
+    # ---- movement as a weapon ---------------------------------------------
+    Upgrade('cleave', 'DASH CLEAVE',
+            'Your dash carves through anything it passes, for 26.',
+            _add('dash_damage', 26.0), palette.DASH_TRAIL, rarity=2,
+            repeatable=False),
+
+    Upgrade('phase', 'PHASE STEP',
+            'Two more dash charges, and they return twice as fast.',
+            _both(_add('dash_charges', 2), _mul('dash_cooldown_mult', 0.5)),
+            palette.DASH_TRAIL, rarity=1, repeatable=False,
+            requires='twinstep'),
+
+    # ---- volume ------------------------------------------------------------
+    Upgrade('swarm', 'SWARMFIRE',
+            'One extra shot per volley.',
+            _add('swarm', 1), palette.BOLT, rarity=1),
+
+    Upgrade('arc', 'ARCLIGHT',
+            'Hits jump to two more enemies nearby, for less each time.',
+            _add('chain', 2), palette.BEAM, rarity=2, repeatable=False),
+
+    Upgrade('cascade', 'CASCADE',
+            'Two more jumps again.',
+            _add('chain', 2), palette.BEAM, rarity=1, repeatable=False,
+            requires='arc'),
+
+    # ---- second chances ----------------------------------------------------
+    Upgrade('revive', 'LAST LIGHT',
+            'Survive one killing blow, at one health.',
+            _add('revives', 1), palette.HEAL, rarity=1, repeatable=False),
+
+    Upgrade('reroll', 'SECOND SIGHT',
+            'Two redraws at the offering, for the rest of the run.',
+            _add('rerolls', 2), palette.UI_ACCENT, rarity=2),
+
+    # ---- pacts: every one of these costs something -------------------------
+    Upgrade('glasscannon', 'GLASS PACT',
+            'Deal 60% more damage. Take 40% more.',
+            _pact(_mul('damage_mult', 1.60), _mul('taken_mult', 1.40)),
+            palette.DAMAGE, rarity=2, repeatable=False),
+
+    Upgrade('gutter', 'GUTTERING PACT',
+            'Fire 45% faster. Your lantern reaches a third less far.',
+            _pact(_mul('fire_rate_mult', 1.45),
+                  _both(_mul('lantern_mult', 0.67), _add('gutter', 0.33))),
+            palette.LIGHT_DEEP, rarity=2, repeatable=False),
+
+    Upgrade('bloodpact', 'BLOOD PACT',
+            'Heal 9% of damage dealt. Maximum health halved.',
+            _pact(_add('lifesteal', 0.09), _mul('max_hp', 0.5)),
+            palette.HEAL, rarity=1, repeatable=False),
+
+    Upgrade('hollowpact', 'HOLLOW PACT',
+            'Move 30% faster and dash freely. You cannot be healed.',
+            _pact(_both(_mul('speed_mult', 1.30),
+                        _mul('dash_cooldown_mult', 0.45)),
+                  _both(_add('kill_heal', -99.0), _add('lifesteal', -9.0))),
+            palette.WISP_EYE, rarity=1, repeatable=False),
+
+    Upgrade('greedpact', 'GREED PACT',
+            'Embers are worth double. Take 25% more damage.',
+            _pact(_mul('ember_gain', 2.0), _mul('taken_mult', 1.25)),
+            palette.XP, rarity=2, repeatable=False),
+
+    # ---- synergies: these want something already in the run ---------------
+    Upgrade('conflagration', 'CONFLAGRATION',
+            'Explosions are half again as large, and twice as fierce.',
+            _both(_mul('explode_radius', 1.5), _mul('explode_damage', 2.0)),
+            palette.SCATTER, rarity=1, repeatable=False,
+            requires='volatile'),
+
+    Upgrade('starve', 'STARVELIGHT',
+            'Night-fed again: another 65% against what you cannot see.',
+            _add('dark_damage', 0.65), palette.WARDEN_EYE, rarity=1,
+            repeatable=False, requires='nightfeed'),
+
+    Upgrade('furnace', 'FURNACE HEART',
+            'Overcharge pays out twice as steeply.',
+            _add('overcharge', 0.90), palette.LIGHT_CORE, rarity=1,
+            repeatable=False, requires='overcharge'),
+]
+
 BY_KEY = {u.key: u for u in ALL}
 
 
-def offer(stats, rng, count=3):
-    """Pick `count` distinct upgrades that are legal for this run."""
+def offer(stats, rng, count=3, depth=1):
+    """Pick `count` distinct upgrades that are legal for this run.
+
+    `rarity` is a weight, so 3 is common and 1 is not. Depth tilts that: on
+    the first floors the common, foundational things dominate, and the run
+    -defining ones get likelier the further down you are. Without it every
+    build is decided on floor one by whatever happened to come up, and the
+    remaining eleven floors are arithmetic.
+    """
+    tilt = min(1.0, max(0.0, (depth - 1) / 8.0))
     pool = []
     for up in ALL:
         if up.requires and up.requires not in stats.owned:
             continue
         if not up.repeatable and up.key in stats.owned:
             continue
-        pool.append((up, float(up.rarity)))
+        # A rarity-1 upgrade goes from a third of a common's weight to
+        # slightly above it; a common drifts down to meet it.
+        weight = float(up.rarity) + (2.0 - float(up.rarity)) * tilt
+        pool.append((up, max(0.15, weight)))
 
     chosen = []
     for _ in range(min(count, len(pool))):

@@ -250,6 +250,10 @@ class World:
 
         if self.stats.kill_heal:
             self.player.heal(self.stats.kill_heal)
+        if self.stats.siphon:
+            # The lantern is the clock on a run, so a build that feeds it by
+            # killing is a genuinely different way to play the same floor.
+            self.player.add_fuel(self.stats.siphon)
 
         self.pickups.spawn(pickup_mod.EMBER, enemy.x, enemy.y, 1, self.rng,
                            count=enemy.ember_value)
@@ -415,12 +419,84 @@ class World:
             aim_nx, aim_ny = dx / d, dy / d
         self.camera.follow(player.x, player.y, aim_nx, aim_ny, dt)
 
+        if self.stats.dash_damage and player.dash_time > 0.0:
+            self._dash_cleave(player)
+
         if not self.cleared and not any(e.alive for e in self.enemies):
             self._open_rift()
 
+    # How far a chained arc will reach for its next target, and what share of
+    # the original hit it carries there. Short and lossy on purpose: chaining
+    # should thin a crowd, not delete one.
+    CHAIN_RANGE = 132.0
+    CHAIN_FALLOFF = 0.62
+
+    def _arc_from(self, source, damage, projectile):
+        """Jump the hit along a short chain of nearby enemies."""
+        seen = {id(source)}
+        x, y = source.x, source.y
+        left = projectile.chain
+        carry = damage * self.CHAIN_FALLOFF
+        reach2 = self.CHAIN_RANGE * self.CHAIN_RANGE
+        while left > 0 and carry > 0.5:
+            best, best_d = None, reach2
+            for e in self.enemies:
+                if not e.alive or id(e) in seen:
+                    continue
+                d = (e.x - x) ** 2 + (e.y - y) ** 2
+                if d < best_d:
+                    best, best_d = e, d
+            if best is None:
+                return
+            seen.add(id(best))
+            dealt = best.damage_by(carry, self,
+                                   math.atan2(best.y - y, best.x - x),
+                                   40.0, False)
+            if dealt > 0.0:
+                self.player.damage_dealt += dealt
+                if self.stats.lifesteal:
+                    self.player.heal(dealt * self.stats.lifesteal)
+            self.effects.add_beam(x, y, best.x, best.y, palette.BEAM, 0.14)
+            self.particles.burst(best.x, best.y, 5, palette.BEAM, self.fxrng,
+                                 speed=(90, 240), life=(0.1, 0.26),
+                                 size=(1.6, 3.4))
+            x, y = best.x, best.y
+            carry *= self.CHAIN_FALLOFF
+            left -= 1
+
+    def _dash_cleave(self, player):
+        """A dash that carves what it passes through.
+
+        Dashing is the only movement in the game with weight behind it, and
+        until now it did nothing but relocate you. Each enemy is cut once per
+        dash - tracked on the dash itself, not on a timer - so the damage is a
+        property of passing through something rather than of standing in it.
+        """
+        cut = player.dash_hits
+        reach = player.radius + 16.0
+        for e in self.enemies:
+            if not e.alive or id(e) in cut:
+                continue
+            dx = e.x - player.x
+            dy = e.y - player.y
+            rr = reach + e.radius
+            if dx * dx + dy * dy > rr * rr:
+                continue
+            cut.add(id(e))
+            dealt = e.damage_by(
+                self.stats.dash_damage * self.stats.damage_mult, self,
+                math.atan2(dy, dx), 220.0, False)
+            if dealt > 0.0:
+                player.damage_dealt += dealt
+            self.particles.burst(e.x, e.y, 12, palette.DASH_TRAIL, self.fxrng,
+                                 speed=(180, 420), life=(0.14, 0.34),
+                                 size=(2.0, 4.4))
+            self.effects.add_hitstop(0.02)
+
     def _collect(self, item):
         if item.kind == pickup_mod.EMBER:
-            self.embers += item.value
+            gain = max(1, int(round(item.value * self.stats.ember_gain)))
+            self.embers += gain
             self.score += 5
         elif item.kind == pickup_mod.OIL:
             self.player.add_fuel(item.value)
@@ -501,7 +577,16 @@ class World:
             e.update(dt, self)
 
             if light_dps and e.lit and e.alive:
+                # Through the same door as everything else, so it counts
+                # toward the run's damage and feeds lifesteal like any other
+                # hit. Subtracting hp directly skipped both.
+                before = e.hp
                 e.hp -= light_dps * dt
+                dealt = before - max(e.hp, 0.0)
+                if dealt > 0.0:
+                    self.player.damage_dealt += dealt
+                    if self.stats.lifesteal:
+                        self.player.heal(dealt * self.stats.lifesteal)
                 if self.fxrng.chance(2.0 * dt):
                     self.particles.embers(e.x, e.y, 1, palette.LIGHT_CORE,
                                           self.fxrng)
@@ -524,8 +609,10 @@ class World:
                         e.vx -= math.cos(angle) * 160.0 / max(e.mass, 0.4)
                         e.vy -= math.sin(angle) * 160.0 / max(e.mass, 0.4)
                         if self.stats.thorns:
-                            e.damage_by(self.stats.thorns, self, angle + math.pi,
-                                        120.0)
+                            back = e.damage_by(self.stats.thorns, self,
+                                               angle + math.pi, 120.0)
+                            if back > 0.0:
+                                player.damage_dealt += back
                     if isinstance(e, enemy_mod.Wisp):
                         player.fuel = max(0.0, player.fuel - e.fuel_drain)
             if e.alive:
@@ -558,12 +645,22 @@ class World:
                     if dx * dx + dy * dy > rr * rr:
                         continue
                     angle = math.atan2(p.vy, p.vx)
-                    dealt = e.damage_by(p.damage, self, angle, p.knockback,
+                    # Bonuses that depend on what was hit rather than on who
+                    # fired, so they cannot be settled at the muzzle.
+                    dmg = p.damage
+                    st = self.stats
+                    if st.dark_damage and not e.lit:
+                        dmg *= 1.0 + st.dark_damage
+                    if st.first_strike and e.hp >= e.max_hp - 1e-6:
+                        dmg *= 1.0 + st.first_strike
+                    dealt = e.damage_by(dmg, self, angle, p.knockback,
                                         p.crit)
                     if dealt > 0.0:
                         self.player.damage_dealt += dealt
                         if self.stats.lifesteal:
                             player.heal(dealt * self.stats.lifesteal)
+                    if p.chain > 0:
+                        self._arc_from(e, dmg, p)
                     p.hit.add(id(e))
                     if p.explode:
                         self._detonate(p.x, p.y, p)
@@ -849,6 +946,7 @@ class World:
         self._draw_wall_light(ox, oy, flicker)
         gpu.end_edge_light()
 
+        self.effects.draw_beams(ox, oy)
         # ---- things that are not part of the world -------------------------
         # Eyes are emissive, so they belong on top of the lighting rather than
         # under it: an unlit enemy is a pair of eyes in the dark.

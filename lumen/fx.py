@@ -8,7 +8,7 @@ would just feel dead.
 import math
 
 from . import gpu
-from .draw import drawImage, drawPolygon
+from .draw import drawImage, drawLine, drawPolygon
 
 from . import art, palette
 from .config import CAMERA_LERP, CAMERA_LOOKAHEAD, HITSTOP_MAX, SHAKE_DECAY
@@ -115,6 +115,7 @@ class Effects:
         self.rng = rng
         self.texts = []
         self.lights = []       # [x, y, radius, life, max_life, color]
+        self.beams = []        # [x0, y0, x1, y1, life, max_life, color]
         self.hitstop = 0.0
         self.flash = 0.0
         self.flash_color = palette.LIGHT_CORE
@@ -128,6 +129,7 @@ class Effects:
     def clear(self):
         self.texts.clear()
         self.lights.clear()
+        self.beams.clear()
         self.hitstop = 0.0
         self.flash = 0.0
         self.chroma = 0.0
@@ -142,6 +144,17 @@ class Effects:
             self.rng.uniform(-26, 26), -rise, 0.85, bold))
         if len(self.texts) > 40:
             del self.texts[0]
+
+    def add_beam(self, x0, y0, x1, y1, color=palette.BEAM, life=0.14):
+        """A short-lived line between two points - a chained arc.
+
+        Emissive, so it is drawn with the lighting rather than under it, and
+        it throws a little light of its own at each end: an arc that lights
+        nothing reads as a decal rather than as electricity.
+        """
+        self.beams.append([x0, y0, x1, y1, life, life, color])
+        if len(self.beams) > 40:
+            del self.beams[0]
 
     def add_light(self, x, y, radius, life, color=palette.LIGHT_WARM):
         self.lights.append([x, y, radius, life, life, color])
@@ -199,6 +212,10 @@ class Effects:
         if self.texts:
             self.texts = [t for t in self.texts if t.life > 0.0]
 
+        for beam in self.beams:
+            beam[4] -= dt
+        self.beams = [b for b in self.beams if b[4] > 0.0]
+
         for light in self.lights:
             light[3] -= dt
         if self.lights:
@@ -215,6 +232,14 @@ class Effects:
             if sx < -r or sy < -r or sx > view_w + r or sy > view_h + r:
                 continue
             art.draw_glow(color, sx, sy, r, clamp(72 * t, 0, 100), power=2.4)
+
+    def draw_beams(self, ox, oy):
+        """Arcs, over the lighting: they are their own light source."""
+        for x0, y0, x1, y1, life, max_life, color in self.beams:
+            t = clamp(life / max_life, 0.0, 1.0)
+            drawLine(x0 - ox, y0 - oy, x1 - ox, y1 - oy, fill=color,
+                     lineWidth=1.4 + 2.6 * t,
+                     opacity=int(clamp(96 * t, 0, 100)))
 
     def draw_texts(self, ox, oy):
         for t in self.texts:

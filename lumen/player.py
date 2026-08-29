@@ -48,6 +48,7 @@ class Player:
         self.charging = False
         self.recoil = 0.0
         self.walk_phase = 0.0
+        self.dash_hits = set()
         self.muzzle_flash = 0.0
 
         self.kills = 0
@@ -188,6 +189,9 @@ class Player:
             dx, dy = from_angle(self.aim)
         self.dash_dir = normalise(dx, dy)
         self.dash_time = DASH_TIME
+        # Cleared per dash, so one dash cuts each enemy once however long it
+        # spends inside them.
+        self.dash_hits = set()
         self.iframes = max(self.iframes, DASH_IFRAMES)
         self.dash_charges -= 1
         if self.dash_cd <= 0.0:
@@ -231,10 +235,23 @@ class Player:
         oy = self.y + math.sin(self.aim) * muzzle
 
         speed = weapon.speed * s.projectile_speed_mult
-        for _ in range(weapon.pellets):
+
+        # Conditional damage that depends on the shooter rather than the
+        # target, so it is settled here, once, for the whole volley.
+        situational = 1.0
+        if s.overcharge:
+            # Paid out as the lantern empties, which puts the run's safety
+            # margin and its damage on the same dial.
+            dark = 1.0 - clamp(self.fuel / max(self.fuel_max, 1e-6), 0.0, 1.0)
+            situational += s.overcharge * dark
+        if s.momentum and (self.vx * self.vx + self.vy * self.vy) > 400.0:
+            situational += s.momentum
+
+        pellets = weapon.pellets + s.swarm
+        for _ in range(pellets):
             a = rng.spread(self.aim, weapon.spread)
             crit = rng.chance(s.crit_chance)
-            damage = weapon.damage * s.damage_mult * charge_mult
+            damage = weapon.damage * s.damage_mult * charge_mult * situational
             if crit:
                 damage *= s.crit_mult
             pool.spawn(
@@ -246,9 +263,10 @@ class Player:
                 length=weapon.length * (1.0 + 0.5 * (charge_mult - 1.0)),
                 width=weapon.width * (1.0 + 0.4 * (charge_mult - 1.0)),
                 knockback=weapon.knockback, homing=s.homing,
-                explode=s.explode_radius, bounces=s.bounces, crit=crit)
+                explode=s.explode_radius, bounces=s.bounces, crit=crit,
+                chain=s.chain)
 
-        self.shots_fired += weapon.pellets
+        self.shots_fired += pellets
         self.recoil = weapon.recoil * (1.0 + 0.4 * (charge_mult - 1.0))
         self.muzzle_flash = 1.0
         effects.add_light(ox, oy, weapon.light * charge_mult, 0.14,
@@ -274,6 +292,11 @@ class Player:
             return False
 
         amount *= self.stats.taken_mult
+        if self.stats.bulwark and (self.vx * self.vx
+                                   + self.vy * self.vy) < 400.0:
+            # Standing your ground is a real choice in a game about backing
+            # away from things, so it is worth paying for.
+            amount *= 1.0 - self.stats.bulwark
         self.hp -= amount
         self.iframes = PLAYER_IFRAMES
         self.hurt_flash = 1.0
@@ -286,6 +309,20 @@ class Player:
                         direction=direction, spread=2.2)
         audio.play('hurt', 0.8)
         if self.hp <= 0.0:
+            if self.stats.revives > 0:
+                self.stats.revives -= 1
+                self.hp = 1.0
+                self.iframes = max(self.iframes, PLAYER_IFRAMES * 3.0)
+                self.fuel = min(self.fuel_max, self.fuel + 30.0)
+                effects.add_flash(1.0, palette.LIGHT_CORE, wash=True)
+                effects.add_text(self.x, self.y - 34, 'LAST LIGHT',
+                                 palette.LIGHT_CORE, 22, True)
+                effects.add_shake(7.0)
+                particles.burst(self.x, self.y, 46, palette.LIGHT_CORE, rng,
+                                speed=(160, 460), life=(0.3, 0.8),
+                                size=(2.4, 5.6))
+                audio.play('upgrade', 0.9)
+                return True
             self.hp = 0.0
             self.alive = False
         return True

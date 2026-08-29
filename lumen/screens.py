@@ -430,12 +430,14 @@ class UpgradeScreen:
         self.w = view_w
         self.h = view_h
         self.choices = []
+        self.rerolls = 0
         self.index = 0
         self.t = 0.0
         self.hit_rects = []
 
-    def open(self, choices, depth):
+    def open(self, choices, depth, rerolls=0):
         self.choices = choices
+        self.rerolls = rerolls
         self.index = 0
         self.t = 0.0
         self.depth = depth
