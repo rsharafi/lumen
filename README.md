@@ -499,12 +499,24 @@ figure.
 **Walls have a side.** A wall used to be a lid — a top face with a line drawn
 round it. The bottom of each footprint is now given over to the one side a
 top-down camera can see, and its normal points *down-screen* rather than up, so
-it takes light from a completely different direction than the top does. The
-light lying along a wall is aimed at that geometry: its brightest line sits on
-the arris where the face meets the top, with the face falling away in front of
-it and the top reaching about a tile back. Landing that line on the wall's
-outer edge instead — where it was before the face existed — painted a flat warm
-stripe across the one surface the shading had just worked out.
+it takes light from a completely different direction than the top does.
+
+The light lying along a wall is aimed at that geometry, and **which edge it is
+matters**. A wall's south edge has that face standing in front of its top, so
+the brightest line belongs on the arris where the two meet — a face's height
+into the stone. Every other edge is a bare arris at the stone's outer edge with
+nothing in front of it, and its line belongs on the edge itself. One profile
+with one offset cannot be both: put the line a face's height in on all four
+sides and it is buried inside the masonry on three of them, leaving the edge
+you are actually looking at dark and a bright band floating in the middle of
+the wall. So the pieces are split by their outward normal and each group is
+drawn with a profile cut to its own shape — the front lengthened by the face
+where there is one, the reach behind it unchanged.
+
+Isolating that light by differencing two frames and profiling it across the
+edge puts its peak at **+18** design units on a south edge, which is the arris,
+and **+0** on east and west, which is the edge. Before the split it was +18 on
+all of them.
 
 **A lit floor is mostly not floor.** Measured in a pool, two thirds of what
 you see there is light added over the stone rather than the stone itself.

@@ -504,21 +504,32 @@ def dither_tile(size=256):
 # wall's top surface, and a wall is a whole tile thick - so sizing that part
 # in tiles rather than in a fixed handful of units is the difference between
 # seeing the top of a wall and seeing a bright line with blackness above it.
-# Measured from the brightest line, which sits on the arris where the wall's
-# side face meets its top - the same place the brightest line on a real lit
-# block is. In front of that is the face itself (a tile's worth of vertical
-# stone, lit but falling away) and then a little spill onto the floor; behind
-# it is the top, reaching about a tile back.
-EDGE_LIGHT_FLOOR = 23.5                 # face + floor spill, ahead of the arris
-EDGE_LIGHT_STONE = 45.0                 # the top, behind it
-EDGE_LIGHT_DEPTH = EDGE_LIGHT_FLOOR + EDGE_LIGHT_STONE
-EDGE_LIGHT_PEAK = EDGE_LIGHT_FLOOR / EDGE_LIGHT_DEPTH
+# The light lying along a wall, measured from its brightest line.
+#
+# Where that line belongs depends on which edge it is. A wall's *south* edge
+# has a side face standing in front of its top - a tile of vertical stone -
+# and the brightest line on a lit block is the arris where that face meets
+# the top, a face's height into the stone. Every other edge is a bare arris
+# at the stone's outer edge with nothing in front of it. Putting the line a
+# face's height in on all four sides, which is what a single profile and one
+# bias does, buries it inside the masonry on three of them and leaves the
+# edge you are actually looking at dark.
+EDGE_LIGHT_SPILL = 4.5                  # onto the floor, in front of the line
+EDGE_LIGHT_STONE = 62.0                 # into the stone, behind it
+
 # Tall enough that the tail has a sample every half design unit at native
-# scale; the texture is stretched across `EDGE_LIGHT_DEPTH` units.
+# scale; the texture is stretched across the depth below.
 _EDGE_LIGHT_DEPTH = 256
 
 
-def edge_light():
+def edge_light_span(face=0.0):
+    """`(depth, peak)` for a profile with `face` units of wall in front."""
+    front = EDGE_LIGHT_SPILL + max(0.0, face)
+    depth = front + EDGE_LIGHT_STONE
+    return depth, front / depth
+
+
+def edge_light(face=0.0):
     """The cross-section of light lying on a lit wall edge.
 
     One texture, stretched and rotated along each piece of edge, in place of
@@ -527,29 +538,31 @@ def edge_light():
     falloff everything else now has read as drawn-on rather than lit. A
     gradient stretched across the same depth is smooth by construction, and
     one quad instead of six.
+
+    `face` is how much vertical stone stands between the floor and the top
+    surface on this edge. It lengthens the part of the profile in front of
+    the bright line without moving the reach behind it.
     """
-    key = ('edgelight',)
+    face = round(max(0.0, float(face)), 2)
+    key = ('edgelight', face)
     hit = _cache.get(key)
     if hit is not None:
         return hit
     n = _EDGE_LIGHT_DEPTH
+    _depth, peak = edge_light_span(face)
     t = np.linspace(0.0, 1.0, n, dtype=np.float32)
-    peak = EDGE_LIGHT_PEAK
     a = np.empty(n, dtype=np.float32)
     front = t < peak
-    # Across the face and onto the floor in front of it. Gentle rather than
-    # steep: the face is a real surface a tile high, and a steep ramp leaves
-    # it black with a bright line on top of it.
+    # In front of the line: the face, if this edge has one, and then a short
+    # spill onto the floor. Gentle rather than steep, because a face is a
+    # real surface a tile high and a steep ramp leaves it black under a
+    # bright line.
     a[front] = np.clip(t[front] / peak, 0.0, 1.0) ** 1.45
-    # Into the stone: a long tail, so the wall face is lit and not just its
-    # corner.
+    # Behind it, across the top. Two terms: a bright shoulder just past the
+    # arris where the stone is nearly facing the flame, and a long dim reach
+    # over the rest of the tile, so the top reads as a surface with light
+    # falling across it rather than as a strip.
     back = ~front
-    # Across the wall top. Two terms: a bright shoulder just behind the edge,
-    # where the stone is nearly facing the flame, and a long dim reach over
-    # the rest of the tile so the top reads as a surface with light falling
-    # across it rather than as a strip. A single exponent cannot do both -
-    # low, and the light runs off the far side of the wall; high, and it is
-    # back to a line at the edge.
     u = np.clip(1.0 - (t[back] - peak) / (1.0 - peak), 0.0, 1.0)
     a[back] = np.clip(0.62 * u ** 3.4 + 0.38 * u ** 1.25, 0.0, 1.0)
     plane = np.repeat(a[:, None], 4, axis=1)

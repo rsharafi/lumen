@@ -1207,19 +1207,11 @@ class World:
 
     # How deep the light lying on a wall reaches, in design units. The split
     # either side of the edge lives with the profile itself, in `art`.
-    EDGE_LIGHT_DEPTH = art.EDGE_LIGHT_DEPTH
+    EDGE_LIGHT_DEPTH = art.edge_light_span(0.0)[0]
     # How much of the painted-on wall light survives. It was written when a
     # wall had no shape for a light to find; now every light shades by the
     # surface it lands on, and most of this is doing that job twice.
     EDGE_LIGHT_STRENGTH = 1.0
-    # How far past the wall's own edge the brightest line of that light sits.
-    # It used to land on the edge itself, which since walls grew a side face
-    # means it landed on the face - painting a flat warm stripe over the one
-    # surface whose whole shape the per-light shading had just worked out.
-    # Pushed back by the height of the face, it lands on the arris where the
-    # face meets the top, which is where the brightest line on a lit block
-    # actually is.
-    EDGE_LIGHT_BIAS = level_mod.WALL_FACE
 
     def _draw_wall_light_rich(self, ox, oy, flicker):
         """The light lying along a lit wall edge, as one gradient per piece.
@@ -1249,12 +1241,36 @@ class World:
         brazier and the lantern differ only in `gain` - the flame's flicker,
         or how far through its ignition the brazier is.
         """
-        profile = art.edge_light()
         scale = draw.SCALE
-        depth = self.EDGE_LIGHT_DEPTH
-        # The gradient's bright line sits a fraction of the way down the
-        # texture, so the quad is pushed forward to put that line on the edge.
-        offset = depth * (art.EDGE_LIGHT_PEAK - 0.5) - self.EDGE_LIGHT_BIAS
+        # Only a wall's south edge has a face standing in front of its top,
+        # because that is the one side a camera hanging over the room can
+        # see. Its light peaks a face's height into the stone, on the arris;
+        # every other edge peaks on the edge itself. One profile for both put
+        # the bright line inside the masonry on three sides out of four and
+        # left the edge dark - which is what a bright band floating in the
+        # middle of a wall was.
+        south = []
+        plain = []
+        for piece in pieces:
+            (south if piece[6] > self.EDGE_FACE_COS else plain).append(piece)
+        for face, group in ((level_mod.WALL_FACE, south), (0.0, plain)):
+            if group:
+                self._draw_edge_group(group, ox, oy, gain, face, scale)
+
+    # How square-on to the camera an edge has to be before it counts as the
+    # one with a face on it. Walls are axis-aligned, so this only ever has to
+    # separate a normal pointing straight down the screen from one pointing
+    # along it.
+    EDGE_FACE_COS = 0.7
+
+    def _draw_edge_group(self, pieces, ox, oy, gain, face, scale):
+        """One profile's worth of wall light, for edges that share a shape."""
+        profile = art.edge_light(face)
+        depth, peak = art.edge_light_span(face)
+        # The quad is placed so the profile's bright line lands `face` units
+        # into the stone: its front end then sits the spill's width out on the
+        # floor, whichever edge this is.
+        offset = depth * (peak - 0.5) - face
         # A quad reaches `depth` out from its edge and half a piece along it,
         # so this margin cannot clip one that would have been visible.
         margin = depth + lighting.WALL_PIECE_LENGTH + 2.0
