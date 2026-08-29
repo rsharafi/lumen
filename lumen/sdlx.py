@@ -323,6 +323,12 @@ def glow_points(xs, ys, radii, color, alphas, power=2.0, core=0.0):
     return False
 
 
+def glow_quads(cx, cy, radius, quads, color, opacity=100, power=2.0,
+               height=0.0):
+    """Not available here; `world` paints wall light into its own buffer."""
+    return False
+
+
 def scene_coverage(on):
     """No spare channel to record it in here; the bleed lands on everything."""
 
