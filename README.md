@@ -501,8 +501,31 @@ round it. The bottom of each footprint is now given over to the one side a
 top-down camera can see, and its normal points *down-screen* rather than up, so
 it takes light from a completely different direction than the top does.
 
-The light lying along a wall puts its brightest line **on the edge**, on every
-side. That sounds obvious and it was arrived at the long way round: on a real
+The light lying along a wall is added after the composite rather than into the
+light buffer, and that is deliberate. The masonry is baked dark and blue-grey,
+so warm light multiplied by it comes out dim and desaturated; added over the
+top it keeps its warmth. Lighting walls "properly" instead — as real light in
+the buffer, with the surface normal and everything else that implies — was
+tried, measured, and is in the history. It is more correct in every respect
+that can be put a number on and it looks markedly worse, which is worth
+knowing.
+
+What that layer *can* do is respond to the light driving it. Its strength now
+carries the light's elevation: the direction to a flame is `(-dx, -dy, height)`
+and against a wall's normal, which lies flat in the plane, that works out as
+the flat facing scaled by the cosine of the elevation. A lantern carried low
+rakes a wall; the same lamp held high slides off it. The profile's reach into
+the stone follows the same number — a low light clings to the edge, a high one
+spreads across the top — while its brightest line stays put. Taking the ratio
+between a wall's side face and the top just past it, and raising the light from
+a height of 8 design units to 60: **1.81 → 1.40**. Before, it was 1.70 → 1.66,
+which is to say the wall could not tell where the light was.
+
+Every light passes its own height, and they differ, so the rift rakes masonry
+that the lantern only grazes. The rift reaches walls at all now, in its own
+cold colour rather than the lantern's amber.
+
+That brightest line goes **on the edge**, on every side. That sounds obvious and it was arrived at the long way round: on a real
 block the brightest line is the arris where the side face meets the top, which
 is a face's height into the stone, so that is where it went first. It measures
 correctly and it looks wrong. The face is nineteen design units and the block
@@ -543,10 +566,17 @@ so a scorch mark has a hollow in it and catches the lantern like everything
 else does.
 
 **At the end**: a bright pass, a bloom chain folded back with a tent filter,
-an anamorphic streak (a lantern in the dark is the brightest thing on screen
-by a wide margin, and a symmetric halo reads as a glow effect rather than as a
-very bright object), and a split-tone grade — shadows toward slate, highlights
-toward amber. The distance between those two is the mood.
+and a split-tone grade — shadows toward slate, highlights toward amber. The
+distance between those two is the mood.
+
+> There was an anamorphic streak here too — a long horizontal blur of the
+> bright pass, on the reasoning that a lens in front of something this much
+> brighter than its surroundings would smear it sideways. There is no lens:
+> the camera is a top-down abstraction, not an object in the room. Worse, a
+> coherent horizontal band across a smooth radial gradient is visible far
+> below the contrast the numbers suggest — measured at four to eight per cent
+> of the vertical brightness at the same radius, and it read as a beam of
+> light lying across the floor through the player.
 
 In play at 1800x1120 this holds about 120 fps, with roughly a third of the
 frame left over.

@@ -410,7 +410,7 @@ WALL_PIECE_OVERLAP = 0.6
 
 
 def lit_wall_segments(level, ox, oy, radius,
-                      piece_length=WALL_PIECE_LENGTH):
+                      piece_length=WALL_PIECE_LENGTH, height=0.0):
     """Lit wall edges cut into equal pieces, each with its own brightness.
 
     Two things have to be true at once. A long edge running away from the
@@ -475,6 +475,15 @@ def lit_wall_segments(level, ox, oy, radius,
         d[d == 0] = 1.0
         nxe, nye = float(nx[k]), float(ny[k])
         facing = -(dx / d) * nxe - (dy / d) * nye
+        if height > 0.0:
+            # A wall is a vertical surface, so how much of a light it catches
+            # depends on how high that light is held as well as where it
+            # stands. The direction to the flame is (-dx, -dy, height); against
+            # a normal lying flat in the plane that works out as the flat
+            # facing scaled by the cosine of the light's elevation. A lantern
+            # carried low rakes a wall; the same lamp held high slides off it.
+            # At height zero this is exactly the flat term it replaces.
+            facing = facing * d / np.hypot(d, height)
         falloff = np.clip(1.0 - d / radius, 0.0, 1.0) ** 1.5
         strength = np.clip(facing, 0.0, 1.0) ** 0.7 * falloff
 

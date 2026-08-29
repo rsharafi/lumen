@@ -46,6 +46,7 @@ class Rift:
         self.entered = False
         # What its light can reach, cast once - it does not move either.
         self.shape = None
+        self.edges = None
 
 
 class World:
@@ -749,6 +750,8 @@ class World:
     RIFT_LIGHT = (122, 190, 255)
     RIFT_LIGHT_RADIUS = 300.0
     RIFT_LIGHT_STRENGTH = 54.0
+    # Cooler than the lantern and further off, so it lands on masonry softly.
+    RIFT_ON_WALLS = 0.72
 
     def draw(self, app):
         if self.deferred and gpu.lighting_ready():
@@ -1095,6 +1098,7 @@ class World:
         else:
             self._draw_wall_light_flat(ox, oy)
         self._draw_brazier_light(ox, oy)
+        self._draw_rift_light(ox, oy)
 
     # A cast shadow is drawn three times, the outer end of each swung a hair
     # around the lantern. Where all three overlap the ground is fully dark;
@@ -1224,14 +1228,17 @@ class World:
         read as lines drawn on the wall rather than as light landing on it.
         """
         pieces = lighting.lit_wall_segments(
-            self.level, self.player.x, self.player.y, self.light_radius)
+            self.level, self.player.x, self.player.y, self.light_radius,
+            height=self.LIGHT_HEIGHT)
         self.last_edges = len(pieces)
         if not gpu.active():
             return self._draw_wall_light_flat(ox, oy)
 
-        self._draw_edge_pieces(pieces, ox, oy, flicker)
+        self._draw_edge_pieces(pieces, ox, oy, flicker,
+                               height=self.LIGHT_HEIGHT)
 
-    def _draw_edge_pieces(self, pieces, ox, oy, gain=1.0):
+    def _draw_edge_pieces(self, pieces, ox, oy, gain=1.0, height=0.0,
+                          tint=None):
         """One stretched gradient per lit piece of wall edge.
 
         Every light in the game lands on masonry through here, and that is the
@@ -1254,16 +1261,32 @@ class World:
         # reads as a line floating in the masonry rather than as an arris on a
         # surface too small to register as a surface. The edge is what the eye
         # is tracking, so the light goes there.
-        self._draw_edge_group(pieces, ox, oy, gain, 0.0, scale)
+        self._draw_edge_group(pieces, ox, oy, gain, self.wall_reach(height),
+                              scale, tint)
 
-    def _draw_edge_group(self, pieces, ox, oy, gain, face, scale):
+    # How far into the stone a light carries, against how high it is held.
+    # Quantised, because the profile is a baked texture and there is no point
+    # keeping one per hundredth of a unit; three or four lights on a floor
+    # share two or three of them.
+    WALL_REACH_REF = 44.0
+    WALL_REACH_MIN = 38.0
+    WALL_REACH_MAX = 78.0
+
+    @classmethod
+    def wall_reach(cls, height):
+        t = clamp(height / cls.WALL_REACH_REF, 0.0, 1.0)
+        reach = cls.WALL_REACH_MIN + (cls.WALL_REACH_MAX
+                                      - cls.WALL_REACH_MIN) * t
+        return round(reach / 4.0) * 4.0
+
+    def _draw_edge_group(self, pieces, ox, oy, gain, reach, scale,
+                         tint=None):
         """One profile's worth of wall light, for edges that share a shape."""
-        profile = art.edge_light(face)
-        depth, peak = art.edge_light_span(face)
-        # The quad is placed so the profile's bright line lands `face` units
-        # into the stone: its front end then sits the spill's width out on the
-        # floor, whichever edge this is.
-        offset = depth * (peak - 0.5) - face
+        profile = art.edge_light(reach)
+        depth, peak = art.edge_light_span(reach)
+        # The quad is placed so the profile's bright line lands on the edge:
+        # its front end then sits the spill's width out on the floor.
+        offset = depth * (peak - 0.5)
         # A quad reaches `depth` out from its edge and half a piece along it,
         # so this margin cannot clip one that would have been visible.
         margin = depth + lighting.WALL_PIECE_LENGTH + 2.0
@@ -1285,6 +1308,16 @@ class World:
             if length < 1e-6:
                 continue
             color = palette.wall_light(s)
+            if tint is None:
+                cr, cg, cb = color.red, color.green, color.blue
+            else:
+                # `wall_light` runs from near-white down to ember, which is
+                # the lantern's own ramp. A light of another colour keeps the
+                # ramp's brightness and takes its hue from here instead.
+                lum = (color.red + color.green + color.blue) / 765.0
+                cr = int(tint[0] * lum)
+                cg = int(tint[1] * lum)
+                cb = int(tint[2] * lum)
             # The texture runs bright-edge-first down its own height, so the
             # quad is turned to put that axis along the outward normal.
             degrees = math.degrees(math.atan2(-ny, -nx)) - 90.0
@@ -1295,7 +1328,7 @@ class World:
             gpu.blit_rot(profile, mx * scale, my * scale,
                          (length + lighting.WALL_PIECE_OVERLAP) * scale,
                          depth * scale, degrees,
-                         color=(color.red, color.green, color.blue),
+                         color=(cr, cg, cb),
                          opacity=int((6 + 74 * s) * self.EDGE_LIGHT_STRENGTH))
 
     def _draw_wall_light_flat(self, ox, oy):
@@ -1331,12 +1364,14 @@ class World:
             if b.edges is None or b.edges_rich != rich:
                 if rich:
                     b.edges = lighting.lit_wall_segments(
-                        self.level, b.x, b.y, 190)
+                        self.level, b.x, b.y, self.BRAZIER_REACH,
+                        height=self.BRAZIER_HEIGHT)
                 else:
                     b.edges = lighting.lit_wall_edges(self.level, b.x, b.y, 190)
                 b.edges_rich = rich
             if rich:
-                self._draw_edge_pieces(b.edges, ox, oy, b.ignite_t)
+                self._draw_edge_pieces(b.edges, ox, oy, b.ignite_t,
+                                       height=self.BRAZIER_HEIGHT)
                 continue
             for ax, ay, bx, by, s in b.edges:
                 sx = ax - ox
@@ -1346,6 +1381,29 @@ class World:
                 drawLine(sx, ay - oy, bx - ox, by - oy,
                          fill=palette.wall_light(lit),
                          lineWidth=2, opacity=int(4 + 38 * lit))
+
+    def _draw_rift_light(self, ox, oy):
+        """The rift on the walls around it.
+
+        It reaches the floor and nothing else, which is the one light in the
+        game that opens across the chamber from wherever you are standing -
+        so the walls beside it stayed dark and it read as a glow lying on the
+        ground rather than as something in the room. Cast once, like its own
+        pool: neither it nor the walls move.
+        """
+        rift = self.rift
+        if rift is None or rift.open_t <= 0.01 or not gpu.active():
+            return
+        if rift.edges is None:
+            rift.edges = lighting.lit_wall_segments(
+                self.level, rift.x, rift.y, self.RIFT_LIGHT_RADIUS,
+                height=self.RIFT_HEIGHT)
+        if not rift.edges:
+            return
+        self._draw_edge_pieces(rift.edges, ox, oy,
+                               ease_out_cubic(rift.open_t) * self.RIFT_ON_WALLS,
+                               height=self.RIFT_HEIGHT,
+                               tint=self.RIFT_LIGHT)
 
     def _draw_braziers(self, ox, oy):
         for b in self.level.braziers:

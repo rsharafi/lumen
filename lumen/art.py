@@ -522,14 +522,14 @@ EDGE_LIGHT_STONE = 62.0                 # into the stone, behind it
 _EDGE_LIGHT_DEPTH = 256
 
 
-def edge_light_span(face=0.0):
-    """`(depth, peak)` for a profile with `face` units of wall in front."""
-    front = EDGE_LIGHT_SPILL + max(0.0, face)
-    depth = front + EDGE_LIGHT_STONE
+def edge_light_span(reach=EDGE_LIGHT_STONE):
+    """`(depth, peak)` for a profile reaching `reach` units into the stone."""
+    front = EDGE_LIGHT_SPILL
+    depth = front + max(8.0, reach)
     return depth, front / depth
 
 
-def edge_light(face=0.0):
+def edge_light(reach=EDGE_LIGHT_STONE):
     """The cross-section of light lying on a lit wall edge.
 
     One texture, stretched and rotated along each piece of edge, in place of
@@ -539,24 +539,24 @@ def edge_light(face=0.0):
     gradient stretched across the same depth is smooth by construction, and
     one quad instead of six.
 
-    `face` is how much vertical stone stands between the floor and the top
-    surface on this edge. It lengthens the part of the profile in front of
-    the bright line without moving the reach behind it.
+    `reach` is how far into the stone this light carries, which is a
+    property of the light rather than of the wall: one held low grazes the
+    masonry and dies within a few units of the edge, one held high spreads
+    across the top. The brightest line stays on the edge either way - that is
+    what the eye tracks, and moving it is what made a wall look like it had a
+    band floating inside it.
     """
-    face = round(max(0.0, float(face)), 2)
-    key = ('edgelight', face)
+    reach = round(max(8.0, float(reach)), 1)
+    key = ('edgelight', reach)
     hit = _cache.get(key)
     if hit is not None:
         return hit
     n = _EDGE_LIGHT_DEPTH
-    _depth, peak = edge_light_span(face)
+    _depth, peak = edge_light_span(reach)
     t = np.linspace(0.0, 1.0, n, dtype=np.float32)
     a = np.empty(n, dtype=np.float32)
     front = t < peak
-    # In front of the line: the face, if this edge has one, and then a short
-    # spill onto the floor. Gentle rather than steep, because a face is a
-    # real surface a tile high and a steep ramp leaves it black under a
-    # bright line.
+    # In front of the line: a short spill onto the floor.
     a[front] = np.clip(t[front] / peak, 0.0, 1.0) ** 1.45
     # Behind it, across the top. Two terms: a bright shoulder just past the
     # arris where the stone is nearly facing the flame, and a long dim reach

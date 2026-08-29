@@ -225,19 +225,16 @@ void main() { gl_Position = vec4(in_pos, 0.0, 1.0); v_uv = in_uv; }
 _POST_FS = '''#version 330
 uniform sampler2D scene;
 uniform sampler2D bloom;
-uniform sampler2D extra;      // the anamorphic streak, at the tone map
 uniform float bloom_amount;
 uniform float exposure;
 uniform int mode;          // 0 tone map, 1 bright, 2 blur, 3 copy,
-                           // 4 shadow, 6 masked bleed, 7 tent, 8 streak
+                           // 4 shadow, 6 masked bleed, 7 tent
 uniform vec2 texel;
 uniform float threshold;
 uniform float dither;
 uniform vec2 light_xy;     // key light, in this target's pixels
 uniform float light_h;     // and how far above the floor it hangs
 uniform float relief;      // how much of the surface slope to believe
-uniform float streak_amount;
-uniform vec3 streak_tint;
 uniform vec3 grade_shadow;    // what the bottom of the range is tinted toward
 uniform vec3 grade_high;      // and the top
 uniform float saturation;
@@ -298,20 +295,6 @@ void main() {
         acc += texture(scene, v_uv + vec2(texel.x, -texel.y)).rgb;
         acc += texture(scene, v_uv + vec2(-texel.x, texel.y)).rgb;
         frag = vec4(acc / 16.0, 1.0);
-    } else if (mode == 8) {
-        // The streak: a long blur on one axis only. A lantern carried in the
-        // dark is the brightest thing on screen by a wide margin, and a lens
-        // in front of it would smear it sideways; without this the bloom is
-        // a symmetric halo, which reads as a glow effect rather than as a
-        // very bright object being looked at.
-        vec3 acc = vec3(0.0);
-        float wsum = 0.0;
-        for (int i = -12; i <= 12; ++i) {
-            float w = exp(-float(i * i) * 0.022);
-            acc += texture(scene, v_uv + vec2(float(i) * texel.x, 0.0)).rgb * w;
-            wsum += w;
-        }
-        frag = vec4(acc / wsum, 1.0);
     } else if (mode == 6) {
         // `scene` is the light here and `bloom` is the albedo buffer, whose
         // alpha says whether a solid thing stands at this pixel.
@@ -332,7 +315,6 @@ void main() {
     } else {
         vec3 c = texture(scene, v_uv).rgb;
         c += texture(bloom, v_uv).rgb * bloom_amount;
-        c += texture(extra, v_uv).rgb * streak_amount * streak_tint;
         vec3 col = tonemap(c);
         // Grade. Split-toning the ends of the range against each other is
         // what gives a picture a temperature rather than a tint: the dark of
@@ -1032,10 +1014,6 @@ def lighting_ready(size=None):
             tex.filter = (_ctx.LINEAR, _ctx.LINEAR)
             made[name] = (tex, _ctx.framebuffer(color_attachments=[tex]))
         w, h = size
-        sw, sh = max(8, size[0] // 4), max(8, size[1] // 4)
-        stex = _ctx.texture((sw, sh), 4, dtype='f2')
-        stex.filter = (_ctx.LINEAR, _ctx.LINEAR)
-        made['streak'] = (stex, _ctx.framebuffer(color_attachments=[stex]))
         for i in range(BLOOM_LEVELS):
             w, h = max(4, w // 2), max(4, h // 2)
             tex = _ctx.texture((w, h), 4, dtype='f2')
@@ -1244,10 +1222,8 @@ def composite(bloom=0.0, bleed=0.0, dither=None):
 
     if bloom > 0.0:
         _bloom_chain()
-        _streak_pass()
         _use(None)
-        _post(scene='final', bloom='bloom0', mode=0, amount=bloom,
-              streak=STREAK)
+        _post(scene='final', bloom='bloom0', mode=0, amount=bloom)
     else:
         _use(None)
         _post(scene='final', bloom='final', mode=0, amount=0.0)
@@ -1278,23 +1254,8 @@ def _bleed_pass(amount, size):
     _apply_blend()
 
 
-def _streak_pass():
-    """Smear the bright pass sideways, twice, for the lens streak."""
-    tex, fbo = _targets['streak']
-    src = _targets['bloom0'][0]
-    fbo.use()
-    _viewport_set(tex.size)
-    _ctx.clear(0.0, 0.0, 0.0, 1.0)
-    _post(scene='bloom0', bloom='bloom0', mode=8,
-          texel=(1.6 / src.size[0], 0.0))
-    # A second, wider pass over the result: two cheap blurs reach much
-    # further than one, which is what makes a streak a streak.
-    _post(scene='streak', bloom='streak', mode=8,
-          texel=(5.0 / tex.size[0], 0.0))
-
-
 def _post(scene, bloom, mode, amount=0.0, threshold=1.0, texel=(0.0, 0.0),
-          streak=0.0, additive=False):
+          additive=False):
     flush()
     _ctx.blend_equation = _ctx.FUNC_ADD
     # Most passes own their target outright; folding a bloom level back into
@@ -1303,18 +1264,14 @@ def _post(scene, bloom, mode, amount=0.0, threshold=1.0, texel=(0.0, 0.0),
                        else (_ctx.ONE, _ctx.ZERO))
     _targets[scene][0].use(0)
     _targets[bloom][0].use(1)
-    _targets['streak'][0].use(2)
     _post_prog['scene'].value = 0
     _post_prog['bloom'].value = 1
-    _set('extra', 2)
     _post_prog['mode'].value = mode
     _post_prog['bloom_amount'].value = amount
     _post_prog['exposure'].value = _EXPOSURE
     _post_prog['threshold'].value = threshold
     _post_prog['texel'].value = texel
     _post_prog['dither'].value = _DITHER
-    _set('streak_amount', streak)
-    _set('streak_tint', STREAK_TINT)
     _set('grade_shadow', GRADE_SHADOW)
     _set('grade_high', GRADE_HIGH)
     _set('saturation', SATURATION)
@@ -1337,9 +1294,14 @@ GRADE_SHADOW = (0.86, 0.94, 1.12)
 GRADE_HIGH = (1.06, 1.00, 0.93)
 SATURATION = 0.94
 
-# The anamorphic streak: how much of it reaches the picture, and its colour.
-STREAK = 0.5
-STREAK_TINT = (1.0, 0.86, 0.66)
+# There was an anamorphic streak here: a long horizontal blur of the bright
+# pass, on the reasoning that a lens in front of something this much brighter
+# than everything around it would smear it sideways. Two problems. There is no
+# lens - the camera is a top-down abstraction, not a thing in the room - and a
+# coherent horizontal band across a smooth radial gradient is visible far
+# below the contrast the numbers suggest. Measured it was four to eight per
+# cent of the vertical brightness at the same radius, and it read as a beam of
+# light lying across the floor through the player.
 
 
 def _bloom_chain():
