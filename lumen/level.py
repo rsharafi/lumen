@@ -602,12 +602,17 @@ def _bake_layers(level, rng, seed):
     # Courses running along the face, so it is stone rather than a gradient.
     yy = np.arange(arr.shape[0], dtype=np.float32)[:, None, None]
     course = 0.5 + 0.5 * np.cos(yy * (2.0 * np.pi / max(2.0, q(9.0))))
-    lit = np.clip(1.0 - t * 1.35, 0.0, 1.0) ** 1.4        # falls into shadow
-    shade = 0.20 + 0.62 * lit + 0.10 * course * (1.0 - t)
+    # Nothing painted here decides where the light is. The face used to carry
+    # a hard highlight along its top edge, which was a bright line drawn a
+    # face's width inside the wall - a second, permanent version of exactly
+    # the artefact the light was moved off. What is left is what a vertical
+    # surface has whatever falls on it: a little darker than the top it
+    # belongs to, its own courses, and a contact shadow where it meets the
+    # floor. Its shape comes from its normal, and the lights find it.
+    shade = 0.78 + 0.10 * course - 0.10 * t
+    contact = np.clip((t - 0.80) / 0.20, 0.0, 1.0)
+    shade *= 1.0 - 0.55 * contact
     faced = arr[..., :3] * shade
-    # The arris where the face meets the top, and the dark line at the floor.
-    faced += 92.0 * np.clip(1.0 - t / 0.10, 0.0, 1.0)
-    faced *= np.clip(0.35 + 0.65 * (1.0 - t) / 0.22, 0.35, 1.0) ** 0.5
     arr[..., :3] = np.where(is_face[..., None], np.clip(faced, 0, 255),
                             arr[..., :3])
     body = Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8), 'RGB')

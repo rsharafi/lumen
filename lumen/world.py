@@ -1242,26 +1242,19 @@ class World:
         or how far through its ignition the brazier is.
         """
         scale = draw.SCALE
-        # Only a wall's south edge has a face standing in front of its top,
-        # because that is the one side a camera hanging over the room can
-        # see. Its light peaks a face's height into the stone, on the arris;
-        # every other edge peaks on the edge itself. One profile for both put
-        # the bright line inside the masonry on three sides out of four and
-        # left the edge dark - which is what a bright band floating in the
-        # middle of a wall was.
-        south = []
-        plain = []
-        for piece in pieces:
-            (south if piece[6] > self.EDGE_FACE_COS else plain).append(piece)
-        for face, group in ((level_mod.WALL_FACE, south), (0.0, plain)):
-            if group:
-                self._draw_edge_group(group, ox, oy, gain, face, scale)
-
-    # How square-on to the camera an edge has to be before it counts as the
-    # one with a face on it. Walls are axis-aligned, so this only ever has to
-    # separate a normal pointing straight down the screen from one pointing
-    # along it.
-    EDGE_FACE_COS = 0.7
+        # The brightest line goes on the edge, on every side.
+        #
+        # It was worth trying the other way. A wall's south edge has a side
+        # face standing in front of its top, and on a real block the brightest
+        # line is the arris where those two meet - a face's height into the
+        # stone - so that is where the light was put. It measures correctly
+        # and it looks wrong, because the face is nineteen design units and
+        # the block behind it is a tile or more: at any real render scale that
+        # is a thin strip, and a bright line a strip's width inside a wall
+        # reads as a line floating in the masonry rather than as an arris on a
+        # surface too small to register as a surface. The edge is what the eye
+        # is tracking, so the light goes there.
+        self._draw_edge_group(pieces, ox, oy, gain, 0.0, scale)
 
     def _draw_edge_group(self, pieces, ox, oy, gain, face, scale):
         """One profile's worth of wall light, for edges that share a shape."""

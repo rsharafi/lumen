@@ -501,22 +501,20 @@ round it. The bottom of each footprint is now given over to the one side a
 top-down camera can see, and its normal points *down-screen* rather than up, so
 it takes light from a completely different direction than the top does.
 
-The light lying along a wall is aimed at that geometry, and **which edge it is
-matters**. A wall's south edge has that face standing in front of its top, so
-the brightest line belongs on the arris where the two meet — a face's height
-into the stone. Every other edge is a bare arris at the stone's outer edge with
-nothing in front of it, and its line belongs on the edge itself. One profile
-with one offset cannot be both: put the line a face's height in on all four
-sides and it is buried inside the masonry on three of them, leaving the edge
-you are actually looking at dark and a bright band floating in the middle of
-the wall. So the pieces are split by their outward normal and each group is
-drawn with a profile cut to its own shape — the front lengthened by the face
-where there is one, the reach behind it unchanged.
+The light lying along a wall puts its brightest line **on the edge**, on every
+side. That sounds obvious and it was arrived at the long way round: on a real
+block the brightest line is the arris where the side face meets the top, which
+is a face's height into the stone, so that is where it went first. It measures
+correctly and it looks wrong. The face is nineteen design units and the block
+behind it is a tile or more, so at any real render scale the face is a thin
+strip — and a bright line a strip's width inside a wall reads as a line
+floating in the masonry, not as an arris on a surface too small to register as
+a surface. The edge is what the eye tracks.
 
 Isolating that light by differencing two frames and profiling it across the
-edge puts its peak at **+18** design units on a south edge, which is the arris,
-and **+0** on east and west, which is the edge. Before the split it was +18 on
-all of them.
+edge puts its peak within a sampling step of **+0** on all four sides. Nothing
+paints a second line either: the face carries no baked highlight along its top,
+because that was the same artefact made permanent.
 
 **A lit floor is mostly not floor.** Measured in a pool, two thirds of what
 you see there is light added over the stone rather than the stone itself.
