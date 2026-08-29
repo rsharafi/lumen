@@ -501,48 +501,20 @@ round it. The bottom of each footprint is now given over to the one side a
 top-down camera can see, and its normal points *down-screen* rather than up, so
 it takes light from a completely different direction than the top does.
 
-**Walls are lit, not painted.** A visibility sweep stops at the near face of a
-wall, so a wall's own top and side lie outside every light's reach *by
-construction* — the one surface you most want to see is, definitionally, in
-shadow. For a long time the answer was a second, parallel system: reduce each
-lit edge to a scalar, stretch a fixed gradient along it, and add the result
-after the composite. That layer worked, and it could not know anything. It sat
-downstream of the normal buffer, so none of the per-light shading reached a
-wall — every light raked every wall the same way, from the same direction,
-whatever its height or where it stood. Only the lantern and braziers drove it;
-the rift lit floors and left walls alone. And being a per-piece scalar it could
-not be occluded, shaped by a light's height, or told apart from any other
-light's contribution.
+The light lying along a wall puts its brightest line **on the edge**, on every
+side. That sounds obvious and it was arrived at the long way round: on a real
+block the brightest line is the arris where the side face meets the top, which
+is a face's height into the stone, so that is where it went first. It measures
+correctly and it looks wrong. The face is nineteen design units and the block
+behind it is a tile or more, so at any real render scale the face is a thin
+strip — and a bright line a strip's width inside a wall reads as a line
+floating in the masonry, not as an arris on a surface too small to register as
+a surface. The edge is what the eye tracks.
 
-The band is now handed to the light itself, as quads running from each lit edge
-into the stone, drawn through the same shader every other light goes through.
-A wall therefore takes this light's colour, its falloff from this light's
-distance, its height, and the normal of whichever surface is actually there —
-the top, or the side face pointing down the screen. It goes in after the shadow
-pass, because a wall's own surface is behind its own occluder and would
-otherwise be darkened by the very shadow it is casting.
-
-What that buys, measured. Take the ratio between the side face and the top just
-past it, and raise the light from a height of 8 design units to 60:
-
-| | face/top at h=8 | at h=60 |
-| --- | --- | --- |
-| painted layer | 1.70 | 1.66 |
-| lit properly | 1.96 | 1.67 |
-
-The painted wall cannot tell where the light is — 2% over the whole range. The
-lit one loses 15%: held low the light rakes the face, raised up it stops
-reaching it and the wall flattens toward its top. A brazier set against a wall
-adds R+42 G+28 B+14 to the stone above it in its own colour, and nothing at all
-to the same wall two hundred units along.
-
-It is also cheaper than what it replaced. The band needs none of the painted
-layer's resolution along the wall, because nothing along its length is
-quantised any more — the shader works the falloff out per pixel — so its pieces
-are 14 design units against 2.6, and the in-play frame went from 6.41 ms to
-5.80 ms.
-
-The SDL backend has no shader to do this and keeps the painted layer.
+Isolating that light by differencing two frames and profiling it across the
+edge puts its peak within a sampling step of **+0** on all four sides. Nothing
+paints a second line either: the face carries no baked highlight along its top,
+because that was the same artefact made permanent.
 
 **A lit floor is mostly not floor.** Measured in a pool, two thirds of what
 you see there is light added over the stone rather than the stone itself.

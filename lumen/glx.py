@@ -772,46 +772,6 @@ def glow_points(xs, ys, radii, color, alphas, power=2.0, core=0.0,
         flush()
 
 
-def glow_quads(cx, cy, radius, quads, color, opacity=100, power=2.0,
-               height=0.0):
-    """Arbitrary quads lit by one light, with its falloff worked out per pixel.
-
-    `radial_fan` covers everything a light can see from where it stands, which
-    is the right shape for open floor and the wrong one for the surface of a
-    wall: a sweep stops at the near face of the stone, so the wall's own top
-    and side lie outside it by construction. Those get handed here instead, as
-    a band running from each lit edge into the stone, and because they go
-    through the same shader as every other light they take its colour, its
-    falloff, its height and the surface normal underneath them - which is the
-    whole difference between a wall that is lit and a wall that is painted.
-    """
-    if _ctx is None or radius <= 0.5 or opacity <= 0 or not quads:
-        return
-    a = _alpha(opacity)
-    if a <= 0.0:
-        return
-    r, g, b = (c / 255.0 for c in color[:3])
-    inv = 1.0 / radius
-    k_h = (height / radius) if height > 0.0 else 0.0
-    ext = _glow.extend
-    for corners, weights in quads:
-        (q0x, q0y), (q1x, q1y), (q2x, q2y), (q3x, q3y) = corners
-        w0, w1, w2, w3 = weights
-        a0, a1, a2, a3 = a * w0, a * w1, a * w2, a * w3
-        l0x, l0y = (q0x - cx) * inv, (q0y - cy) * inv
-        l1x, l1y = (q1x - cx) * inv, (q1y - cy) * inv
-        l2x, l2y = (q2x - cx) * inv, (q2y - cy) * inv
-        l3x, l3y = (q3x - cx) * inv, (q3y - cy) * inv
-        ext((q0x, q0y, l0x, l0y, r, g, b, a0, POWER_PROFILE, power, 0.0, k_h,
-             q1x, q1y, l1x, l1y, r, g, b, a1, POWER_PROFILE, power, 0.0, k_h,
-             q2x, q2y, l2x, l2y, r, g, b, a2, POWER_PROFILE, power, 0.0, k_h,
-             q0x, q0y, l0x, l0y, r, g, b, a0, POWER_PROFILE, power, 0.0, k_h,
-             q2x, q2y, l2x, l2y, r, g, b, a2, POWER_PROFILE, power, 0.0, k_h,
-             q3x, q3y, l3x, l3y, r, g, b, a3, POWER_PROFILE, power, 0.0, k_h))
-    if len(_glow) >= _GLOW_BATCH_MAX * 12 * 6:
-        flush()
-
-
 # --------------------------------------------------------------------------
 # Shadow coverage
 # --------------------------------------------------------------------------

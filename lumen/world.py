@@ -838,12 +838,13 @@ class World:
         gpu.composite(self.BLOOM, self.BLEED, art.dither_tile())
 
         # ---- light that lands on surfaces, not in the air ------------------
-        # Only the renderer that cannot light a wall properly still paints
-        # one. See `_draw_wall_surface_light`.
-        if not self.WALL_SURFACE_LIT:
-            gpu.begin_edge_light()
-            self._draw_wall_light(ox, oy, flicker)
-            gpu.end_edge_light()
+        # The masonry is baked very dark, so multiplying it by the light
+        # buffer leaves it black however close the lantern gets. What a wall
+        # actually shows is light *on* it, so that is added after the
+        # composite where nothing can wash it out again.
+        gpu.begin_edge_light()
+        self._draw_wall_light(ox, oy, flicker)
+        gpu.end_edge_light()
 
         # ---- things that are not part of the world -------------------------
         # Eyes are emissive, so they belong on top of the lighting rather than
@@ -956,11 +957,6 @@ class World:
         gpu.radial_fan((wx - ox) * scale, (wy - oy) * scale, reach * scale,
                        screen, art.rgb_tuple(color), strength, power=power,
                        height=height * scale)
-        # And the wall surfaces it reaches. A brazier standing beside a wall
-        # lights that wall from where it stands, with its own colour and its
-        # own height, which is the thing a painted layer could never do.
-        self._draw_wall_surface_light(wx, wy, ox, oy, reach, color, strength,
-                                      power=power, height=height)
 
     def _draw_flat(self, app):
         """The original single-pass path, for the cmu-graphics renderer."""
@@ -1142,89 +1138,7 @@ class World:
                                      ((cx - ox) * scale, (cy - oy) * scale),
                                      ((dx - ox) * scale, (dy - oy) * scale)))
         gpu.end_shadow()
-        # The wall surfaces this light reaches. After the shadow pass, because
-        # a wall's own top and side are behind its own occluder and would
-        # otherwise be darkened by the very shadow they are casting.
-        self._draw_wall_surface_light(
-            px, py, ox, oy, radius, LANTERN_GLOW,
-            clamp(96 * flicker, 0, 100), power=2.0, height=self.LIGHT_HEIGHT)
         gpu.set_mode(gpu.NORMAL)
-
-    # Whether this renderer can light a wall rather than paint one.
-    WALL_SURFACE_LIT = bool(getattr(gpu, 'ANALYTIC_LIGHTS', False))
-
-    # How far into the stone a light reaches from a wall's edge, in design
-    # units. It covers the side face and a good part of the top, and stays
-    # under a tile so that a light cannot reach through a wall and come out
-    # the other side.
-    WALL_LIGHT_DEPTH = 40.0
-    WALL_LIGHT_STEPS = 3
-    WALL_LIGHT_FALLOFF = 2.1
-    # Wall surfaces sit at a grazing angle to a light carried at waist
-    # height, and they are the brightest thing in frame if given the same
-    # strength as the floor.
-    WALL_LIGHT_GAIN = 0.52
-    # The band does not need the lantern's own edge resolution. Nothing along
-    # its length is quantised any more - the shader works the falloff out per
-    # pixel - so the pieces only have to be short enough to follow the curve
-    # where the light's reach clips the wall.
-    WALL_LIGHT_PIECE = 14.0
-
-    def _draw_wall_surface_light(self, lx, ly, ox, oy, radius, color,
-                                 strength, power=2.0, height=0.0):
-        """Light the wall surfaces this light can see, as light.
-
-        A visibility sweep stops at the near face of a wall, so a wall's own
-        top and side lie outside every light's reach by construction - and
-        for a long time the answer was a separate painted layer, a scalar per
-        edge stretched as a fixed gradient and added after the composite. That
-        layer could not know about the surface underneath it, so none of the
-        per-light shading applied to walls: every light raked a wall the same
-        way, from the same direction, whatever its height or where it stood.
-
-        Here the same edges are handed to the light itself as a band running
-        into the stone. It goes through the shader every other light goes
-        through, so the wall takes this light's colour, its falloff from this
-        light's distance, and the normal of whichever surface is actually
-        there - the top, or the side face pointing down the screen.
-        """
-        if not self.WALL_SURFACE_LIT or strength <= 0.0:
-            return
-        pieces = lighting.lit_wall_segments(self.level, lx, ly, radius,
-                                            self.WALL_LIGHT_PIECE)
-        if not pieces:
-            return
-        depth = self.WALL_LIGHT_DEPTH
-        scale = draw.SCALE
-        vw, vh = self.view_w, self.view_h
-        steps = self.WALL_LIGHT_STEPS
-        # The band is cut into a few slices across its depth so the light can
-        # die away into the stone on a curve rather than in one linear ramp.
-        # Vertex colour interpolates, so three slices is already smooth.
-        cuts = [i / steps for i in range(steps + 1)]
-        weights = [max(0.0, 1.0 - u) ** self.WALL_LIGHT_FALLOFF for u in cuts]
-        quads = []
-        for ax, ay, bx, by, _s, nx, ny in pieces:
-            sx = (ax + bx) * 0.5 - ox
-            sy = (ay + by) * 0.5 - oy
-            if sx < -depth or sy < -depth or sx > vw + depth or sy > vh + depth:
-                continue
-            for k in range(steps):
-                u0, u1 = cuts[k] * depth, cuts[k + 1] * depth
-                # Into the stone is against the outward normal.
-                p0 = ((ax - nx * u0 - ox) * scale, (ay - ny * u0 - oy) * scale)
-                p1 = ((bx - nx * u0 - ox) * scale, (by - ny * u0 - oy) * scale)
-                p2 = ((bx - nx * u1 - ox) * scale, (by - ny * u1 - oy) * scale)
-                p3 = ((ax - nx * u1 - ox) * scale, (ay - ny * u1 - oy) * scale)
-                w0, w1 = weights[k], weights[k + 1]
-                quads.append(((p0, p1, p2, p3), (w0, w0, w1, w1)))
-        if not quads:
-            return
-        gpu.set_mode(gpu.ADD)
-        gpu.glow_quads((lx - ox) * scale, (ly - oy) * scale, radius * scale,
-                       quads, art.rgb_tuple(color),
-                       strength * self.WALL_LIGHT_GAIN, power=power,
-                       height=height * scale)
 
     @staticmethod
     def _swing(point, px, py, cos_s, sin_s):
