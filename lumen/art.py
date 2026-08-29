@@ -447,13 +447,21 @@ def normal_map(pil, strength=1.0):
     (0.5, 0.5, 1)), carrying the source's alpha so that a layer only claims
     the pixels it actually covers.
     """
-    rgba = pil.convert('RGBA')
+    rgba = pil if pil.mode == 'RGBA' else pil.convert('RGBA')
+    # Built at half resolution and scaled back up. A normal map feeds a smooth
+    # N.L term, so it carries almost no high frequency worth preserving - and
+    # at a chamber's full size this is four times the array work, on the one
+    # code path that runs between the offering and the next floor, where every
+    # millisecond is a frame of hitch the player sees.
+    full = rgba.size
+    half = (max(2, full[0] // 2), max(2, full[1] // 2))
+    rgba = rgba.resize(half, Image.BILINEAR)
     a = np.asarray(rgba, dtype=np.float32)
     lum = (a[..., 0] * 0.2126 + a[..., 1] * 0.7152 + a[..., 2] * 0.0722) / 255.0
     # A wide slope, not a one-pixel difference: at native scale the art is
     # already several pixels per design unit, and a tight kernel picks up the
     # bake's own noise instead of the shapes drawn into it.
-    k = 2
+    k = 1
     gx = np.zeros_like(lum)
     gy = np.zeros_like(lum)
     gx[:, k:-k] = lum[:, 2 * k:] - lum[:, :-2 * k]
@@ -468,7 +476,8 @@ def normal_map(pil, strength=1.0):
     out[..., 1] = np.clip((ny * inv) * 127.5 + 127.5, 0, 255)
     out[..., 2] = np.clip((nz * inv) * 127.5 + 127.5, 0, 255)
     out[..., 3] = a[..., 3]
-    return Image.fromarray(out, 'RGBA')
+    small = Image.fromarray(out, 'RGBA')
+    return small if half == full else small.resize(full, Image.BILINEAR)
 
 
 def dither_tile(size=256):

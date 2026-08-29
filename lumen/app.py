@@ -51,6 +51,8 @@ class Game:
     def __init__(self):
         self.state = TITLE
         self.banked = 0
+        # A chamber built while the offering is on screen; see prepare_floor.
+        self._prepared = None
         self.width = WIDTH
         self.height = HEIGHT
         self.keys = set()
@@ -419,7 +421,8 @@ class Game:
         if depth > FLOORS_PER_RUN:
             self.finish_run(won=True)
             return
-        world.enter_floor(depth)
+        prepared, self._prepared = self._prepared, None
+        world.enter_floor(depth, prepared=prepared)
         self.state = PLAYING
         audio.play('descend', 0.6)
 
@@ -442,6 +445,7 @@ class Game:
         self.draft_screen.open(choices, self.world.depth,
                                rerolls=self.stats.rerolls)
         self.state = DRAFT
+        self._prepared = None
         audio.play('ui_select', 0.4)
 
     def reroll_draft(self):
@@ -587,6 +591,15 @@ class Game:
         elif self.state == DRAFT:
             self.draft_screen.update(dt)
             self._hover(self.draft_screen)
+            # Once the offering has settled, build the floor behind it. A
+            # single frame of work on a static screen is invisible; the same
+            # work on the frame the player presses a key is the hitch they
+            # were feeling.
+            if (self._prepared is None and self.world is not None
+                    and self.draft_screen.t > 0.5):
+                depth = self.world.depth + 1
+                if depth <= FLOORS_PER_RUN:
+                    self._prepared = self.world.prepare_floor(depth)
         elif self.state == ENDED:
             self.end_screen.update(dt)
         elif self.state == PLAYING:

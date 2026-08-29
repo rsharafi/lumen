@@ -136,11 +136,28 @@ class World:
         art.prewarm_lantern(LANTERN_GLOW, radii)
 
     # ------------------------------------------------------------- floors --
-    def enter_floor(self, depth):
+    def prepare_floor(self, depth):
+        """Build the next chamber ahead of time, without entering it.
+
+        Generating and baking a floor costs about 120 ms - four to seven
+        frames - and it used to happen at the instant the player chose an
+        offering, which is the one moment they are watching for a response.
+        Done while the offering is still on screen the same work lands on a
+        static page nobody is looking at for motion, and the descent itself
+        is immediate.
+        """
+        boss = depth in BOSS_FLOORS
+        art.clear_level_cache()
+        return (depth, boss, level_mod.generate(depth, self.rng, boss=boss))
+
+    def enter_floor(self, depth, prepared=None):
         self.depth = depth
         self.is_boss = depth in BOSS_FLOORS
-        art.clear_level_cache()
-        self.level = level_mod.generate(depth, self.rng, boss=self.is_boss)
+        if prepared is not None and prepared[0] == depth:
+            self.level = prepared[2]
+        else:
+            art.clear_level_cache()
+            self.level = level_mod.generate(depth, self.rng, boss=self.is_boss)
 
         self.player.x, self.player.y = self.level.player_start
         self.player.vx = self.player.vy = 0.0

@@ -459,7 +459,15 @@ class UpgradeScreen:
     # printed through the other.
     CARD_H = 400.0
     CARD_GAP = 40.0
-    RARITY = {3: ('COMMON', 1), 2: ('UNCOMMON', 2), 1: ('RARE', 3)}
+    # The tier's own colour, so a mythic does not merely say so in small
+    # print - it arrives looking like one. Everything below epic keeps the
+    # upgrade's own colour, because at those tiers the card is about what the
+    # thing does rather than about how seldom it comes.
+    TIER_COLOR = {
+        upgrades.EPIC: palette.WISP_EYE,
+        upgrades.LEGENDARY: palette.XP,
+        upgrades.MYTHIC: palette.CRIT,
+    }
 
     def draw(self, world):
         w, h = self.w, self.h
@@ -526,7 +534,7 @@ class UpgradeScreen:
         multiplied, because scaling the frame alone leaves the type where it
         was and the bottom-anchored rows climb into the blurb.
         """
-        colour = up.color
+        colour = self.TIER_COLOR.get(up.rarity, up.color)
         alpha = int(100 * delay)
         if alpha <= 0:
             return
@@ -566,7 +574,8 @@ class UpgradeScreen:
                       opacity=int((88 if selected else 66) * delay))
 
         # ---- how often the vault offers this ----------------------------
-        label, pips = self.RARITY.get(up.rarity, ('COMMON', 1))
+        entry = upgrades.TIERS.get(up.rarity)
+        label, pips = (entry[0], entry[1]) if entry else ('COMMON', 1)
         # Anchored to the bottom of the card, but never closer to the blurb
         # than one clear line - a fixed offset only works while every blurb is
         # the same number of lines, and they are not.
