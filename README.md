@@ -121,6 +121,15 @@ run-defining ones get likelier further down: measured, rarity-1 upgrades are
 26% of offers on floor one and 41% on floor twelve. Without that, a build is
 decided on floor one by whatever happened to come up.
 
+**Wardens** carry a shield with its own health, and it narrows as it takes
+damage until it gives way. It used to be a fixed arc that tracked you and
+returned zero from the front, so the only answer was to walk around behind
+something that was walking around to face you — an errand rather than a
+fight. Shooting the front is now a real if slow option (about thirty
+lance shots), flanking is a shortcut rather than the only door, and getting
+behind one still reaches the body while the shield is up. It needs no health
+bar, because the arc shrinking from 132° to 35° *is* the bar.
+
 **Elites.** From floor two on, a spawn can carry an affix — WARDED soaks most
 of what lands on it until the ward breaks, GORGED is four times the health and
 slower, QUICKENED is nearly twice the speed, EMBER-FED is worth a great deal

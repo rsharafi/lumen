@@ -19,7 +19,7 @@ import wave
 import numpy as np
 
 SAMPLE_RATE = 44100
-CACHE_VERSION = 4
+CACHE_VERSION = 5
 
 _bank = None
 
@@ -265,6 +265,26 @@ def _make_sounds():
                 * _env(n, 0.0005, 0.02, 0.0, 0.02) * 0.35)
     out['crit'] = _normalise(_room(_soft_clip(crit), 0.5, 6.0, 0.3, rng=rng), 0.54)
 
+    # A warden's shield taking a hit. Struck metal - high, inharmonic, and
+    # ringing rather than thudding, so a blocked shot is obviously a different
+    # event from a landed one without anyone having to read a word.
+    n = int(0.30 * SAMPLE_RATE)
+    shield = _mix(_struck(0.30, 940, (1.0, 2.44, 4.19, 6.87, 9.9),
+                          (1.1, 2.7, 4.4, 6.8, 9.2), bright=1.15),
+                  _struck(0.16, 1580, (1.0, 3.14), (2.2, 4.8)) * 0.42,
+                  _filter(_noise(n, rng), 5200, 'high', 1.0)
+                  * _env(n, 0.0004, 0.018, 0.0, 0.02) * 0.22)
+    out['shield'] = _normalise(_room(shield, 0.42, 5.2, 0.24, rng=rng), 0.5)
+
+    # And the moment it gives way: the same metal, lower and coming apart.
+    n = int(0.55 * SAMPLE_RATE)
+    broke = _mix(_struck(0.55, 430, (1.0, 2.38, 4.02, 6.6),
+                         (0.9, 2.1, 3.6, 5.4), bright=0.9),
+                 _filter(_noise(n, rng), 3000, 'high', 1.2)
+                 * _env(n, 0.001, 0.10, 0.08, 0.3) * 0.4)
+    out['shield_break'] = _normalise(
+        _room(_soft_clip(broke), 0.62, 5.6, 0.32, rng=rng), 0.58)
+
     # Taking damage: an ugly low crunch.
     n = int(0.34 * SAMPLE_RATE)
     hurt = _mix(_filter(_sweep(0.34, 230, 48, 'saw', 0.7), 700, 'low', 2.0)
@@ -424,6 +444,8 @@ class SoundBank:
         'enemy_shoot': (5, 0.090, 0.35),
         'hit': (6, 0.110, 0.35),
         'crit': (4, 0.060, 0.25),
+        'shield': (5, 0.070, 0.28),
+        'shield_break': (3, 0.050, 0.20),
         'kill': (5, 0.080, 0.30),
         'hurt': (4, 0.070, 0.25),
         'dash': (4, 0.070, 0.30),

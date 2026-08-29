@@ -16,7 +16,7 @@ from .mathx import angle_diff, clamp, ease_out_cubic
 
 class HollowChoir(Enemy):
     species = CHOIR
-    base_hp = 1650.0
+    base_hp = 5400.0
     base_speed = 78.0
     radius = 46.0
     touch_damage = 22.0

@@ -68,6 +68,8 @@ class Enemy:
         self.elite = None
         self.elite_color = None
         self.ward = 0.0
+        # Brief white flash on a warden's shield when it turns a shot.
+        self.shield_flash = 0.0
         self.state = 'seek'
         self.state_t = 0.0
         self.wall_time = 0.0
@@ -172,6 +174,7 @@ class Enemy:
     def update(self, dt, ctx):
         self.spawn_t = max(0.0, self.spawn_t - dt)
         self.hit_flash = max(0.0, self.hit_flash - dt * 4.0)
+        self.shield_flash = max(0.0, self.shield_flash - dt * 6.0)
         self.stagger = max(0.0, self.stagger - dt)
         self.touch_cd = max(0.0, self.touch_cd - dt)
         self.attack_cd = max(0.0, self.attack_cd - dt)
@@ -567,7 +570,36 @@ class Warden(Enemy):
     body_color = palette.WARDEN
     eye_color = palette.WARDEN_EYE
     mass = 2.6
-    shield_arc = 1.15   # radians either side of facing that the shield covers
+
+    # The shield is a health pool, not a rule.
+    #
+    # It used to be a fixed arc that tracked you and returned zero damage from
+    # the front, which meant the only answer was to walk around behind
+    # something that was walking around to face you. That is not a fight, it
+    # is an errand. Now it has a lot of health of its own, it narrows as it
+    # takes damage, and it breaks. Shooting the front is a real - if slow -
+    # option, and the arc shrinking as it goes is the progress bar: it needs
+    # no numbers over its head, because you can see how much is left.
+    #
+    # Getting behind it still works, and still works *while the shield is up*.
+    # It is a shortcut, not the only door.
+    SHIELD_HP = 165.0
+    SHIELD_ARC_FULL = 1.15      # radians either side of facing, intact
+    SHIELD_ARC_SPENT = 0.26     # ...and just before it gives way
+
+    def __init__(self, x, y, depth, rng):
+        super().__init__(x, y, depth, rng)
+        self.shield_max = self.SHIELD_HP * (1.0 + 0.18 * (depth - 1))
+        self.shield_hp = self.shield_max
+
+    @property
+    def shield_arc(self):
+        """How wide the shield still covers, from what is left of it."""
+        if self.shield_hp <= 0.0:
+            return 0.0
+        frac = clamp(self.shield_hp / max(self.shield_max, 1e-6), 0.0, 1.0)
+        return self.SHIELD_ARC_SPENT + (self.SHIELD_ARC_FULL
+                                        - self.SHIELD_ARC_SPENT) * frac
 
     def behave(self, dt, ctx):
         self.chase(dt, ctx, accel=4.0)
@@ -580,19 +612,35 @@ class Warden(Enemy):
 
     def shield_blocks(self, angle_from):
         """True when an impact arriving from `angle_from` hits the shield."""
+        if self.shield_hp <= 0.0:
+            return False
         return abs(angle_diff(self.facing, angle_from)) < self.shield_arc
 
     def damage_by(self, amount, ctx, angle=None, knockback=0.0, crit=False):
         if angle is not None and self.shield_blocks(angle + math.pi):
+            hit_a = angle + math.pi
+            self.shield_hp -= amount
             ctx.particles.burst(
-                self.x + math.cos(angle + math.pi) * self.radius,
-                self.y + math.sin(angle + math.pi) * self.radius,
+                self.x + math.cos(hit_a) * self.radius * 1.4,
+                self.y + math.sin(hit_a) * self.radius * 1.4,
                 7, palette.WARDEN_SHIELD, self.rng, speed=(120, 300),
                 life=(0.14, 0.3), size=(1.8, 3.4),
-                direction=angle + math.pi, spread=1.7)
-            ctx.effects.add_text(self.x, self.y - self.radius - 6, 'BLOCKED',
-                                 palette.WARDEN_SHIELD, 14, False)
-            audio.play_at('hit', self.x, self.y, 0.2)
+                direction=hit_a, spread=1.7)
+            if self.shield_hp <= 0.0:
+                self.shield_hp = 0.0
+                ctx.particles.burst(
+                    self.x + math.cos(hit_a) * self.radius * 1.4,
+                    self.y + math.sin(hit_a) * self.radius * 1.4,
+                    26, palette.WARDEN_SHIELD, self.rng, speed=(180, 420),
+                    life=(0.25, 0.6), size=(2.0, 4.4))
+                ctx.effects.add_light(self.x, self.y, 130.0, 0.24,
+                                      palette.WARDEN_SHIELD)
+                audio.play_at('shield_break', self.x, self.y, 0.7)
+            else:
+                # No word over its head: the arc narrowing says it, and a
+                # struck-metal ring says the shot did not land on flesh.
+                self.shield_flash = 1.0
+                audio.play_at('shield', self.x, self.y, 0.34)
             return 0.0
         return super().damage_by(amount, ctx, angle, knockback, crit)
 
@@ -610,10 +658,15 @@ class Warden(Enemy):
         drawPolygon(*pts, fill=color, opacity=opacity)
         self.draw_eyes(sx, sy, ca, sa, opacity, offset=0.2, size=2.6)
 
-        # The shield: a thick arc drawn as a strip of quads.
+        # The shield: a thick arc drawn as a strip of quads. Gone entirely
+        # once it is spent, and thinner as well as narrower on the way there,
+        # so its remaining strength is legible at a glance.
+        if self.shield_hp <= 0.0:
+            return
+        frac = clamp(self.shield_hp / max(self.shield_max, 1e-6), 0.0, 1.0)
         segs = 5
         inner = r * 1.25
-        outer = r * 1.55
+        outer = r * (1.28 + 0.27 * frac)
         for i in range(segs):
             a0 = self.facing - self.shield_arc + (2 * self.shield_arc) * i / segs
             a1 = self.facing - self.shield_arc + (2 * self.shield_arc) * (i + 1) / segs
@@ -621,8 +674,9 @@ class Warden(Enemy):
                         sx + math.cos(a1) * inner, sy + math.sin(a1) * inner,
                         sx + math.cos(a1) * outer, sy + math.sin(a1) * outer,
                         sx + math.cos(a0) * outer, sy + math.sin(a0) * outer,
-                        fill=palette.WARDEN_SHIELD,
-                        opacity=op(opacity * 0.62))
+                        fill=(palette.LIGHT_CORE if self.shield_flash > 0.4
+                              else palette.WARDEN_SHIELD),
+                        opacity=op(opacity * (0.34 + 0.34 * frac)))
 
 
 # --------------------------------------------------------------------------

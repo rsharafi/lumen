@@ -453,7 +453,11 @@ class UpgradeScreen:
     # the same thing the rest of the game does with light, applied to the one
     # screen where the player stops and reads.
     CARD_W = 286.0
-    CARD_H = 360.0
+    # Tall enough for the longest blurb the pool holds. A pact needs three
+    # lines to say what it costs as well as what it gives, and at 360 the
+    # third line landed four units from the rarity label - which is one row
+    # printed through the other.
+    CARD_H = 400.0
     CARD_GAP = 40.0
     RARITY = {3: ('COMMON', 1), 2: ('UNCOMMON', 2), 1: ('RARE', 3)}
 
@@ -554,7 +558,8 @@ class UpgradeScreen:
         _rule(x + 52 * k, x + cw - 52 * k, y + 212 * k, colour,
               int((60 if selected else 26) * delay))
 
-        for j, line in enumerate(wrap(up.blurb, 28)[:4]):
+        lines = wrap(up.blurb, 28)[:4]
+        for j, line in enumerate(lines):
             drawLabel(line, mid, y + (238 + j * 20) * k, size=12 * k,
                       fill=palette.UI_TEXT if selected else palette.UI_DIM,
                       font=palette.FONT_UI,
@@ -562,7 +567,11 @@ class UpgradeScreen:
 
         # ---- how often the vault offers this ----------------------------
         label, pips = self.RARITY.get(up.rarity, ('COMMON', 1))
-        py = y + ch - 62 * k
+        # Anchored to the bottom of the card, but never closer to the blurb
+        # than one clear line - a fixed offset only works while every blurb is
+        # the same number of lines, and they are not.
+        blurb_bottom = y + (238 + max(0, len(lines) - 1) * 20) * k
+        py = max(y + ch - 62 * k, blurb_bottom + 32 * k)
         drawLabel(label, mid, py - 16 * k, size=9 * k,
                   fill=colour if selected else palette.UI_FAINT,
                   font=palette.FONT_UI,
@@ -994,13 +1003,16 @@ class EndScreen:
         if s['embers'] > 0:
             drawLabel(f"{s['embers']} EMBERS BANKED  -  {s['held']} HELD "
                       f"AT THE VIGIL",
-                      w * 0.5, py + ph + 48, size=12, bold=True,
+                      w * 0.5, py + ph + 52, size=12, bold=True,
                       fill=palette.XP, font=palette.FONT_UI, opacity=88)
 
         if s['upgrades']:
             names = ', '.join(upgrades.BY_KEY[k].name for k in s['upgrades'])
+            # Below the banked line, not on top of it. These two rows were
+            # eight units apart, which at eleven and twelve point is one row
+            # printed through the other.
             for i, line in enumerate(wrap(names, 74)[:3]):
-                drawLabel(line, w * 0.5, py + ph + 56 + i * 19, size=11,
+                drawLabel(line, w * 0.5, py + ph + 78 + i * 19, size=11,
                           fill=palette.UI_FAINT, font=palette.FONT_UI,
                           opacity=64)
 
