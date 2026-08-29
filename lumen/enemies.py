@@ -64,6 +64,10 @@ class Enemy:
         self.spawn_t = 0.55
         self.lit = False
         self.slow = 0.0
+        # Elites: an affix name, or None for the ordinary case.
+        self.elite = None
+        self.elite_color = None
+        self.ward = 0.0
         self.state = 'seek'
         self.state_t = 0.0
         self.wall_time = 0.0
@@ -198,6 +202,20 @@ class Enemy:
     def damage_by(self, amount, ctx, angle=None, knockback=0.0, crit=False):
         if not self.alive:
             return 0.0
+        if self.ward > 0.0:
+            # A ward soaks most of what lands on it until it breaks, which
+            # asks for one large hit rather than a stream of small ones.
+            soak = min(self.ward, amount * 0.72)
+            self.ward -= soak
+            amount -= soak
+            if self.ward <= 0.0:
+                self.ward = 0.0
+                ctx.effects.add_text(self.x, self.y - self.radius - 12,
+                                     'WARD BROKEN', palette.SHIELD, 15, True)
+                ctx.effects.add_flash(0.34, palette.SHIELD)
+                ctx.particles.burst(self.x, self.y, 30, palette.SHIELD,
+                                    self.rng, speed=(160, 380),
+                                    life=(0.2, 0.5), size=(2.0, 4.6))
         self.hp -= amount
         self.hit_flash = 1.0
         if knockback:
@@ -605,6 +623,80 @@ class Warden(Enemy):
                         sx + math.cos(a0) * outer, sy + math.sin(a0) * outer,
                         fill=palette.WARDEN_SHIELD,
                         opacity=op(opacity * 0.62))
+
+
+# --------------------------------------------------------------------------
+# Elites
+# --------------------------------------------------------------------------
+# A floor was a bag of the same five silhouettes at slowly rising health, and
+# the only thing that changed between floor three and floor nine was how many
+# of them there were. An elite is the cheapest way to make an encounter have a
+# shape: one thing in the room is a different problem, and you can see which
+# one it is before it reaches you, because an elite carries its own light.
+#
+# That last part matters more than the numbers. Everything else in this game
+# is invisible until the lantern finds it; an elite announces itself from
+# across a dark room, which turns "clear the floor" into "deal with that
+# first, or last".
+
+WARDED = 'warded'
+SWIFT = 'swift'
+GORGED = 'gorged'
+EMBERFED = 'emberfed'
+
+ELITE_AFFIXES = (WARDED, SWIFT, GORGED, EMBERFED)
+
+ELITE_NAMES = {
+    WARDED: 'WARDED',
+    SWIFT: 'QUICKENED',
+    GORGED: 'GORGED',
+    EMBERFED: 'EMBER-FED',
+}
+
+ELITE_COLORS = {
+    WARDED: palette.SHIELD,
+    SWIFT: palette.DASH_TRAIL,
+    GORGED: palette.DAMAGE,
+    EMBERFED: palette.LIGHT_WARM,
+}
+
+
+def elite_chance(depth):
+    """How likely any one spawn is to be an elite, by floor.
+
+    Nothing on floor one - the first room should teach the ordinary case -
+    then climbing to about one in five near the bottom.
+    """
+    if depth < 2:
+        return 0.0
+    return min(0.22, 0.045 * (depth - 1))
+
+
+def make_elite(enemy, affix, depth):
+    """Turn an ordinary enemy into an elite in place."""
+    enemy.elite = affix
+    enemy.elite_color = ELITE_COLORS[affix]
+    enemy.radius *= 1.22
+    enemy.score = int(enemy.score * 3)
+    enemy.ember_value = enemy.ember_value * 3 + 2
+    if affix == WARDED:
+        # Takes far less damage until something breaks through: a health bar
+        # that asks for burst rather than for chip.
+        enemy.max_hp *= 2.4
+        enemy.ward = enemy.max_hp * 0.45
+    elif affix == SWIFT:
+        enemy.speed *= 1.85
+        enemy.max_hp *= 1.3
+    elif affix == GORGED:
+        enemy.max_hp *= 4.0
+        enemy.speed *= 0.72
+        enemy.damage *= 1.5
+        enemy.radius *= 1.15
+    elif affix == EMBERFED:
+        enemy.max_hp *= 1.8
+        enemy.ember_value = enemy.ember_value * 2 + 6
+    enemy.hp = enemy.max_hp
+    return enemy
 
 
 SPECIES = {

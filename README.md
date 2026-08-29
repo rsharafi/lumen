@@ -2,9 +2,10 @@
 
 A top-down roguelite built on the CMU CS Academy graphics library
 (`cmu-graphics`). Twelve procedurally generated chambers across six layout
-archetypes, five enemy species and a three-phase boss, three weapons,
-twenty-seven run modifiers, and real-time 2D shadowcasting — **you carry the
-only light**, and everything you cannot see is still there.
+archetypes, five enemy species with elite variants and a three-phase boss,
+three weapons, fifty run modifiers, a persistent progression track, and
+real-time 2D shadowcasting — **you carry the only light**, and everything you
+cannot see is still there.
 
 No asset files ship with the game. Every texture, sprite, glow and item icon,
 and all 21 sound effects, are generated at startup from numpy and PIL.
@@ -94,6 +95,83 @@ in them, which makes them worth holding ground for.
 Enemies outside the light draw as nothing but eye-glints.
 
 ---
+
+## The run, and what outlasts it
+
+**The offering.** Three cards between floors, from a pool of fifty. Half of
+them raise a number, which is a foundation and not a design - three offerings
+of "damage x1.22" is not a decision, and a run built from them plays like any
+other. The other half either want a way of fighting or cost something:
+
+* Conditional damage. NIGHT-FED pays against what is outside your light,
+  AMBUSHER against anything still at full health, OVERCHARGE as the lantern
+  empties, MOMENTUM while you are moving, BULWARK while you are not.
+* SIPHON returns fuel on every kill, which turns the lantern from a clock
+  running down into something killing wins back.
+* DASH CLEAVE makes the dash a weapon; ARCLIGHT jumps hits between enemies.
+* Five **pacts**, each of which costs something real: GLASS trades fragility
+  for damage, BLOOD trades half your health for lifesteal, HOLLOW trades all
+  healing for speed, GUTTERING trades a third of your light for fire rate,
+  GREED trades fragility for embers.
+* SECOND SIGHT buys redraws — the smallest thing that turns three fixed cards
+  back into a choice.
+
+Rarity tilts with depth, so the foundational things dominate early and the
+run-defining ones get likelier further down: measured, rarity-1 upgrades are
+26% of offers on floor one and 41% on floor twelve. Without that, a build is
+decided on floor one by whatever happened to come up.
+
+**Elites.** From floor two on, a spawn can carry an affix — WARDED soaks most
+of what lands on it until the ward breaks, GORGED is four times the health and
+slower, QUICKENED is nearly twice the speed, EMBER-FED is worth a great deal
+more. The chance climbs to about one in five near the bottom.
+
+The important part is not the numbers: an elite **carries its own light**.
+Everything else in this game is invisible until the lantern finds it, so a
+coloured pool moving in a dark room is the one thing you can see coming. That
+turns clearing a floor into a decision about what to deal with first.
+
+**The Vigil.** Embers used to be counted, worth five points, and thrown away
+at the end of every run. They are banked now — won or lost — and buy eleven
+things across twenty-three ranks that are still there next time: health,
+lantern capacity, damage, speed, ember value, a redraw, a ward, a revive, the
+two other weapons, and starting a descent already holding an offering.
+
+Two rules keep it from becoming a waiting room. The vault is never gated: every
+floor and the boss are reachable on a first run with the starting weapon, so
+nothing stands between a good player and the ending. And no stat node scales
+without limit — the largest is worth about a fifth of one mid-run offering, so
+a hundred banked runs cannot trivialise floor one. What it mostly buys is
+options.
+
+### Proving an upgrade does something
+
+`tools/stat_probe.py` exists because an upgrade that raises a number nothing
+reads is worse than no upgrade at all: it takes a slot on the offering, reads
+as a real choice, and does nothing. It pushes each stat far from its default,
+runs a fixed scripted fight twice, and requires an observable to move. Cases
+can ask for the scenario they need — `bulwark` cannot show up against a probe
+that never stands still, and a cleaving dash cannot show up against one that
+shoots everything before it gets close.
+
+```bash
+.venv/bin/python tools/stat_probe.py
+```
+
+It found three real faults on its first run. `chain` had a field on `Stats`,
+no implementation anywhere, and nothing passing it to a projectile. And both
+`light_damage` and `thorns` subtracted health directly rather than going
+through `damage_by`, so burning something down with the lantern counted for
+nothing in the run summary and fed no lifesteal.
+
+Total damage turned out to be a trap as an observable: it saturates the moment
+a floor is dead, because it is bounded by the enemies' health, so a doubled
+stat and an untouched one look identical. There is a clear-time observable for
+that reason.
+
+31 of 32 stats provably move something. The one that does not, `pierce_bonus`,
+is wired and working but wants a line of enemies the harness cannot reliably
+arrange, and is reported as UNPROVEN rather than counted as a pass.
 
 ## How it is built
 
@@ -713,7 +791,8 @@ lumen/
   particles.py       pooled particle system
   fx.py              camera, shake, hit-stop, floating text, transient lights
   pickups.py         embers, oil, mercy
-  upgrades.py        the 27 run modifiers
+  upgrades.py        the 50 run modifiers, and the Stats they mutate
+  vigil.py           what survives a run: banked embers and what they buy
   hud.py             heads-up display and minimap
   screens.py         title, help, draft, pause, endings
   audio.py           numpy sound synthesis and the WAV cache
@@ -723,6 +802,7 @@ tools/
   playtest.py        headless driver: scripted input, autopilot, screenshots
   gpu_smoke.py       drives the GPU path under the native host, on either
                      backend — the branches playtest structurally cannot reach
+  stat_probe.py      proves every upgrade stat changes something observable
   shoot.py           generic harness for prototyping a scene in isolation
 ```
 

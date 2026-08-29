@@ -197,7 +197,11 @@ class World:
         x += self.rng.uniform(-TILE * 0.4, TILE * 0.4)
         y += self.rng.uniform(-TILE * 0.4, TILE * 0.4)
         x, y = self.level.collide_circle(x, y, cls.radius)
-        self.enemies.append(cls(x, y, self.depth, self.rng))
+        enemy = cls(x, y, self.depth, self.rng)
+        if self.rng.chance(enemy_mod.elite_chance(self.depth)):
+            enemy_mod.make_elite(
+                enemy, self.rng.choice(enemy_mod.ELITE_AFFIXES), self.depth)
+        self.enemies.append(enemy)
 
     def set_banner(self, text, seconds=2.4):
         self.banner = text
@@ -255,6 +259,14 @@ class World:
             # killing is a genuinely different way to play the same floor.
             self.player.add_fuel(self.stats.siphon)
 
+        if enemy.elite:
+            self.effects.add_shake(5.0)
+            self.effects.add_flash(0.5, enemy.elite_color)
+            self.effects.add_light(enemy.x, enemy.y, 210.0, 0.4,
+                                   enemy.elite_color)
+            self.particles.burst(enemy.x, enemy.y, 40, enemy.elite_color,
+                                 self.fxrng, speed=(160, 460),
+                                 life=(0.3, 0.7), size=(2.2, 5.2))
         self.pickups.spawn(pickup_mod.EMBER, enemy.x, enemy.y, 1, self.rng,
                            count=enemy.ember_value)
         if self.rng.chance(0.16):
@@ -850,6 +862,12 @@ class World:
     # Cooler than the lantern and further off, so it lands on masonry softly.
     RIFT_ON_WALLS = 0.72
 
+    # What an elite throws. Enough to be seen across a room and not enough to
+    # light the room: the floor stays dark, the thing in it does not.
+    ELITE_GLOW = 118.0
+    ELITE_GLOW_STRENGTH = 26.0
+    ELITE_LIGHT_HEIGHT = 16.0
+
     def draw(self, app):
         if self.deferred and gpu.lighting_ready():
             self._draw_lit(app)
@@ -1003,6 +1021,12 @@ class World:
         # Eyes throw just enough light to catch the ground under them. Any
         # more and a chamber full of enemies lights itself, which takes the
         # dark away from a game whose whole subject is the dark.
+        #
+        # An elite is the exception, and deliberately: it carries a low pool
+        # of its own colour, so it is the one thing in a dark room you can see
+        # coming. That turns clearing a floor into a decision about which
+        # problem to take first, instead of waiting for the lantern to find
+        # each one in turn.
         for e in self.enemies:
             if not e.alive:
                 continue
@@ -1011,6 +1035,12 @@ class World:
                 continue
             art.draw_glow(art.rgb_tuple(e.eye_color), sx, sy, 15.0, 13,
                           power=3.0)
+            if e.elite:
+                breathe = 0.78 + 0.22 * math.sin(self.run_time * 3.4 + e.phase)
+                art.draw_glow(art.rgb_tuple(e.elite_color), sx, sy,
+                              self.ELITE_GLOW * breathe,
+                              self.ELITE_GLOW_STRENGTH * breathe, power=2.3,
+                              height=self.ELITE_LIGHT_HEIGHT)
         gpu.set_mode(gpu.NORMAL)
 
     # How far a brazier throws. Fixed, because its shadow is cast once at
