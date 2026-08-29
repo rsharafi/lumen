@@ -234,13 +234,13 @@ class Enemy:
             spread=2.0 if angle is not None else math.tau)
 
         if crit:
-            ctx.effects.add_text(self.x, self.y - self.radius - 8,
-                                 f'{int(amount)}', palette.CRIT, 21, True)
+            ctx.effects.add_damage(self.x, self.y - self.radius - 8,
+                                   amount, palette.CRIT, 21, True)
             ctx.effects.add_hitstop(0.045)
             audio.play_at('crit', self.x, self.y, 0.5)
         else:
-            ctx.effects.add_text(self.x, self.y - self.radius - 6,
-                                 f'{int(amount)}', palette.UI_TEXT, 15, False)
+            ctx.effects.add_damage(self.x, self.y - self.radius - 6,
+                                   amount, palette.UI_TEXT, 15, False)
             audio.play_at('hit', self.x, self.y, 0.32)
 
         if self.hp <= 0.0:

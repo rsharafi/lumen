@@ -57,6 +57,7 @@ class Stats:
         self.swarm = 0              # extra shots per volley
         self.gutter = 0.0           # lantern reach lost, in exchange
         self.curses = 0             # pacts taken, for the run summary
+        self.no_heal = False        # HOLLOW PACT: nothing restores health
 
         # Which weapons this run may carry. The Vigil widens it.
         self.weapons = ['lance']
@@ -89,6 +90,12 @@ class Upgrade:
         self.rarity = rarity
         self.repeatable = repeatable
         self.requires = requires
+
+
+def _set(attr, value):
+    def apply(stats):
+        setattr(stats, attr, value)
+    return apply
 
 
 def _pact(gain, cost):
@@ -357,7 +364,7 @@ ALL += [
             'Move 30% faster and dash freely. You cannot be healed.',
             _pact(_both(_mul('speed_mult', 1.30),
                         _mul('dash_cooldown_mult', 0.45)),
-                  _both(_add('kill_heal', -99.0), _add('lifesteal', -9.0))),
+                  _set('no_heal', True)),
             palette.WISP_EYE, rarity=1, repeatable=False),
 
     Upgrade('greedpact', 'GREED PACT',

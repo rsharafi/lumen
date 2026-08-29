@@ -16,7 +16,7 @@ from .mathx import angle_diff, clamp, ease_out_cubic
 
 class HollowChoir(Enemy):
     species = CHOIR
-    base_hp = 620.0
+    base_hp = 1650.0
     base_speed = 78.0
     radius = 46.0
     touch_damage = 22.0
@@ -28,9 +28,12 @@ class HollowChoir(Enemy):
 
     ATTACKS = ('ring', 'spiral', 'charge', 'summon', 'lash')
 
+    # How high its light hangs, for the per-light surface shading.
+    LIGHT_HEIGHT = 34.0
+
     def __init__(self, x, y, depth, rng):
         super().__init__(x, y, depth, rng)
-        self.max_hp = self.base_hp * (1.0 + 0.55 * max(0, depth // 6 - 1))
+        self.max_hp = self.base_hp * (1.0 + 0.62 * max(0, depth // 6 - 1))
         self.hp = self.max_hp
         self.spawn_t = 1.6
         self.state = 'idle'
@@ -46,14 +49,32 @@ class HollowChoir(Enemy):
         self.intro_played = False
 
     # ------------------------------------------------------------- phases --
+    # Health thresholds where it changes. Four now rather than three: the
+    # last one is a short, very fast stand at the end rather than a long slow
+    # grind through the final third.
+    TIERS = (0.70, 0.42, 0.16)
+
     @property
     def tier(self):
         frac = self.hp / max(self.max_hp, 1e-6)
-        if frac > 0.66:
-            return 1
-        if frac > 0.33:
-            return 2
-        return 3
+        for i, edge in enumerate(self.TIERS):
+            if frac > edge:
+                return i + 1
+        return 4
+
+    @property
+    def rage(self):
+        """0 at full health, 1 in the last stand, smooth in between.
+
+        Three flat phases meant the fight got harder in two steps and was
+        otherwise identical throughout each one - the last third of a phase
+        played exactly like the first. Rage climbs *within* a phase as well as
+        across it, so the thing is visibly winding up the whole way down: the
+        gaps between attacks close, the warning before each one shortens, and
+        what it throws gets faster and more numerous.
+        """
+        frac = clamp(self.hp / max(self.max_hp, 1e-6), 0.0, 1.0)
+        return (1.0 - frac) ** 0.85
 
     def available_attacks(self):
         p = self.tier
@@ -74,8 +95,11 @@ class HollowChoir(Enemy):
             ctx.effects.add_shake(9.0)
 
         if self.state == 'idle':
-            self.steer_to(player.x, player.y, dt, self.speed * 0.65, accel=2.0)
-            if self.state_t > (1.35 if self.tier == 1 else 0.95 if self.tier == 2 else 0.7):
+            self.steer_to(player.x, player.y, dt,
+                          self.speed * (0.65 + 0.55 * self.rage), accel=2.0)
+            # The pause between attacks, closing from a beat and a half down
+            # to almost nothing.
+            if self.state_t > 1.45 - 1.02 * self.rage:
                 self.begin_attack(ctx)
 
         elif self.state == 'telegraph':
@@ -93,7 +117,7 @@ class HollowChoir(Enemy):
         elif self.state == 'recover':
             self.vx *= math.exp(-3.0 * dt)
             self.vy *= math.exp(-3.0 * dt)
-            if self.state_t > 0.55:
+            if self.state_t > 0.6 - 0.34 * self.rage:
                 self.set_state('idle')
 
     def set_state(self, name):
@@ -102,8 +126,12 @@ class HollowChoir(Enemy):
 
     def begin_attack(self, ctx):
         self.attack = ctx.rng.choice(self.available_attacks())
+        # The warning before it lands. Losing nearly half of it by the end is
+        # most of what makes the last stand frightening: the same attacks,
+        # with far less time to read them.
         self.telegraph = {'ring': 0.7, 'spiral': 0.8, 'charge': 0.85,
                           'summon': 0.9, 'lash': 0.75}[self.attack]
+        self.telegraph *= 1.0 - 0.46 * self.rage
         self.set_state('telegraph')
         ctx.effects.add_light(self.x, self.y, 190, self.telegraph, self.eye_color)
 
@@ -111,7 +139,7 @@ class HollowChoir(Enemy):
         self.set_state('attack')
         player = ctx.player
         if self.attack == 'ring':
-            self.shots_left = 3 if self.tier >= 2 else 2
+            self.shots_left = (3 if self.tier >= 2 else 2) + (1 if self.tier >= 4 else 0)
             self.shot_timer = 0.0
         elif self.attack == 'spiral':
             self.shots_left = 26 + 10 * self.tier
@@ -119,12 +147,13 @@ class HollowChoir(Enemy):
         elif self.attack == 'charge':
             a = math.atan2(player.y - self.y, player.x - self.x)
             self.charge_dir = (math.cos(a), math.sin(a))
-            self.vx = self.charge_dir[0] * 720.0
-            self.vy = self.charge_dir[1] * 720.0
+            charge_speed = 720.0 * (1.0 + 0.35 * self.rage)
+            self.vx = self.charge_dir[0] * charge_speed
+            self.vy = self.charge_dir[1] * charge_speed
             ctx.effects.add_shake(5.0)
             audio.play_at('dash', self.x, self.y, 0.8)
         elif self.attack == 'summon':
-            self.shots_left = 2 + self.tier
+            self.shots_left = 2 + self.tier + int(2 * self.rage)
             self.shot_timer = 0.0
         elif self.attack == 'lash':
             self.shots_left = 5
@@ -151,23 +180,23 @@ class HollowChoir(Enemy):
             return
 
         if self.attack == 'ring':
-            count = 14 + 4 * self.tier
+            count = 14 + 4 * self.tier + int(8 * self.rage)
             base = ctx.rng.angle()
             for i in range(count):
                 a = base + i * math.tau / count
                 self._bullet(ctx, a, 250.0, 10.0)
-            self.shot_timer = 0.42
+            self.shot_timer = 0.42 - 0.16 * self.rage
             self.shots_left -= 1
             ctx.effects.add_light(self.x, self.y, 240, 0.22, self.eye_color)
             audio.play_at('enemy_shoot', self.x, self.y, 0.5)
 
         elif self.attack == 'spiral':
-            arms = 2 + self.tier
+            arms = 2 + self.tier + int(2 * self.rage)
             base = self.state_t * 4.4
             for i in range(arms):
                 a = base + i * math.tau / arms
                 self._bullet(ctx, a, 285.0, 9.0)
-            self.shot_timer = 0.055
+            self.shot_timer = 0.055 - 0.018 * self.rage
             self.shots_left -= 1
             if self.shots_left % 8 == 0:
                 audio.play_at('enemy_shoot', self.x, self.y, 0.24)
@@ -182,18 +211,21 @@ class HollowChoir(Enemy):
             ctx.spawn_enemy(kind, sx, sy)
             ctx.particles.burst(sx, sy, 12, self.eye_color, ctx.rng,
                                 speed=(80, 220), life=(0.2, 0.5), size=(2, 4))
-            self.shot_timer = 0.3
+            self.shot_timer = 0.3 - 0.12 * self.rage
             self.shots_left -= 1
 
         elif self.attack == 'lash':
             a = math.atan2(player.y - self.y, player.x - self.x)
-            for k in (-1, 0, 1):
+            fan = (-2, -1, 0, 1, 2) if self.tier >= 3 else (-1, 0, 1)
+            for k in fan:
                 self._bullet(ctx, a + k * 0.14, 430.0, 12.0, life=2.4)
-            self.shot_timer = 0.16
+            self.shot_timer = 0.16 - 0.06 * self.rage
             self.shots_left -= 1
             audio.play_at('enemy_shoot', self.x, self.y, 0.4)
 
     def _bullet(self, ctx, angle, speed, damage, life=3.4):
+        speed *= 1.0 + 0.42 * self.rage
+        damage *= 1.0 + 0.30 * self.rage
         ctx.projectiles.spawn(
             1, self.x + math.cos(angle) * self.radius * 0.8,
             self.y + math.sin(angle) * self.radius * 0.8,
@@ -233,8 +265,20 @@ class HollowChoir(Enemy):
         flash = self.hit_flash > 0.82
         color = palette.BOSS_FLASH if flash else self.body_color
 
-        art.draw_glow(self.eye_color, sx, sy, 128,
-                      16 + 10 * math.sin(self.pulse()), power=2.6)
+        # Its own light grows and quickens with rage, so how far into the
+        # fight you are is legible from across the room without a health bar.
+        # Everything else in this game is read by its light; the boss should
+        # be no exception.
+        rage = self.rage
+        beat = math.sin(self.pulse() * (1.0 + 1.6 * rage))
+        art.draw_glow(self.eye_color, sx, sy, 128 + 96 * rage,
+                      16 + 10 * beat + 26 * rage, power=2.6,
+                      height=self.LIGHT_HEIGHT)
+        if rage > 0.34:
+            # A second, hotter core once it is properly angry.
+            art.draw_glow(palette.BOSS_FLASH, sx, sy,
+                          58 + 46 * rage, 12 + 30 * rage * (0.7 + 0.3 * beat),
+                          power=3.0, height=self.LIGHT_HEIGHT)
 
         if self.state == 'telegraph':
             frac = clamp(self.state_t / max(self.telegraph, 1e-6), 0.0, 1.0)

@@ -96,9 +96,11 @@ class Camera:
 
 class FloatingText:
     __slots__ = ('x', 'y', 'vx', 'vy', 'life', 'max_life', 'text', 'color',
-                 'size', 'bold')
+                 'size', 'bold', 'tally')
 
     def __init__(self, x, y, text, color, size, vx, vy, life, bold):
+        # Running total, for damage numbers that merge instead of stacking.
+        self.tally = 0
         self.x, self.y = x, y
         self.vx, self.vy = vx, vy
         self.text = text
@@ -144,6 +146,39 @@ class Effects:
             self.rng.uniform(-26, 26), -rise, 0.85, bold))
         if len(self.texts) > 40:
             del self.texts[0]
+
+    # How close, and how recently, a damage number has to be for the next one
+    # to be added into it rather than drawn on top of it.
+    MERGE_DIST = 30.0
+    MERGE_AGE = 0.30
+
+    def add_damage(self, x, y, amount, color, size=15, bold=False):
+        """A damage number that gathers rather than piles up.
+
+        A weapon that fires nine times a second puts nine numbers on the same
+        enemy in the same second, at the same place, and they draw on top of
+        each other - which is illegible exactly when the most is happening.
+        A new number close to a recent one of the same colour is added into
+        it, so a burst reads as one rising total.
+        """
+        amount = int(amount)
+        if amount <= 0:
+            return
+        for t in reversed(self.texts):
+            if (t.tally and t.color is color
+                    and (t.max_life - t.life) < self.MERGE_AGE
+                    and abs(t.x - x) < self.MERGE_DIST
+                    and abs(t.y - y) < self.MERGE_DIST):
+                t.tally += amount
+                t.text = str(t.tally)
+                # Nudged back up and refreshed, so a sustained burst keeps one
+                # number climbing rather than leaving a stalled one behind.
+                t.life = min(t.max_life, t.life + 0.12)
+                t.size = max(t.size, size)
+                t.bold = t.bold or bold
+                return
+        self.add_text(x, y, str(amount), color, size, bold)
+        self.texts[-1].tally = amount
 
     def add_beam(self, x0, y0, x1, y1, color=palette.BEAM, life=0.14):
         """A short-lived line between two points - a chained arc.

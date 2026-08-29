@@ -930,6 +930,7 @@ class EndScreen:
             'damage': world.player.damage_dealt,
             'upgrades': list(world.stats.owned),
             'best': save_data.get('best_score', 0),
+            'held': int(save_data.get('embers', 0)),
         }
 
     def update(self, dt):
@@ -957,7 +958,7 @@ class EndScreen:
             ('SCORE', f"{s['score']:,}"),
             ('DEEPEST FLOOR', str(s['floor'])),
             ('SLAIN', str(s['kills'])),
-            ('EMBERS', str(s['embers'])),
+            ('EMBERS CARRIED OUT', str(s['embers'])),
             ('LONGEST CHAIN', f"x{s['streak']}"),
             ('DAMAGE DEALT', f"{int(s['damage']):,}"),
             ('TIME', f'{minutes}:{seconds:02d}'),
@@ -986,6 +987,15 @@ class EndScreen:
         else:
             drawLabel(f"BEST  {s['best']:,}", w * 0.5, py + ph + 26, size=13,
                       fill=palette.UI_FAINT, font=palette.FONT_UI, opacity=76)
+
+        # Where the embers went. A death that returns nothing reads as a total
+        # loss; saying out loud that the run paid for something is most of
+        # what makes going back down feel worth it.
+        if s['embers'] > 0:
+            drawLabel(f"{s['embers']} EMBERS BANKED  -  {s['held']} HELD "
+                      f"AT THE VIGIL",
+                      w * 0.5, py + ph + 48, size=12, bold=True,
+                      fill=palette.XP, font=palette.FONT_UI, opacity=88)
 
         if s['upgrades']:
             names = ', '.join(upgrades.BY_KEY[k].name for k in s['upgrades'])

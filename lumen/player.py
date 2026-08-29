@@ -49,6 +49,7 @@ class Player:
         self.recoil = 0.0
         self.walk_phase = 0.0
         self.dash_hits = set()
+        self.moving = False
         self.muzzle_flash = 0.0
 
         self.kills = 0
@@ -119,6 +120,13 @@ class Player:
         if 's' in keys or 'down' in keys:
             my += 1.0
         mx, my = normalise(mx, my)
+        # Whether the player is *asking* to move, which is not the same as
+        # whether they are moving: being hit knocks you around, and enemies
+        # shove you. BULWARK keys off intent for exactly that reason - it
+        # promises a reward for standing your ground, and measuring velocity
+        # meant the one thing that could pay it out (being attacked) was also
+        # the thing that cancelled it.
+        self.moving = mx != 0.0 or my != 0.0
 
         if self.dash_time > 0.0:
             self.dash_time -= dt
@@ -248,7 +256,7 @@ class Player:
             # margin and its damage on the same dial.
             dark = 1.0 - clamp(self.fuel / max(self.fuel_max, 1e-6), 0.0, 1.0)
             situational += s.overcharge * dark
-        if s.momentum and (self.vx * self.vx + self.vy * self.vy) > 400.0:
+        if s.momentum and self.moving:
             situational += s.momentum
 
         pellets = weapon.pellets + s.swarm
@@ -296,8 +304,7 @@ class Player:
             return False
 
         amount *= self.stats.taken_mult
-        if self.stats.bulwark and (self.vx * self.vx
-                                   + self.vy * self.vy) < 400.0:
+        if self.stats.bulwark and not self.moving and self.dash_time <= 0.0:
             # Standing your ground is a real choice in a game about backing
             # away from things, so it is worth paying for.
             amount *= 1.0 - self.stats.bulwark
@@ -332,6 +339,17 @@ class Player:
         return True
 
     def heal(self, amount):
+        """Restore health. Healing only ever goes up.
+
+        This used to be a bare `hp = min(max_hp, hp + amount)`, which quietly
+        made it a damage function for any negative argument - and HOLLOW PACT
+        expressed "you cannot be healed" as a lifesteal of -9 and a kill-heal
+        of -99, so every kill drained hundreds of health with no floor and no
+        death check (death is only tested in `hurt`). Health ran to negative
+        thousands. A refusal to heal is a flag, not a negative number.
+        """
+        if amount <= 0.0 or self.stats.no_heal:
+            return
         self.hp = min(self.stats.max_hp, self.hp + amount)
 
     def add_fuel(self, amount):

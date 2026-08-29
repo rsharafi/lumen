@@ -117,7 +117,16 @@ def _draw_weapon(player, view_w, view_h):
     y = view_h - PAD - 52
 
     draw_text(weapon.name, x, y, 'display', 17, (223, 231, 245), align='right')
-    draw_text(f'[{player.weapon_index + 1}]  1-3 to switch', x, y + 20, 'ui', 11,
+    # Only advertise the keys that do something. Every weapon used to be in
+    # hand from the first run, so "1-3 to switch" was always true; now they
+    # are unsealed at the Vigil, and a prompt for keys that do nothing reads
+    # as a broken control rather than as something not yet earned.
+    carried = getattr(player.stats, 'weapons', None) or ['lance']
+    if len(carried) > 1:
+        hint = f'[{player.weapon_index + 1}]  1-{len(carried)} to switch'
+    else:
+        hint = '[1]  more at THE VIGIL'
+    draw_text(hint, x, y + 20, 'ui', 11,
               (126, 140, 168), align='right')
 
     if weapon.charge_time > 0.0:
