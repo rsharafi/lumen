@@ -58,6 +58,9 @@ class Stats:
         self.gutter = 0.0           # lantern reach lost, in exchange
         self.curses = 0             # pacts taken, for the run summary
 
+        # Which weapons this run may carry. The Vigil widens it.
+        self.weapons = ['lance']
+
         self.owned = []
 
     def describe(self):

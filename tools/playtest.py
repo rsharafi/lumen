@@ -108,6 +108,18 @@ def flatten(*groups):
     return out
 
 
+def park():
+    """Move the pointer off the menu before driving it from the keyboard.
+
+    `_hover` sets the selection from whatever the pointer is over, every
+    frame, so a harness whose mouse defaults to the top of the screen pins the
+    menu to its first item and every keyboard press after that does nothing.
+    Real players hit this too, if more forgivingly: nudge the mouse and the
+    keyboard selection jumps back under the cursor.
+    """
+    return [(0, mouse(12, 12))]
+
+
 def start_run(at=4):
     """Title -> DESCEND."""
     return tap('enter', at)
@@ -134,15 +146,22 @@ SCENARIOS = {
     # sprite has to rebuild it, or the next frame draws a released husk.
     'resize-title': ([(6, cycle()), (14, cycle()), (22, cycle()),
                       (30, cycle())], 40),
-    'resize-help': (flatten(tap('down', 4), tap('enter', 10),
+    'resize-help': (flatten(park(), tap('down', 4), tap('down', 8), tap('enter', 14),
                             [(18, cycle()), (26, cycle()), (34, cycle())]),
                     44),
     'resize-play': (flatten(start_run(4), wander(24, 120),
                             [(40, cycle()), (70, cycle()), (100, cycle())]),
                     130),
-    'help': (flatten(tap('down', 4), tap('enter', 10)), 40),
-    'help2': (flatten(tap('down', 4), tap('enter', 10), tap('right', 22)), 46),
-    'help3': (flatten(tap('down', 4), tap('enter', 10), tap('right', 22),
+    'help': (flatten(park(), tap('down', 4), tap('down', 8), tap('enter', 14)), 40),
+    # The Vigil: open it, walk the ledger, try to buy the top line.
+    'vigil': (flatten(park(), tap('down', 4), tap('enter', 10),
+                      tap('down', 20), tap('down', 26), tap('right', 32),
+                      tap('enter', 40)), 60),
+    'vigil-buy': (flatten(park(), tap('down', 4), tap('enter', 10),
+                          tap('enter', 20), tap('enter', 30),
+                          tap('escape', 46)), 60),
+    'help2': (flatten(park(), tap('down', 4), tap('down', 8), tap('enter', 14), tap('right', 22)), 46),
+    'help3': (flatten(park(), tap('down', 4), tap('down', 8), tap('enter', 14), tap('right', 22),
                       tap('right', 34)), 58),
     'firstframe': (start_run(4), 30),
     'combat': (flatten(

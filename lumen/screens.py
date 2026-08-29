@@ -8,7 +8,7 @@ import math
 
 from .draw import drawImage, drawLabel, drawPolygon
 
-from . import art, gpu, palette, upgrades
+from . import art, gpu, palette, upgrades, vigil
 from .mathx import clamp, ease_out_back, ease_out_cubic, pulse
 
 
@@ -155,8 +155,8 @@ class TitleScreen:
         self.h = view_h
         self.backdrop = Backdrop(view_w, view_h, rng, 64)
         self.save = save_data
-        self.menu = Menu(['DESCEND', 'HOW TO PLAY', 'DISPLAY', 'VISUALS',
-                          'SHAFTS', 'SOUND', 'QUIT'])
+        self.menu = Menu(['DESCEND', 'THE VIGIL', 'HOW TO PLAY', 'DISPLAY',
+                          'VISUALS', 'SHAFTS', 'SOUND', 'QUIT'])
         self.t = 0.0
         # Rectangles from the last frame's layout, used for mouse hit-testing.
         self.hit_rects = []
@@ -600,6 +600,149 @@ class UpgradeScreen:
                 continue
             cx = w * 0.5 - (len(recent) - 1) * 15 + i * 30
             _sigil(cx, y, up, self.t * 0.25, False, radius=9.0)
+
+
+class VigilScreen:
+    """What survives a run, and what it can be spent on.
+
+    A ledger rather than a shop. Two columns of lines, each with its rank
+    shown as pips, drawn in the same lit-alcove language as the offering so
+    it belongs to the same game - the selected line is lit and the rest sit
+    in the dark, which is the whole visual grammar here.
+    """
+
+    ROW_H = 48.0
+    COL_GAP = 76.0
+    MARGIN = 128.0
+
+    def __init__(self, view_w, view_h):
+        self.w = view_w
+        self.h = view_h
+        self.index = 0
+        self.t = 0.0
+        self.flash = 0.0
+        self.denied = 0.0
+        self.hit_rects = []
+
+    def resize(self, view_w, view_h):
+        self.w = view_w
+        self.h = view_h
+
+    def open(self):
+        self.t = 0.0
+        self.flash = 0.0
+        self.denied = 0.0
+
+    def update(self, dt):
+        self.t += dt
+        self.flash = max(0.0, self.flash - dt * 2.6)
+        self.denied = max(0.0, self.denied - dt * 3.2)
+
+    def move(self, delta):
+        self.index = (self.index + delta) % len(vigil.ALL)
+
+    def move_column(self, delta):
+        half = (len(vigil.ALL) + 1) // 2
+        self.index = (self.index + delta * half) % len(vigil.ALL)
+
+    @property
+    def current(self):
+        return vigil.ALL[self.index]
+
+    def _layout(self, w, h):
+        """Row rectangles, left column then right."""
+        half = (len(vigil.ALL) + 1) // 2
+        col_w = (w - 2 * self.MARGIN - self.COL_GAP) * 0.5
+        top = h * 0.30
+        rects = []
+        for i in range(len(vigil.ALL)):
+            col, row = divmod(i, half)
+            x = self.MARGIN + col * (col_w + self.COL_GAP)
+            y = top + row * self.ROW_H
+            rects.append((x, y, col_w, self.ROW_H - 7.0))
+        return rects
+
+    def draw(self, save_data):
+        w, h = self.w, self.h
+        appear = ease_out_cubic(clamp(self.t / 0.4, 0.0, 1.0))
+        drawPolygon(0, 0, w, 0, w, h, 0, h, fill=palette.VOID,
+                    opacity=int(82 * appear))
+
+        drawLabel('THE VIGIL', w * 0.5, h * 0.13, size=42, bold=True,
+                  fill=palette.LIGHT_WARM, font='Copperplate',
+                  opacity=int(100 * appear))
+        drawLabel('what you carried out of the vault',
+                  w * 0.5, h * 0.13 + 34, size=14, fill=palette.UI_DIM,
+                  opacity=int(74 * appear))
+        _rule(w * 0.30, w * 0.70, h * 0.13 + 52, palette.LIGHT_DEEP,
+              int(52 * appear))
+
+        held = int(save_data.get('embers', 0))
+        ey = h * 0.235
+        _glow(w * 0.5 - 14, ey, 46, palette.XP,
+              int((26 + 16 * math.sin(self.t * 2.2)) * appear))
+        drawLabel(f'{held}', w * 0.5 - 14, ey, size=30, bold=True,
+                  fill=palette.XP, align='right', opacity=int(100 * appear))
+        drawLabel('EMBERS HELD', w * 0.5 + 14, ey + 3, size=13,
+                  fill=palette.UI_DIM, align='left',
+                  opacity=int(78 * appear))
+
+        ranks = vigil.ranks(save_data)
+        self.hit_rects = []
+        for i, (node, (x, y, cw, ch)) in enumerate(
+                zip(vigil.ALL, self._layout(w, h))):
+            self.hit_rects.append((x, y, cw, ch, i))
+            self._draw_row(node, ranks.get(node.key, 0), x, y, cw, ch,
+                           i == self.index, held, appear)
+
+        hint = ('ENTER  INVEST      W/S  CHOOSE      A/D  COLUMN'
+                '      ESC  BACK')
+        drawLabel(hint, w * 0.5, h - 46, size=13, fill=palette.UI_DIM,
+                  opacity=int(70 * appear))
+
+    def _draw_row(self, node, rank, x, y, cw, ch, selected, held, appear):
+        full = rank >= node.ranks
+        cost = node.cost(rank)
+        affordable = cost is not None and held >= cost
+
+        if selected:
+            pulse = 0.5 + 0.5 * math.sin(self.t * 3.1)
+            _glow(x + cw * 0.5, y + ch * 0.5, cw * 1.15, node.color,
+                  int((13 + 7 * pulse) * appear))
+            drawPolygon(x, y, x + cw, y, x + cw, y + ch, x, y + ch,
+                        fill=palette.UI_PANEL, opacity=int(56 * appear))
+        drawPolygon(x, y, x + 3.0, y, x + 3.0, y + ch, x, y + ch,
+                    fill=node.color,
+                    opacity=int((92 if selected else 40) * appear))
+
+        name_col = node.color if (selected or full) else palette.UI_TEXT
+        drawLabel(node.name, x + 16, y + 15, size=15, bold=True,
+                  fill=name_col, align='left',
+                  opacity=int((100 if selected else 82) * appear))
+        drawLabel(node.blurb, x + 16, y + 30, size=11.5,
+                  fill=palette.UI_DIM, align='left',
+                  opacity=int((84 if selected else 56) * appear))
+
+        # Rank as pips: filled for what is bought, hollow for what is left.
+        px = x + cw - 16
+        for i in range(node.ranks - 1, -1, -1):
+            got = i < rank
+            r = 4.2 if got else 3.2
+            drawPolygon(px, y + 13 - r, px + r, y + 13, px, y + 13 + r,
+                        px - r, y + 13,
+                        fill=node.color if got else palette.UI_LINE,
+                        opacity=int((100 if got else 44) * appear))
+            px -= 13
+
+        if full:
+            drawLabel('HELD', x + cw - 16, y + 31, size=11.5, bold=True,
+                      fill=palette.UI_GOOD, align='right',
+                      opacity=int(80 * appear))
+        else:
+            col = palette.XP if affordable else palette.UI_FAINT
+            drawLabel(f'{cost}', x + cw - 16, y + 31, size=13, bold=True,
+                      fill=col, align='right',
+                      opacity=int((96 if affordable else 52) * appear))
 
 
 def _rule(x1, x2, y, color, opacity):

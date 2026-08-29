@@ -22,7 +22,7 @@ import time
 from .draw import drawLabel, drawPolygon
 
 from . import (art, audio, draw, gpu, hud, palette, rng, runtime, save,
-               screens, upgrades)
+               screens, upgrades, vigil)
 from .config import (DESIGN_HEIGHT, FPS, FLOORS_PER_RUN, HEIGHT, MAX_FPS,
                      UPGRADE_CHOICES, WIDTH)
 from .mathx import clamp
@@ -34,6 +34,7 @@ PLAYING = 'playing'
 PAUSED = 'paused'
 DRAFT = 'draft'
 ENDED = 'ended'
+VIGIL = 'vigil'
 
 # Sharpness-dial sentinels. AUTO picks a rung by measurement; PER_POINT means
 # one framebuffer pixel per point, i.e. high-DPI off.
@@ -49,6 +50,7 @@ FLARE_KEYS = {'shift', 'l'}
 class Game:
     def __init__(self):
         self.state = TITLE
+        self.banked = 0
         self.width = WIDTH
         self.height = HEIGHT
         self.keys = set()
@@ -66,6 +68,7 @@ class Game:
         self.help_screen = None
         self.draft_screen = None
         self.end_screen = None
+        self.vigil_screen = None
         self.help_return = TITLE
 
         self.fade = 1.0
@@ -158,6 +161,7 @@ class Game:
         self.help_screen = screens.HelpScreen(self.width, self.height, rng.fx)
         self.draft_screen = screens.UpgradeScreen(self.width, self.height)
         self.end_screen = screens.EndScreen(self.width, self.height, rng.fx)
+        self.vigil_screen = screens.VigilScreen(self.width, self.height)
 
         self._warm_cache()
 
@@ -248,7 +252,7 @@ class Game:
             from . import level as level_mod
             level_mod.rebake(self.world.level)
         for screen in (self.title_screen, self.help_screen, self.draft_screen,
-                       self.end_screen):
+                       self.end_screen, self.vigil_screen):
             if screen is not None:
                 screen.resize(self.width, self.height)
         if self.world is not None:
@@ -394,9 +398,18 @@ class Game:
                     else int(time.time() * 1000) % 2 ** 31)
         rng.world.reseed(seed)
         self.stats = upgrades.Stats()
+        # Everything the Vigil has bought, folded in before the first floor.
+        vigil.apply_to(self.stats, self.save)
+        self.stats.weapons = vigil.unlocked_weapons(self.save)
         self.world = World(self.stats, rng.world, rng.fx, self.width, self.height)
         self._sync_visuals()
         self.world.enter_floor(max(1, min(FLOORS_PER_RUN, self.start_floor)))
+        # KINDLING: begin already holding an offering or two.
+        for _ in range(vigil.starting_offerings(self.save)):
+            picks = upgrades.offer(self.stats, rng.world, 1, depth=1)
+            if picks:
+                upgrades.grant(self.stats, picks[0])
+        self.world.player.refresh_from_stats()
         self.ending = False
         self.state = PLAYING
 
@@ -413,8 +426,9 @@ class Game:
     def finish_run(self, won):
         world = self.world
         record = world.score > self.save.get('best_score', 0)
+        self.banked = world.embers
         self.save = save.record_run(self.save, world.score, world.depth,
-                                    world.kills, won)
+                                    world.kills, won, embers=world.embers)
         self.end_screen.open(world, won, self.save, record)
         self.state = ENDED
         audio.play('upgrade' if won else 'game_over', 0.8)
@@ -547,6 +561,9 @@ class Game:
                 self.fade_target = 0.0
         elif self.fade > 0.0:
             self.fade = max(0.0, self.fade - dt * 3.2)
+        elif self.state == VIGIL:
+            self.title_screen.update(dt)
+            self.vigil_screen.update(dt)
         elif self.state in (TITLE, PAUSED, DRAFT):
             # Menus are calm enough to absorb the pause too, and a player who
             # never changes floor would otherwise never be re-measured.
@@ -561,6 +578,10 @@ class Game:
         if self.state == TITLE:
             self.title_screen.update(dt)
             self._hover(self.title_screen)
+        elif self.state == VIGIL:
+            self.title_screen.update(dt)
+            self.vigil_screen.update(dt)
+            self._hover(self.vigil_screen)
         elif self.state == HELP:
             self.help_screen.update(dt)
         elif self.state == DRAFT:
@@ -604,6 +625,8 @@ class Game:
 
         if self.state == TITLE:
             self._title_key(key)
+        elif self.state == VIGIL:
+            self._vigil_key(key)
         elif self.state == HELP:
             self._help_key(key)
         elif self.state == PLAYING:
@@ -628,6 +651,9 @@ class Game:
         if self.state == TITLE:
             if self._click(self.title_screen):
                 self._title_key('enter')
+        elif self.state == VIGIL:
+            if self._click(self.vigil_screen):
+                self.invest(self.vigil_screen.current.key)
         elif self.state == DRAFT:
             if self._click(self.draft_screen):
                 self.take_upgrade(self.draft_screen.index)
@@ -670,6 +696,10 @@ class Game:
             if choice == 'DESCEND':
                 audio.play('ui_select', 0.6)
                 self.transition(self.new_run)
+            elif choice == 'THE VIGIL':
+                audio.play('ui_select', 0.5)
+                self.vigil_screen.open()
+                self.state = VIGIL
             elif choice == 'HOW TO PLAY':
                 audio.play('ui_select', 0.5)
                 self.help_return = TITLE
@@ -684,6 +714,38 @@ class Game:
                 self.toggle_sound()
             elif choice == 'QUIT':
                 self.quit()
+
+    def _vigil_key(self, key):
+        screen = self.vigil_screen
+        if key in ('up', 'w'):
+            screen.move(-1)
+            audio.play('ui_move', 0.4)
+        elif key in ('down', 's'):
+            screen.move(1)
+            audio.play('ui_move', 0.4)
+        elif key in ('left', 'a'):
+            screen.move_column(-1)
+            audio.play('ui_move', 0.4)
+        elif key in ('right', 'd'):
+            screen.move_column(1)
+            audio.play('ui_move', 0.4)
+        elif key in ('enter', 'space'):
+            self.invest(screen.current.key)
+        elif key == 'escape':
+            audio.play('ui_select', 0.4)
+            self.state = TITLE
+
+    def invest(self, key):
+        """Spend banked embers on one rank of a Vigil node."""
+        got = vigil.buy(self.save, key)
+        if got is None:
+            self.vigil_screen.denied = 1.0
+            audio.play('ui_move', 0.3)
+            return
+        self.save = got
+        save.save(self.save)
+        self.vigil_screen.flash = 1.0
+        audio.play('upgrade', 0.6)
 
     def _help_key(self, key):
         if key in ('escape', 'backspace', 'h'):
@@ -709,7 +771,8 @@ class Game:
         elif key in ('1', '2', '3'):
             index = int(key) - 1
             from .projectiles import WEAPONS
-            if index < len(WEAPONS) and index != player.weapon_index:
+            carried = len(getattr(self.stats, 'weapons', None) or ['lance'])
+            if index < carried and index != player.weapon_index:
                 player.weapon_index = index
                 player.charge = 0.0
                 player.charging = False
@@ -718,7 +781,8 @@ class Game:
                 audio.play('ui_move', 0.5)
         elif key == 'tab':
             from .projectiles import WEAPONS
-            player.weapon_index = (player.weapon_index + 1) % len(WEAPONS)
+            carried = len(getattr(self.stats, 'weapons', None) or ['lance'])
+            player.weapon_index = (player.weapon_index + 1) % carried
             player.charge = 0.0
             world.set_banner(player.weapon.name, 1.0)
             audio.play('ui_move', 0.5)
@@ -1006,6 +1070,11 @@ class Game:
                                    self.visuals_label(),
                                    self.volumetric_label(),
                                    self.renderer_label())
+        elif self.state == VIGIL:
+            # The title's drifting motes, but not its menu: a ledger read over
+            # the top of another menu is two menus.
+            self.title_screen.backdrop.draw()
+            self.vigil_screen.draw(self.save)
         elif self.state == HELP:
             self.help_screen.draw()
         elif self.state == ENDED:

@@ -58,8 +58,12 @@ class Player:
     # -------------------------------------------------------------- state --
     @property
     def weapon(self):
-        from .projectiles import WEAPONS
-        return WEAPONS[self.weapon_index]
+        from .projectiles import WEAPONS, WEAPONS_BY_KEY
+        # Indexed into what this run actually carries rather than into every
+        # weapon that exists, so a locked one cannot be cycled to.
+        carried = getattr(self.stats, 'weapons', None) or ['lance']
+        key = carried[self.weapon_index % len(carried)]
+        return WEAPONS_BY_KEY.get(key, WEAPONS[0])
 
     def refresh_from_stats(self):
         s = self.stats

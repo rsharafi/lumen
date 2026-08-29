@@ -25,6 +25,14 @@ DEFAULT = {
     # merely a worse one. `volumetric` is the air in the lit cone.
     'visuals': 'lit',
     'volumetric': True,
+    # ---- what survives a run ------------------------------------------
+    # Embers carried out of the vault, and what they have been spent on.
+    # `vigil` is {node key: rank}; see lumen/vigil.py. Both are listed here
+    # or `load` would drop them, which is a trap this file has sprung before.
+    'embers': 0,
+    'vigil': {},
+    'banked': 0,        # lifetime embers earned, for the records screen
+    'deepest': 0,       # deepest floor reached, distinct from best_floor
 }
 
 
@@ -59,11 +67,22 @@ def save(data):
         pass
 
 
-def record_run(data, score, floor, kills, won):
+def record_run(data, score, floor, kills, won, embers=0):
+    """Close out a run, banking whatever it carried out of the vault.
+
+    Embers are banked whether the run was won or lost. A death that returns
+    nothing is a total loss, and a total loss is what makes the twelfth
+    attempt feel like the first; carrying something out is the whole point of
+    going back down.
+    """
     data['runs'] = data.get('runs', 0) + 1
     data['total_kills'] = data.get('total_kills', 0) + kills
     data['best_score'] = max(data.get('best_score', 0), score)
     data['best_floor'] = max(data.get('best_floor', 0), floor)
+    data['deepest'] = max(data.get('deepest', 0), floor)
+    earned = max(0, int(embers))
+    data['embers'] = int(data.get('embers', 0)) + earned
+    data['banked'] = int(data.get('banked', 0)) + earned
     if won:
         data['wins'] = data.get('wins', 0) + 1
     save(data)
