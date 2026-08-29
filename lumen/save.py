@@ -25,6 +25,10 @@ DEFAULT = {
     # merely a worse one. `volumetric` is the air in the lit cone.
     'visuals': 'lit',
     'volumetric': True,
+    # How much light the masonry keeps regardless of the lantern: 0 off,
+    # 1 dim, 2 full. Readability rather than atmosphere - some players
+    # want to see the shape of the room they are in.
+    'wall_glow': 0,
     # ---- what survives a run ------------------------------------------
     # Embers carried out of the vault, and what they have been spent on.
     # `vigil` is {node key: rank}; see lumen/vigil.py. Both are listed here

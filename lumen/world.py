@@ -102,6 +102,7 @@ class World:
         # Set by `Game` from the player's settings.
         self.deferred = True        # the light-buffer pipeline
         self.volumetric = True      # air in the lit cone
+        self.wall_glow = 0          # masonry lit regardless of the lantern
         self.prewarm_lantern_sizes()
 
     def resize(self, view_w, view_h):
@@ -191,14 +192,18 @@ class World:
         # collector's way for the rest of the floor.
         gc.collect()
         gc.freeze()
-        self.set_banner(f'FLOOR {depth}' if not self.is_boss else 'THE HOLLOW CHOIR')
+        self.set_banner(self.boss_name if self.is_boss else f'FLOOR {depth}')
 
     def _populate(self):
         spots = list(self.level.spawn_points)
         if self.is_boss:
             far = spots[0] if spots else (self.level.width * 0.5,
                                           self.level.height * 0.25)
-            self.boss_ref = boss.HollowChoir(far[0], far[1], self.depth, self.rng)
+            # Two boss floors, two different fights. The Snuffer comes
+            # first and goes after the lantern; the Choir waits at the bottom
+            # and goes after you.
+            kind = boss.for_depth(self.depth)
+            self.boss_ref = kind(far[0], far[1], self.depth, self.rng)
             self.enemies.append(self.boss_ref)
             for key in enemy_mod.wave_for_depth(max(1, self.depth - 3), self.rng)[:5]:
                 self._spawn_at_spot(enemy_mod.SPECIES[key], spots)
@@ -219,6 +224,13 @@ class World:
             enemy_mod.make_elite(
                 enemy, self.rng.choice(enemy_mod.ELITE_AFFIXES), self.depth)
         self.enemies.append(enemy)
+
+    @property
+    def boss_name(self):
+        """What is waiting on this floor, or the floor's own name."""
+        if not self.is_boss:
+            return f'FLOOR {self.depth}'
+        return boss.NAMES.get(boss.for_depth(self.depth), 'THE HOLLOW CHOIR')
 
     def set_banner(self, text, seconds=2.4):
         self.banner = text
@@ -918,6 +930,9 @@ class World:
     # Below this speed a flier inside a wall counts as resting there rather
     # than crossing, and is put back out at once; above it, it gets this long
     # to finish the crossing.
+    # Opacity of the wall layer added into the light, by setting level.
+    WALL_GLOW_LEVELS = (0, 26, 62)
+
     FLIER_REST_SPEED = 90.0
     FLIER_MAX_INSIDE = 0.45
 
@@ -1004,6 +1019,17 @@ class World:
         self._draw_light(ox, oy)
         self._draw_point_lights(ox, oy, flicker)
         gpu.add_ambient(self.AMBIENT)
+
+        # Masonry lit whatever the lantern is doing. Added into the light
+        # buffer through the wall layer's own alpha, so it lands on stone and
+        # nowhere else, and carries the courses with it rather than flooding
+        # the room with a flat wash.
+        if self.wall_glow and lv.wall_image is not None:
+            gpu.set_mode(gpu.ADD)
+            drawImage(lv.wall_image, -ox, -oy,
+                      opacity=self.WALL_GLOW_LEVELS[
+                          min(self.wall_glow, len(self.WALL_GLOW_LEVELS) - 1)])
+            gpu.set_mode(gpu.NORMAL)
 
         # ---- and the two together -----------------------------------------
         gpu.composite(self.BLOOM, self.BLEED, art.dither_tile())

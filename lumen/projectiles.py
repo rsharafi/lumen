@@ -216,7 +216,7 @@ class Weapon:
                  spread=0.0, life=1.2, pierce=0, radius=5.0, length=22.0,
                  width=5.0, color=None, glow=None, knockback=140.0,
                  charge_time=0.0, charge_scale=3.0, sound='shoot',
-                 recoil=0.0, shake=0.9, light=110.0):
+                 recoil=0.0, shake=0.9, light=110.0, volume=0.55):
         self.key = key
         self.name = name
         self.blurb = blurb
@@ -239,6 +239,9 @@ class Weapon:
         self.recoil = recoil
         self.shake = shake
         self.light = light
+        # How loud one shot is. A weapon that fires nineteen times a second
+        # needs to be much quieter per shot than one that fires twice.
+        self.volume = volume
 
 
 WEAPONS = [
@@ -286,7 +289,8 @@ WEAPONS += [
            cooldown=0.052, damage=3.3, speed=880, spread=0.075, life=0.30,
            pierce=0, radius=3.4, length=13.0, width=3.2,
            color=palette.LIGHT_WARM, glow=(255, 214, 150),
-           knockback=42.0, recoil=14.0, shake=0.28, light=64.0),
+           knockback=42.0, sound='shoot_stitch', recoil=14.0, shake=0.28,
+           light=64.0, volume=0.28),
 
     Weapon('glass', 'NIGHTGLASS',
            'Three shards, wide and far, and they pass through what they hit.',

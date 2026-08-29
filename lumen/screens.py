@@ -155,8 +155,8 @@ class TitleScreen:
         self.h = view_h
         self.backdrop = Backdrop(view_w, view_h, rng, 64)
         self.save = save_data
-        self.menu = Menu(['DESCEND', 'THE VIGIL', 'HOW TO PLAY', 'DISPLAY',
-                          'VISUALS', 'SHAFTS', 'SOUND', 'QUIT'])
+        self.menu = Menu(['DESCEND', 'THE VIGIL', 'SETTINGS', 'HOW TO PLAY',
+                          'QUIT'])
         self.t = 0.0
         # Rectangles from the last frame's layout, used for mouse hit-testing.
         self.hit_rects = []
@@ -618,6 +618,83 @@ class UpgradeScreen:
                 continue
             cx = w * 0.5 - (len(recent) - 1) * 15 + i * 30
             _sigil(cx, y, up, self.t * 0.25, False, radius=9.0)
+
+
+class SettingsScreen:
+    """Everything that changes how the game looks and sounds, in one place.
+
+    These lived on the title screen, which meant the first thing anyone saw
+    was five lines of configuration and two lines of game. A menu should
+    offer what you came to do; the dials belong behind a door.
+    """
+
+    ROW_H = 62.0
+
+    def __init__(self, view_w, view_h):
+        self.w = view_w
+        self.h = view_h
+        self.index = 0
+        self.t = 0.0
+        self.rows = []
+        self.hit_rects = []
+
+    def resize(self, view_w, view_h):
+        self.w = view_w
+        self.h = view_h
+
+    def open(self):
+        self.t = 0.0
+
+    def update(self, dt):
+        self.t += dt
+
+    def _layout(self, w, h, count):
+        width = min(680.0, w - 200.0)
+        x = (w - width) * 0.5
+        top = h * 0.30
+        return [(x, top + i * self.ROW_H, width, self.ROW_H - 10.0)
+                for i in range(count)]
+
+    def draw(self, rows):
+        """`rows` is a list of (label, value, blurb)."""
+        self.rows = rows
+        w, h = self.w, self.h
+        appear = ease_out_cubic(clamp(self.t / 0.4, 0.0, 1.0))
+        drawPolygon(0, 0, w, 0, w, h, 0, h, fill=palette.VOID,
+                    opacity=int(84 * appear))
+
+        drawLabel('SETTINGS', w * 0.5, h * 0.15, size=40, bold=True,
+                  fill=palette.UI_ACCENT, font=palette.FONT_DISPLAY,
+                  opacity=int(100 * appear))
+        _rule(w * 0.34, w * 0.66, h * 0.15 + 32, palette.LIGHT_DEEP,
+              int(52 * appear))
+
+        self.hit_rects = []
+        for i, ((label, value, blurb), (x, y, cw, ch)) in enumerate(
+                zip(rows, self._layout(w, h, len(rows)))):
+            self.hit_rects.append((x, y, cw, ch, i))
+            selected = i == self.index
+            if selected:
+                _glow(x + cw * 0.5, y + ch * 0.5, cw * 1.1, palette.UI_ACCENT,
+                      int(12 * appear))
+                drawPolygon(x, y, x + cw, y, x + cw, y + ch, x, y + ch,
+                            fill=palette.UI_PANEL, opacity=int(58 * appear))
+            drawPolygon(x, y, x + 3.0, y, x + 3.0, y + ch, x, y + ch,
+                        fill=palette.UI_ACCENT,
+                        opacity=int((92 if selected else 34) * appear))
+            drawLabel(label, x + 18, y + 17, size=16, bold=True,
+                      fill=palette.UI_TEXT if selected else palette.UI_DIM,
+                      align='left', opacity=int((100 if selected else 76) * appear))
+            drawLabel(blurb, x + 18, y + 35, size=11.5, fill=palette.UI_FAINT,
+                      align='left', opacity=int((78 if selected else 48) * appear))
+            drawLabel(value, x + cw - 18, y + 24, size=15, bold=True,
+                      fill=palette.UI_ACCENT if selected else palette.UI_DIM,
+                      align='right',
+                      opacity=int((100 if selected else 72) * appear))
+
+        drawLabel('CLICK A ROW TO CHANGE IT        ESC  BACK',
+                  w * 0.5, h - 46, size=13, fill=palette.UI_DIM,
+                  opacity=int(72 * appear))
 
 
 class VigilScreen:

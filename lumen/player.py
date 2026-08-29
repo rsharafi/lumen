@@ -50,6 +50,8 @@ class Player:
         self.walk_phase = 0.0
         self.dash_hits = set()
         self.moving = False
+        # Seconds of lantern smothering left; see the Snuffer.
+        self.choke = 0.0
         self.muzzle_flash = 0.0
 
         self.kills = 0
@@ -93,6 +95,10 @@ class Player:
         # Fuel does not scale the light linearly; it holds up, then collapses.
         shaped = frac ** 0.45
         radius = lerp(low, base, shaped)
+        if self.choke > 0.0:
+            # Something is smothering the flame. Not out - down to a crawl,
+            # which is worse, because you can still see just enough to move.
+            radius = lerp(radius, low * 0.55, clamp(self.choke, 0.0, 1.0))
         if self.flare_time > 0.0:
             from .config import LANTERN_FLARE_RADIUS, LANTERN_FLARE_TIME
             t = self.flare_time / LANTERN_FLARE_TIME
@@ -174,6 +180,7 @@ class Player:
                 if self.dash_charges < s.dash_charges:
                     self.dash_cd = DASH_COOLDOWN * s.dash_cooldown_mult
         self.iframes = max(0.0, self.iframes - dt)
+        self.choke = max(0.0, self.choke - dt)
         self.hurt_flash = max(0.0, self.hurt_flash - dt * 3.0)
         self.cooldown = max(0.0, self.cooldown - dt)
         self.flare_cd = max(0.0, self.flare_cd - dt)
@@ -287,7 +294,7 @@ class Player:
         particles.burst(ox, oy, 4 + weapon.pellets, weapon.color, rng,
                         speed=(120, 300), life=(0.1, 0.22), size=(1.6, 3.4),
                         direction=self.aim, spread=weapon.spread * 3.0 + 0.4)
-        audio.play(weapon.sound, 0.55 * charge_mult)
+        audio.play(weapon.sound, weapon.volume * charge_mult)
         return True
 
     def hurt(self, amount, effects, particles, rng, source_angle=None):

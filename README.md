@@ -2,13 +2,13 @@
 
 A top-down roguelite built on the CMU CS Academy graphics library
 (`cmu-graphics`). Twelve procedurally generated chambers across six layout
-archetypes, five enemy species with elite variants and a four-phase boss,
+archetypes, five enemy species with elite variants and two four-phase bosses,
 six weapons, fifty run modifiers, a persistent progression track, and
 real-time 2D shadowcasting — **you carry the only light**, and everything you
 cannot see is still there.
 
 No asset files ship with the game. Every texture, sprite, glow and item icon,
-and all 24 sound effects, are generated at startup from numpy and PIL.
+and all 26 sound effects, are generated at startup from numpy and PIL.
 
 It runs on three renderers behind one interface — cmu-graphics' own
 rasteriser, SDL's renderer, and OpenGL. On the last of those the lighting is
@@ -75,12 +75,22 @@ exits immediately.
 | Left click / `J` | Fire (hold to charge the Coilbeam) |
 | `Space` / `K` | Dash — brief invulnerability |
 | `Shift` / `L` | Lantern flare — damages and shoves everything nearby |
-| `1` `2` `3` / `Tab` | Switch weapon |
-| `Esc` / `P` | Pause |
+| `1` … `6` / `Tab` | Switch weapon (whichever you carry) |
+| `R` | Redraw the offering, if you have a redraw |
+| `Esc` / `P` | Pause, or back out of a screen |
 | `F` / `F11` | Toggle fullscreen |
 
-Menus and the upgrade draft are mouse-driven too — hover to select, click to
-confirm. The system cursor is hidden; the in-game crosshair is the cursor.
+**Menus are the pointer's,** not the keyboard's. They used to be both, and the
+two fought: `_hover` sets the selection from whatever the cursor is over,
+every frame, so with the mouse resting anywhere near a list every key press
+was immediately undone. One input or the other, and the one that already
+worked is the pointer. `Esc` still backs out, because leaving a screen is not
+choosing on it. The system cursor is hidden; the in-game crosshair is it.
+
+Everything that changes how the game looks or sounds lives on a **Settings**
+page rather than on the title screen — including **WALL LIGHT**, which keeps
+the masonry lit whatever the lantern is doing, for players who would rather
+read the room than be surprised by it.
 
 Clear a chamber and a rift opens; stand in it to descend and take one of three
 offerings. Floors 6 and 12 belong to the Hollow Choir.
@@ -129,6 +139,15 @@ fight. Shooting the front is now a real if slow option (about thirty
 lance shots), flanking is a shortcut rather than the only door, and getting
 behind one still reaches the body while the shield is up. It needs no health
 bar, because the arc shrinking from 132° to 35° *is* the bar.
+
+**Two bosses, and they ask different questions.** The Hollow Choir waits at
+the bottom: a slow mass that fills the room with bullets, so the answer to it
+is footwork. The Snuffer is on floor six and is the opposite in every
+direction that matters — fast, small, and it comes for the one resource the
+whole game is built on. Its aura eats fuel, its signature attack smothers the
+flame down to a crawl for a few seconds, and it fights hardest in the dark it
+has just made. Its own light *shrinks* as it rages, so the fight gets darker
+the closer it is to dying.
 
 **Elites.** From floor two on, a spawn can carry an affix — WARDED soaks most
 of what lands on it until the ward breaks, GORGED is four times the health and

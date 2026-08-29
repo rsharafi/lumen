@@ -108,6 +108,22 @@ def flatten(*groups):
     return out
 
 
+def row(screen, index):
+    """Click row `index` of a screen, using its own hit rectangles.
+
+    Menus are pointer-driven now, so a harness that presses keys at them is
+    testing nothing. Resolved at dispatch time rather than when the scenario
+    is written, because the rectangles only exist once the screen has drawn
+    itself once.
+    """
+    return ('row', screen, index)
+
+
+def menu(index):
+    """Click row `index` of the title menu."""
+    return row('title', index)
+
+
 def park():
     """Move the pointer off the menu before driving it from the keyboard.
 
@@ -122,7 +138,7 @@ def park():
 
 def start_run(at=4):
     """Title -> DESCEND."""
-    return tap('enter', at)
+    return [(at, menu(0))]
 
 
 def wander(start, end, step=26):
@@ -146,22 +162,24 @@ SCENARIOS = {
     # sprite has to rebuild it, or the next frame draws a released husk.
     'resize-title': ([(6, cycle()), (14, cycle()), (22, cycle()),
                       (30, cycle())], 40),
-    'resize-help': (flatten(park(), tap('down', 4), tap('down', 8), tap('enter', 14),
+    'resize-help': (flatten(park(), [(6, menu(3))],
                             [(18, cycle()), (26, cycle()), (34, cycle())]),
                     44),
     'resize-play': (flatten(start_run(4), wander(24, 120),
                             [(40, cycle()), (70, cycle()), (100, cycle())]),
                     130),
-    'help': (flatten(park(), tap('down', 4), tap('down', 8), tap('enter', 14)), 40),
+    'help': (flatten(park(), [(6, menu(3))]), 40),
     # The Vigil: open it, walk the ledger, try to buy the top line.
-    'vigil': (flatten(park(), tap('down', 4), tap('enter', 10),
-                      tap('down', 20), tap('down', 26), tap('right', 32),
-                      tap('enter', 40)), 60),
-    'vigil-buy': (flatten(park(), tap('down', 4), tap('enter', 10),
-                          tap('enter', 20), tap('enter', 30),
+    'vigil': (flatten(park(), [(6, menu(1)), (20, row('vigil', 2)),
+                               (30, row('vigil', 7))]), 60),
+    'vigil-buy': (flatten(park(), [(6, menu(1)), (20, row('vigil', 0)),
+                                   (30, row('vigil', 0))],
                           tap('escape', 46)), 60),
-    'help2': (flatten(park(), tap('down', 4), tap('down', 8), tap('enter', 14), tap('right', 22)), 46),
-    'help3': (flatten(park(), tap('down', 4), tap('down', 8), tap('enter', 14), tap('right', 22),
+    'settings': (flatten(park(), [(6, menu(2)), (18, row('settings', 3)),
+                                  (26, row('settings', 3)),
+                                  (34, row('settings', 2))]), 52),
+    'help2': (flatten(park(), [(6, menu(3))], tap('right', 22)), 46),
+    'help3': (flatten(park(), [(6, menu(3))], tap('right', 22),
                       tap('right', 34)), 58),
     'firstframe': (start_run(4), 30),
     'combat': (flatten(
@@ -384,6 +402,21 @@ def onStep(app):
             GAME.transition(lambda: GAME.finish_run(won=True))
         elif kind == 'cycle':
             GAME.cycle_display(GAME._app_ref)
+        elif kind == 'row':
+            which, index = action[1], action[2]
+            screen = {'title': GAME.title_screen,
+                      'draft': GAME.draft_screen,
+                      'vigil': GAME.vigil_screen,
+                      'settings': GAME.settings_screen}.get(which)
+            rects = getattr(screen, 'hit_rects', None) if screen else None
+            if rects and 0 <= index < len(rects):
+                x, y, rw, rh, _i = rects[index]
+                dx, dy = x + rw * 0.5, y + rh * 0.5
+                from lumen import runtime as _rt
+                k = _rt.pointer_scale() / GAME.scale
+                GAME.mouse = (dx, dy)
+                GAME.mouse_press(app, dx / k, dy / k, 0)
+                GAME.mouse_release(app, dx / k, dy / k, 0)
         elif kind == 'braziers':
             world = getattr(GAME, 'world', None)
             lit = 0

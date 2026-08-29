@@ -216,17 +216,83 @@ class Level:
         self.rects = rects
 
     def _build_segments(self):
+        """The outline of the stone, as seen from the floor.
+
+        These are what the light sweeps against and what it lands on, and they
+        used to be every edge of every rectangle the generator produced -
+        including the ones where two rectangles sit flush against each other.
+        An interior edge is not a surface: it has floor on neither side, so
+        lighting it puts a lit crevice down the middle of what is plainly one
+        wall, and sweeping against it lets light find its way into the join.
+
+        Built from the tile grid instead, and only where the neighbour on that
+        side is open. Runs of collinear exposed edges are merged, so a long
+        wall is a handful of segments rather than one per tile - the sweep
+        costs time per segment, and the piece machinery wants long edges to
+        cut up rather than short ones to stitch together.
+        """
         ax, ay, bx, by = [], [], [], []
         corners = []
-        for rc in self.rects:
-            x0, y0, x1, y1 = rc.x, rc.y, rc.right, rc.bottom
-            pts = ((x0, y0), (x1, y0), (x1, y1), (x0, y1))
-            for i in range(4):
-                p = pts[i]
-                q = pts[(i + 1) % 4]
-                ax.append(p[0]); ay.append(p[1])
-                bx.append(q[0]); by.append(q[1])
-            corners.extend(pts)
+
+        def stone(r, c):
+            return (0 <= r < self.rows and 0 <= c < self.cols
+                    and self.grid[r][c] != FLOOR)
+
+        # Winding matches the old clockwise rectangles, so the outward normal
+        # is still (ey, -ex) and everything downstream is unchanged.
+        for r in range(self.rows):
+            run = None                      # top edges, left to right
+            for c in range(self.cols + 1):
+                open_top = (c < self.cols and stone(r, c)
+                            and not stone(r - 1, c))
+                if open_top and run is None:
+                    run = c
+                elif not open_top and run is not None:
+                    ax.append(run * TILE); ay.append(r * TILE)
+                    bx.append(c * TILE); by.append(r * TILE)
+                    corners.append((run * TILE, r * TILE))
+                    corners.append((c * TILE, r * TILE))
+                    run = None
+            run = None                      # bottom edges, right to left
+            for c in range(self.cols + 1):
+                open_bot = (c < self.cols and stone(r, c)
+                            and not stone(r + 1, c))
+                if open_bot and run is None:
+                    run = c
+                elif not open_bot and run is not None:
+                    y = (r + 1) * TILE
+                    ax.append(c * TILE); ay.append(y)
+                    bx.append(run * TILE); by.append(y)
+                    corners.append((c * TILE, y))
+                    corners.append((run * TILE, y))
+                    run = None
+        for c in range(self.cols):
+            run = None                      # right edges, top to bottom
+            for r in range(self.rows + 1):
+                open_right = (r < self.rows and stone(r, c)
+                              and not stone(r, c + 1))
+                if open_right and run is None:
+                    run = r
+                elif not open_right and run is not None:
+                    x = (c + 1) * TILE
+                    ax.append(x); ay.append(run * TILE)
+                    bx.append(x); by.append(r * TILE)
+                    corners.append((x, run * TILE))
+                    corners.append((x, r * TILE))
+                    run = None
+            run = None                      # left edges, bottom to top
+            for r in range(self.rows + 1):
+                open_left = (r < self.rows and stone(r, c)
+                             and not stone(r, c - 1))
+                if open_left and run is None:
+                    run = r
+                elif not open_left and run is not None:
+                    x = c * TILE
+                    ax.append(x); ay.append(r * TILE)
+                    bx.append(x); by.append(run * TILE)
+                    corners.append((x, r * TILE))
+                    corners.append((x, run * TILE))
+                    run = None
         self.seg_ax = np.array(ax, dtype=np.float64)
         self.seg_ay = np.array(ay, dtype=np.float64)
         self.seg_bx = np.array(bx, dtype=np.float64)

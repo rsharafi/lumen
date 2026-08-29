@@ -366,9 +366,13 @@ ALL += [
             requires='twinstep'),
 
     # ---- volume ------------------------------------------------------------
+    # Doubling a one-shot volley is a flat doubling of damage, which is more
+    # than any other single card in the pool does - it was uncommon, which
+    # meant it turned up on floor two and decided the run.
     Upgrade('swarm', 'SWARMFIRE',
             'One extra shot per volley.',
-            _add('swarm', 1), palette.BOLT, rarity=UNCOMMON),
+            _add('swarm', 1), palette.BOLT, rarity=LEGENDARY,
+            repeatable=False),
 
     Upgrade('arc', 'ARCLIGHT',
             'Hits jump to two more enemies nearby, for less each time.',

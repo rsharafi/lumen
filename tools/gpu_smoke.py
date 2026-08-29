@@ -43,6 +43,30 @@ from lumen.app import Game                             # noqa: E402
 STAGES = []
 
 
+def click_row(game, app, screen, index):
+    """Press a menu row through its own hit rectangle.
+
+    Menus are pointer-driven, so a harness that sends `enter` at the title
+    starts nothing and every later stage runs against a world that does not
+    exist. The rectangles are filled in when the screen draws, which is why
+    this is called after a few frames rather than before them.
+    """
+    rects = getattr(screen, 'hit_rects', None)
+    if not rects or index >= len(rects):
+        raise SystemExit(f'[gpu_smoke] no hit rect {index} on {screen}')
+    x, y, w, h, _ = rects[index]
+    dx, dy = x + w * 0.5, y + h * 0.5
+    # `_to_design` multiplies by pointer_scale/scale, so going the other way
+    # has to divide by the same thing. On a high-DPI window pointer_scale is
+    # two, and getting this wrong lands the click a screen away.
+    from lumen import runtime
+    k = runtime.pointer_scale() / game.scale
+    px, py = dx / k, dy / k
+    game.mouse = (dx, dy)
+    game.mouse_press(app, px, py, 0)
+    game.mouse_release(app, px, py, 0)
+
+
 def say(msg):
     if not ARGS.quiet:
         sys.stderr.write(f'  {msg}\n')
@@ -75,7 +99,7 @@ def main():
         STAGES.append(label)
 
     frames(6, 'title')
-    game.key_press(app, 'enter')                       # DESCEND
+    click_row(game, app, game.title_screen, 0)         # DESCEND
     frames(ARGS.frames, 'play')
 
     world = game.world

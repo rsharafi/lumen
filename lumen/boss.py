@@ -333,3 +333,266 @@ class HollowChoir(Enemy):
     def pulse(self):
         """Animation clock, inherited from Enemy and advanced every frame."""
         return self.phase
+
+
+# ---------------------------------------------------------------------------
+class Snuffer(Enemy):
+    """The floor-six boss: something that fights the lantern, not the player.
+
+    The Choir is a slow mass that fills the room with bullets, so the answer
+    to it is footwork. This is the opposite in every direction that matters -
+    fast, small, and it comes for the one resource the whole game is built on.
+    Its aura eats fuel, its signature attack smothers the flame down to a
+    crawl for a few seconds, and it fights hardest in the dark it has just
+    made. Two boss fights that ask the same question are one boss fight.
+    """
+
+    species = CHOIR
+    base_hp = 2600.0
+    base_speed = 148.0
+    radius = 34.0
+    touch_damage = 18.0
+    ember_value = 22
+    score = 700
+    body_color = palette.WISP
+    eye_color = palette.WISP_EYE
+    mass = 22.0
+
+    ATTACKS = ('sweep', 'rush', 'motes', 'choke')
+
+    LIGHT_HEIGHT = 26.0
+    DRAIN = 5.5             # fuel a second, inside the aura
+    AURA = 210.0
+
+    def __init__(self, x, y, depth, rng):
+        super().__init__(x, y, depth, rng)
+        self.max_hp = self.base_hp * (1.0 + 0.62 * max(0, depth // 6 - 1))
+        self.hp = self.max_hp
+        self.spawn_t = 1.6
+        self.state = 'idle'
+        self.state_t = 0.0
+        self.attack = None
+        self.telegraph = 0.0
+        self.shots_left = 0
+        self.shot_timer = 0.0
+        self.spin = 0.0
+        self.sweep_from = 0.0
+        self.charge_dir = (1.0, 0.0)
+        self.intro_played = False
+
+    TIERS = (0.68, 0.38, 0.15)
+
+    @property
+    def tier(self):
+        frac = self.hp / max(self.max_hp, 1e-6)
+        for i, edge in enumerate(self.TIERS):
+            if frac > edge:
+                return i + 1
+        return 4
+
+    @property
+    def rage(self):
+        frac = clamp(self.hp / max(self.max_hp, 1e-6), 0.0, 1.0)
+        return (1.0 - frac) ** 0.85
+
+    def available_attacks(self):
+        p = self.tier
+        if p == 1:
+            return ('sweep', 'rush')
+        if p == 2:
+            return ('sweep', 'rush', 'motes')
+        return self.ATTACKS
+
+    # ------------------------------------------------------------ update ---
+    def behave(self, dt, ctx):
+        self.spin += dt * (1.1 + 0.5 * self.tier)
+        player = ctx.player
+
+        if not self.intro_played:
+            self.intro_played = True
+            audio.play('roar', 0.9)
+            ctx.effects.add_shake(8.0)
+
+        # The aura: standing near it costs light, whatever it is doing.
+        dx, dy = player.x - self.x, player.y - self.y
+        if dx * dx + dy * dy < self.AURA * self.AURA:
+            player.fuel = max(0.0, player.fuel
+                              - self.DRAIN * (1.0 + 0.7 * self.rage) * dt)
+            if ctx.rng.chance(6.0 * dt):
+                ctx.particles.embers(player.x, player.y, 1, self.eye_color,
+                                     ctx.rng)
+
+        if self.state == 'idle':
+            self.steer_to(player.x, player.y, dt,
+                          self.speed * (0.85 + 0.5 * self.rage), accel=3.0)
+            if self.state_t > 1.05 - 0.72 * self.rage:
+                self.begin_attack(ctx)
+        elif self.state == 'telegraph':
+            self.vx *= math.exp(-5.0 * dt)
+            self.vy *= math.exp(-5.0 * dt)
+            if self.attack == 'rush':
+                want = math.atan2(player.y - self.y, player.x - self.x)
+                self.facing += angle_diff(self.facing, want) * clamp(4.0 * dt, 0, 1)
+            if self.state_t >= self.telegraph:
+                self.execute(ctx)
+        elif self.state == 'attack':
+            self.run_attack(dt, ctx)
+        elif self.state == 'recover':
+            self.vx *= math.exp(-3.5 * dt)
+            self.vy *= math.exp(-3.5 * dt)
+            if self.state_t > 0.45 - 0.26 * self.rage:
+                self.set_state('idle')
+
+    def set_state(self, name):
+        self.state = name
+        self.state_t = 0.0
+
+    def begin_attack(self, ctx):
+        self.attack = ctx.rng.choice(self.available_attacks())
+        self.telegraph = {'sweep': 0.62, 'rush': 0.68, 'motes': 0.7,
+                          'choke': 0.85}[self.attack]
+        self.telegraph *= 1.0 - 0.44 * self.rage
+        self.set_state('telegraph')
+        ctx.effects.add_light(self.x, self.y, 170, self.telegraph,
+                              self.eye_color)
+
+    def execute(self, ctx):
+        self.set_state('attack')
+        player = ctx.player
+        if self.attack == 'sweep':
+            self.shots_left = 30 + 10 * self.tier
+            self.shot_timer = 0.0
+            self.sweep_from = math.atan2(player.y - self.y, player.x - self.x)
+        elif self.attack == 'rush':
+            a = math.atan2(player.y - self.y, player.x - self.x)
+            self.charge_dir = (math.cos(a), math.sin(a))
+            speed = 900.0 * (1.0 + 0.3 * self.rage)
+            self.vx = self.charge_dir[0] * speed
+            self.vy = self.charge_dir[1] * speed
+            ctx.effects.add_shake(4.5)
+            audio.play_at('dash', self.x, self.y, 0.8)
+        elif self.attack == 'motes':
+            self.shots_left = 3 + self.tier
+            self.shot_timer = 0.0
+        elif self.attack == 'choke':
+            # The signature: it puts the light out for a moment, and the room
+            # it leaves you in is the one it is best at fighting in.
+            player.choke = max(player.choke, 2.2 + 1.0 * self.rage)
+            player.fuel = max(0.0, player.fuel - 14.0)
+            ctx.effects.add_flash(0.8, palette.VOID, wash=True)
+            ctx.effects.add_shake(7.0)
+            ctx.particles.ripple(self.x, self.y, self.eye_color,
+                                 self.AURA, 0.5, 80)
+            audio.play_at('low', self.x, self.y, 0.9)
+            self.set_state('recover')
+
+    def run_attack(self, dt, ctx):
+        self.shot_timer -= dt
+        player = ctx.player
+
+        if self.attack == 'rush':
+            self.vx *= math.exp(-1.9 * dt)
+            self.vy *= math.exp(-1.9 * dt)
+            if ctx.rng.chance(26.0 * dt):
+                ctx.particles.embers(self.x, self.y, 2, self.eye_color, ctx.rng)
+            if self.state_t > 0.75:
+                self.set_state('recover')
+            return
+
+        if self.shots_left <= 0:
+            self.set_state('recover')
+            return
+        if self.shot_timer > 0.0:
+            return
+
+        if self.attack == 'sweep':
+            # A turning arm of bullets: you go round it, or through the gap.
+            arms = 2 if self.tier < 3 else 3
+            turn = self.state_t * (5.0 + 2.4 * self.rage)
+            for i in range(arms):
+                a = self.sweep_from + turn + i * math.tau / arms
+                self._bolt(ctx, a, 300.0, 9.0)
+            self.shot_timer = 0.05
+            self.shots_left -= 1
+            if self.shots_left % 10 == 0:
+                audio.play_at('enemy_shoot', self.x, self.y, 0.26)
+        elif self.attack == 'motes':
+            a = math.atan2(player.y - self.y, player.x - self.x)
+            for k in (-1, 0, 1):
+                self._bolt(ctx, a + k * 0.22, 210.0, 11.0, life=4.5,
+                           homing=0.9)
+            self.shot_timer = 0.22 - 0.08 * self.rage
+            self.shots_left -= 1
+            audio.play_at('enemy_shoot', self.x, self.y, 0.45)
+
+    def _bolt(self, ctx, angle, speed, damage, life=3.2, homing=0.0):
+        speed *= 1.0 + 0.4 * self.rage
+        damage *= 1.0 + 0.3 * self.rage
+        ctx.projectiles.spawn(
+            1, self.x + math.cos(angle) * self.radius * 0.8,
+            self.y + math.sin(angle) * self.radius * 0.8,
+            math.cos(angle) * speed, math.sin(angle) * speed,
+            ctx.enemy_bullet_damage(damage),
+            radius=6.5, life=life, color=palette.WISP_EYE,
+            glow_color=palette.WISP, length=13.0, width=10.0,
+            knockback=70.0, homing=homing)
+
+    def die(self, ctx, angle=None):
+        ctx.effects.add_flash(1.0, self.eye_color, wash=True)
+        ctx.effects.add_shake(14.0)
+        super().die(ctx, angle)
+
+    # -------------------------------------------------------------- draw ---
+    def draw(self, ox, oy, lit):
+        self.draw_body(self.x - ox, self.y - oy)
+
+    def draw_body(self, sx, sy):
+        opacity = self.body_opacity()
+        r = self.radius
+        rage = self.rage
+        flash = self.hit_flash > 0.82
+        color = palette.BOSS_FLASH if flash else self.body_color
+
+        # It carries a cold light, and unlike the Choir's it *shrinks* as the
+        # thing rages: the fight gets darker the closer it is to dying.
+        beat = math.sin(self.spin * 1.7)
+        art.draw_glow(self.eye_color, sx, sy, (150 - 54 * rage) * (0.9 + 0.1 * beat),
+                      22 + 8 * beat, power=2.5, height=self.LIGHT_HEIGHT)
+
+        if self.state == 'telegraph':
+            frac = clamp(self.state_t / max(self.telegraph, 1e-6), 0.0, 1.0)
+            art.draw_ring(self.eye_color, sx, sy,
+                          40 + 130 * ease_out_cubic(frac), 30 + 46 * frac,
+                          thickness=0.05, softness=1.5)
+
+        # A ragged crown of shards, turning against itself.
+        for ring, (count, rad, spin) in enumerate(
+                ((7, 1.0, 0.7), (5, 0.62, -1.3))):
+            pts = []
+            for i in range(count):
+                a = self.spin * spin + i * math.tau / count
+                d = r * rad * (1.0 + 0.1 * math.sin(self.spin * 2.0 + i))
+                pts.append(sx + math.cos(a) * d)
+                pts.append(sy + math.sin(a) * d)
+            drawPolygon(*pts, fill=color if ring == 0 else palette.VOID,
+                        opacity=opacity if ring == 0 else int(opacity * 0.85))
+
+        # The eye, which is the only warm thing about it.
+        art.draw_glow(palette.LIGHT_CORE, sx, sy, 16 + 6 * rage, 60,
+                      power=3.0)
+
+    def pulse(self):
+        return self.spin
+
+
+# Which thing is waiting on which floor. The first boss you meet should not be
+# the one you have to beat to finish the run.
+BOSSES = {6: Snuffer, 12: HollowChoir}
+
+
+def for_depth(depth):
+    """The boss class for a boss floor, defaulting to the Choir."""
+    return BOSSES.get(depth, HollowChoir)
+
+
+NAMES = {Snuffer: 'THE SNUFFER', HollowChoir: 'THE HOLLOW CHOIR'}

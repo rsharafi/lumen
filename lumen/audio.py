@@ -19,7 +19,7 @@ import wave
 import numpy as np
 
 SAMPLE_RATE = 44100
-CACHE_VERSION = 6
+CACHE_VERSION = 7
 
 _bank = None
 
@@ -257,6 +257,20 @@ def _make_sounds():
     out['shoot_heavy'] = _normalise(
         _room(_soft_clip(slug), 0.55, 6.5, 0.26, rng=rng), 0.62)
 
+    # EMBERSTITCH fires nineteen times a second, which is nineteen chances a
+    # second to grate. The lance's crackle at that rate is a dentist's drill,
+    # so this is the opposite of a gunshot: very short, soft-edged, almost no
+    # low end, and pitched high enough to sit above the mix rather than
+    # punching through it. Its real defence is variation - eight takes with a
+    # wide pitch spread, so the ear never hears the same tick twice running.
+    n = int(0.11 * SAMPLE_RATE)
+    tick = _mix(_struck(0.11, 1750, (1.0, 2.05), (3.0, 5.2), bright=0.7) * 0.8,
+                _filter(_noise(n, rng), 2600, 'high', 0.9)
+                * _env(n, 0.0004, 0.012, 0.0, 0.03) * 0.30)
+    tick = _filter(tick, 7200, 'low', 0.8) * _env(n, 0.0006, 0.03, 0.0, 0.06)
+    out['shoot_stitch'] = _normalise(
+        _room(tick, 0.22, 8.0, 0.12, rng=rng), 0.30)
+
     # Charging hum for the beam.
     n = int(0.75 * SAMPLE_RATE)
     hum = _filter(_sweep(0.75, 70, 420, 'saw', 1.8), 900, 'low', 2.0)
@@ -452,6 +466,9 @@ class SoundBank:
         'shoot': (6, 0.085, 0.30),
         'shoot_scatter': (5, 0.075, 0.30),
         'shoot_heavy': (5, 0.060, 0.26),
+        # Eight takes and a wide spread: this one repeats more than
+        # anything else in the game and has to not wear out.
+        'shoot_stitch': (8, 0.170, 0.42),
         'shoot_beam': (4, 0.050, 0.20),
         'enemy_shoot': (5, 0.090, 0.35),
         'hit': (6, 0.110, 0.35),

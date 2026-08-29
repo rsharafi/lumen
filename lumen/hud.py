@@ -149,7 +149,8 @@ def _draw_weapon(player, view_w, view_h):
 def _draw_run_info(world, view_w):
     x = PAD
     y = PAD
-    label = 'THE HOLLOW CHOIR' if world.is_boss else f'FLOOR {world.depth:02d}'
+    label = (world.boss_name if world.is_boss
+             else f'FLOOR {world.depth:02d}')
     draw_text(label, x, y + 10, 'display', 19, (255, 178, 84), align='left')
     drawLabel(f'{world.score:,}', x, y + 26, size=15, fill=palette.UI_TEXT,
               align='left-top', font=palette.FONT_UI)
@@ -178,11 +179,13 @@ def _draw_boss_bar(world, view_w):
     y = 30
     _bar(x, y, w, 13, frac, palette.BOSS_EYE, back_opacity=78)
     _frame(x - 1, y - 1, w + 2, 15, palette.UI_LINE, 76)
-    for i in (0.33, 0.66):
+    # Where the fight actually changes, from the boss's own thresholds -
+    # they are not thirds any more, and they differ between the two.
+    for i in getattr(b, 'TIERS', (0.33, 0.66)):
         tx = x + w * i
         drawPolygon(tx, y - 3, tx + 1.6, y - 3, tx + 1.6, y + 16, tx, y + 16,
                     fill=palette.UI_TEXT, opacity=55)
-    drawLabel('THE HOLLOW CHOIR', view_w * 0.5, y - 12, size=14,
+    drawLabel(world.boss_name, view_w * 0.5, y - 12, size=14,
               fill=palette.UI_TEXT, font=palette.FONT_DISPLAY, bold=True)
     drawLabel(f'PHASE {b.tier}', x + w + 12, y + 7, size=11,
               fill=palette.UI_DIM, align='left', font=palette.FONT_UI)

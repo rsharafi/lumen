@@ -35,6 +35,7 @@ PAUSED = 'paused'
 DRAFT = 'draft'
 ENDED = 'ended'
 VIGIL = 'vigil'
+SETTINGS = 'settings'
 
 # Sharpness-dial sentinels. AUTO picks a rung by measurement; PER_POINT means
 # one framebuffer pixel per point, i.e. high-DPI off.
@@ -71,6 +72,7 @@ class Game:
         self.draft_screen = None
         self.end_screen = None
         self.vigil_screen = None
+        self.settings_screen = None
         self.help_return = TITLE
 
         self.fade = 1.0
@@ -85,6 +87,7 @@ class Game:
         self.fullscreen = False
         self.deferred = True
         self.volumetric = True
+        self.wall_glow = 0
         self.windowed_size = (WIDTH, HEIGHT)
         self.display_index = 0
         self._app_ref = None
@@ -149,6 +152,7 @@ class Game:
             self.auto_index = remembered
         self.deferred = str(self.save.get('visuals', 'lit')).lower() != 'classic'
         self.volumetric = bool(self.save.get('volumetric', True))
+        self.wall_glow = max(0, min(2, int(self.save.get('wall_glow', 0) or 0)))
 
         self._block_mouse_motion()
 
@@ -164,6 +168,7 @@ class Game:
         self.draft_screen = screens.UpgradeScreen(self.width, self.height)
         self.end_screen = screens.EndScreen(self.width, self.height, rng.fx)
         self.vigil_screen = screens.VigilScreen(self.width, self.height)
+        self.settings_screen = screens.SettingsScreen(self.width, self.height)
 
         self._warm_cache()
 
@@ -254,7 +259,8 @@ class Game:
             from . import level as level_mod
             level_mod.rebake(self.world.level)
         for screen in (self.title_screen, self.help_screen, self.draft_screen,
-                       self.end_screen, self.vigil_screen):
+                       self.end_screen, self.vigil_screen,
+                       self.settings_screen):
             if screen is not None:
                 screen.resize(self.width, self.height)
         if self.world is not None:
@@ -448,6 +454,47 @@ class Game:
         self._prepared = None
         audio.play('ui_select', 0.4)
 
+    def settings_rows(self):
+        """Label, value and one line of what it is, for the settings page."""
+        glow = ('OFF', 'DIM', 'FULL')[min(self.wall_glow, 2)]
+        return [
+            ('DISPLAY', self.display_label(),
+             'how many pixels the game draws'),
+            ('VISUALS', self.visuals_label(),
+             'LIT is the deferred lighting; CLASSIC is the original look'),
+            ('SHAFTS', self.volumetric_label(),
+             'air in the lantern beam - subtle, and it costs nothing'),
+            ('WALL LIGHT', glow,
+             'masonry lit regardless of the lantern, so you can read the room'),
+            ('SOUND', 'ON' if self.sound_on else 'OFF',
+             'everything is synthesised at startup'),
+        ]
+
+    def settings_apply(self, index):
+        """Change the setting on row `index`."""
+        rows = self.settings_rows()
+        if not 0 <= index < len(rows):
+            return
+        key = rows[index][0]
+        if key == 'DISPLAY':
+            self.cycle_display(self._app_ref)
+        elif key == 'VISUALS':
+            self.toggle_visuals()
+        elif key == 'SHAFTS':
+            self.toggle_volumetric()
+        elif key == 'WALL LIGHT':
+            self.cycle_wall_glow()
+        elif key == 'SOUND':
+            self.toggle_sound()
+
+    def cycle_wall_glow(self):
+        self.wall_glow = (self.wall_glow + 1) % 3
+        if self.world is not None:
+            self.world.wall_glow = self.wall_glow
+        self.save['wall_glow'] = self.wall_glow
+        save.save(self.save)
+        audio.play('ui_select', 0.45)
+
     def reroll_draft(self):
         """Redraw the offering, if the run has a redraw left.
 
@@ -586,6 +633,10 @@ class Game:
             self.title_screen.update(dt)
             self.vigil_screen.update(dt)
             self._hover(self.vigil_screen)
+        elif self.state == SETTINGS:
+            self.title_screen.update(dt)
+            self.settings_screen.update(dt)
+            self._hover(self.settings_screen)
         elif self.state == HELP:
             self.help_screen.update(dt)
         elif self.state == DRAFT:
@@ -640,6 +691,10 @@ class Game:
             self._title_key(key)
         elif self.state == VIGIL:
             self._vigil_key(key)
+        elif self.state == SETTINGS:
+            if key == 'escape':
+                audio.play('ui_select', 0.4)
+                self.state = TITLE
         elif self.state == HELP:
             self._help_key(key)
         elif self.state == PLAYING:
@@ -663,10 +718,13 @@ class Game:
             return
         if self.state == TITLE:
             if self._click(self.title_screen):
-                self._title_key('enter')
+                self.title_choose()
         elif self.state == VIGIL:
             if self._click(self.vigil_screen):
                 self.invest(self.vigil_screen.current.key)
+        elif self.state == SETTINGS:
+            if self._click(self.settings_screen):
+                self.settings_apply(self.settings_screen.index)
         elif self.state == DRAFT:
             if self._click(self.draft_screen):
                 self.take_upgrade(self.draft_screen.index)
@@ -696,55 +754,47 @@ class Game:
             self.mouse_down = False
 
     # -- per-state key handling --------------------------------------------
+    # Menus are driven by the pointer, not the keyboard.
+    #
+    # They used to be both, and the two fought: `_hover` sets the selection
+    # from whatever the pointer is over, every frame, so with the mouse
+    # resting anywhere near the list every key press was immediately undone.
+    # One input or the other, and the one that already worked is the pointer.
+    # `escape` stays, because backing out of a screen is not choosing on it.
+
+    # Menus are driven by the pointer, not the keyboard.
+    #
+    # They used to be both, and the two fought: `_hover` sets the selection
+    # from whatever the pointer is over, every frame, so with the mouse
+    # resting anywhere near the list every key press was immediately undone.
+    # One input or the other, and the one that already worked is the pointer.
+    # `escape` stays, because backing out of a screen is not choosing on it.
+
     def _title_key(self, key):
-        menu = self.title_screen.menu
-        if key in ('up', 'w'):
-            menu.move(-1)
-            audio.play('ui_move', 0.4)
-        elif key in ('down', 's'):
-            menu.move(1)
-            audio.play('ui_move', 0.4)
-        elif key in ('enter', 'space'):
-            choice = menu.current
-            if choice == 'DESCEND':
-                audio.play('ui_select', 0.6)
-                self.transition(self.new_run)
-            elif choice == 'THE VIGIL':
-                audio.play('ui_select', 0.5)
-                self.vigil_screen.open()
-                self.state = VIGIL
-            elif choice == 'HOW TO PLAY':
-                audio.play('ui_select', 0.5)
-                self.help_return = TITLE
-                self.state = HELP
-            elif choice == 'DISPLAY':
-                self.cycle_display(self._app_ref)
-            elif choice == 'VISUALS':
-                self.toggle_visuals()
-            elif choice == 'SHAFTS':
-                self.toggle_volumetric()
-            elif choice == 'SOUND':
-                self.toggle_sound()
-            elif choice == 'QUIT':
-                self.quit()
+        """Nothing: the title is chosen with the pointer."""
+
+    def title_choose(self):
+        choice = self.title_screen.menu.current
+        if choice == 'DESCEND':
+            audio.play('ui_select', 0.6)
+            self.transition(self.new_run)
+        elif choice == 'THE VIGIL':
+            audio.play('ui_select', 0.5)
+            self.vigil_screen.open()
+            self.state = VIGIL
+        elif choice == 'SETTINGS':
+            audio.play('ui_select', 0.5)
+            self.settings_screen.open()
+            self.state = SETTINGS
+        elif choice == 'HOW TO PLAY':
+            audio.play('ui_select', 0.5)
+            self.help_return = TITLE
+            self.state = HELP
+        elif choice == 'QUIT':
+            self.quit()
 
     def _vigil_key(self, key):
-        screen = self.vigil_screen
-        if key in ('up', 'w'):
-            screen.move(-1)
-            audio.play('ui_move', 0.4)
-        elif key in ('down', 's'):
-            screen.move(1)
-            audio.play('ui_move', 0.4)
-        elif key in ('left', 'a'):
-            screen.move_column(-1)
-            audio.play('ui_move', 0.4)
-        elif key in ('right', 'd'):
-            screen.move_column(1)
-            audio.play('ui_move', 0.4)
-        elif key in ('enter', 'space'):
-            self.invest(screen.current.key)
-        elif key == 'escape':
+        if key == 'escape':
             audio.play('ui_select', 0.4)
             self.state = TITLE
 
@@ -815,18 +865,9 @@ class Game:
             self.transition(lambda: self.finish_run(won=False))
 
     def _draft_key(self, key):
-        screen = self.draft_screen
-        if key in ('left', 'a'):
-            screen.move(-1)
-            audio.play('ui_move', 0.4)
-        elif key in ('right', 'd'):
-            screen.move(1)
-            audio.play('ui_move', 0.4)
-        elif key in ('enter', 'space'):
-            self.take_upgrade(screen.index)
-        elif key in ('1', '2', '3'):
-            self.take_upgrade(int(key) - 1)
-        elif key == 'r':
+        # Redrawing is an action rather than a choice of card, so it keeps its
+        # key; which offering you take is the pointer's business.
+        if key == 'r':
             self.reroll_draft()
 
     def _end_key(self, key):
@@ -1015,6 +1056,7 @@ class Game:
         if self.world is not None:
             self.world.deferred = self.deferred
             self.world.volumetric = self.volumetric
+            self.world.wall_glow = self.wall_glow
 
     def renderer_label(self):
         """What is actually drawing, and what is hosting it.
@@ -1088,6 +1130,9 @@ class Game:
             # the top of another menu is two menus.
             self.title_screen.backdrop.draw()
             self.vigil_screen.draw(self.save)
+        elif self.state == SETTINGS:
+            self.title_screen.backdrop.draw()
+            self.settings_screen.draw(self.settings_rows())
         elif self.state == HELP:
             self.help_screen.draw()
         elif self.state == ENDED:
@@ -1107,7 +1152,8 @@ class Game:
             if self.state == PLAYING:
                 self._draw_cursor()
 
-        if self.state in (TITLE, HELP, ENDED, DRAFT, PAUSED):
+        if self.state in (TITLE, HELP, ENDED, DRAFT, PAUSED, VIGIL,
+                          SETTINGS):
             self._draw_cursor(menu=True)
 
         if self.fade > 0.001:
