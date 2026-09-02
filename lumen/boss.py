@@ -16,7 +16,7 @@ from .mathx import angle_diff, clamp, ease_out_cubic
 
 class HollowChoir(Enemy):
     species = CHOIR
-    base_hp = 5400.0
+    base_hp = 3900.0
     base_speed = 78.0
     radius = 46.0
     touch_damage = 22.0
@@ -348,7 +348,7 @@ class Snuffer(Enemy):
     """
 
     species = CHOIR
-    base_hp = 2600.0
+    base_hp = 6200.0
     base_speed = 148.0
     radius = 34.0
     touch_damage = 18.0
@@ -585,9 +585,12 @@ class Snuffer(Enemy):
         return self.spin
 
 
-# Which thing is waiting on which floor. The first boss you meet should not be
-# the one you have to beat to finish the run.
-BOSSES = {6: Snuffer, 12: HollowChoir}
+# Which thing is waiting on which floor. The Choir is the one you meet first -
+# a slow mass filling the room with bullets, which is a fight you can learn by
+# moving. The Snuffer waits at the bottom, because a boss that takes your
+# light away is only frightening once you have spent eleven floors relying on
+# it.
+BOSSES = {6: HollowChoir, 12: Snuffer}
 
 
 def for_depth(depth):

@@ -80,6 +80,9 @@ class Level:
         self.corners = None         # numpy (N, 2) of wall corners
         self.floor_image = None
         self.floor_normal = None
+        # Every art key this chamber owns, so the cache can be cleared
+        # around it rather than through it.
+        self.art_keys = []
         self.floor_key = None
         self.wall_image = None
         self.wall_normal = None
@@ -607,10 +610,12 @@ def _bake_layers(level, rng, seed):
     key_floor = ('level', 'floor', seed, level.cols, level.rows, level.archetype)
     level.floor_key = key_floor
     level.floor_image = art.wrap(floor, key_floor)
+    level.art_keys.append(key_floor)
     # The relief the lantern picks out of the stone. Derived from the layer
     # that was just baked, so it lines up with it exactly.
     level.floor_normal = art.wrap(art.normal_map(floor),
                                   key_floor + ('normal',))
+    level.art_keys.append(key_floor + ('normal',))
 
     # ---- walls -----------------------------------------------------------
     wall_tex = art.wall_tile(seed * 13 + 5).convert('RGB')
@@ -727,6 +732,7 @@ def _bake_layers(level, rng, seed):
     key_wall = ('level', 'wall', seed, level.cols, level.rows, level.archetype)
     level.wall_key = key_wall
     level.wall_image = art.wrap(walls, key_wall)
+    level.art_keys.append(key_wall)
     # Shallower than the floor: a wall top is dressed stone, and the courses
     # in it are joints rather than the broken surface a floor has.
     # The top's relief comes out of its own shading, but the face is a
@@ -742,6 +748,7 @@ def _bake_layers(level, rng, seed):
     level.wall_normal = art.wrap(
         Image.fromarray(np.clip(wall_n, 0, 255).astype(np.uint8), 'RGBA'),
         key_wall + ('normal',))
+    level.art_keys.append(key_wall + ('normal',))
 
     _bake_minimap(level, seed)
 
@@ -769,6 +776,7 @@ def _bake_minimap(level, seed, size=148):
 
     key = ('level', 'minimap', seed, level.cols, level.rows, level.archetype)
     level.minimap_image = art.wrap(canvas, key)
+    level.art_keys.append(key)
     # Kept in design units: the HUD positions it, the draw layer scales it.
     level.minimap_rect = ((size - level.width * fit) * 0.5,
                           (size - level.height * fit) * 0.5,

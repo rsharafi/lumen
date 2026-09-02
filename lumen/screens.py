@@ -431,13 +431,57 @@ class UpgradeScreen:
         self.h = view_h
         self.choices = []
         self.rerolls = 0
+        self.before_boss = False
         self.index = 0
         self.t = 0.0
         self.hit_rects = []
 
-    def open(self, choices, depth, rerolls=0):
+    def card_scale(self):
+        """The one scale the whole layout uses, from the window's aspect."""
+        count = 3
+        total = count * self.CARD_W + (count - 1) * self.CARD_GAP
+        room = self.w * 0.92
+        return room / total if total > room else 1.0
+
+    def warm(self, choices):
+        """Bake every string these cards will draw, before they draw it.
+
+        Text becomes a sprite the first time it is asked for, and an offering
+        asks for about forty new ones at once - which lands as a 21 ms frame
+        on the frame the screen appears. Doing it in advance costs the same
+        work somewhere it cannot be seen.
+        """
+        k = self.card_scale()
+        cw = self.CARD_W * k
+        ch = self.CARD_H * k
+        pairs = [(palette.UI_TEXT, palette.UI_DIM), (palette.UI_DIM,
+                                                     palette.UI_TEXT)]
+        for up in choices:
+            colour = self.TIER_COLOR.get(up.rarity, up.color)
+            entry = upgrades.TIERS.get(up.rarity)
+            label = entry[0] if entry else 'COMMON'
+            for name_col in (colour, palette.UI_TEXT):
+                art.label_sprite(up.name, 'display', int(18 * k),
+                                 art.rgb_tuple(name_col), bold=True)
+            for line in wrap(up.blurb, 28)[:4]:
+                for col, _ in pairs:
+                    art.label_sprite(line, 'ui', int(12 * k),
+                                     art.rgb_tuple(col), bold=False)
+            for col in (colour, palette.UI_FAINT):
+                art.label_sprite(label, 'ui', int(9 * k), art.rgb_tuple(col),
+                                 bold=False)
+            # A glow is cached by colour *and* size, and these are large - a
+            # 232-unit pool of a colour the game has not used before is
+            # several milliseconds to rasterise, three of them on the frame
+            # the offering appears.
+            rgb = art.rgb_tuple(colour)
+            art.glow(rgb, int(cw * 2.0), power=2.4)
+            art.glow(rgb, int(232 * k), power=2.6)
+
+    def open(self, choices, depth, rerolls=0, before_boss=False):
         self.choices = choices
         self.rerolls = rerolls
+        self.before_boss = before_boss
         self.index = 0
         self.t = 0.0
         self.depth = depth
@@ -526,6 +570,21 @@ class UpgradeScreen:
         drawLabel(f'FLOOR {self.depth} CLEARED   -   CHOOSE ONE',
                   cx, cy + 38, size=11, fill=palette.UI_FAINT,
                   font=palette.FONT_UI, opacity=int(74 * appear))
+
+        if self.before_boss:
+            # The one offering that is also a warning. Choosing well matters
+            # more here than anywhere else in the run, and the screen should
+            # say so before the door rather than after it.
+            beat = 0.5 + 0.5 * math.sin(self.t * 2.3)
+            _glow(cx, cy + 74, 420, palette.UI_DANGER,
+                  int((10 + 7 * beat) * appear), 2.6)
+            drawLabel('SOMETHING IS WAITING BELOW', cx, cy + 70, size=15,
+                      bold=True, fill=palette.UI_DANGER,
+                      font=palette.FONT_DISPLAY,
+                      opacity=int((74 + 26 * beat) * appear))
+            drawLabel('the calm before the storm', cx, cy + 88, size=11,
+                      fill=palette.UI_DIM, font=palette.FONT_UI,
+                      opacity=int(64 * appear))
 
     def _draw_card(self, up, x, y, cw, ch, index, selected, delay, k=1.0):
         """One offering. `k` shrinks the whole card, contents included.

@@ -17,13 +17,15 @@ import gc
 import math
 import os
 import sys
+import threading
 import time
 
 from .draw import drawLabel, drawPolygon
 
 from . import (art, audio, draw, gpu, hud, palette, rng, runtime, save,
                screens, upgrades, vigil)
-from .config import (DESIGN_HEIGHT, FPS, FLOORS_PER_RUN, HEIGHT, MAX_FPS,
+from .config import (BOSS_FLOORS, DESIGN_HEIGHT, FPS, FLOORS_PER_RUN, HEIGHT,
+                     MAX_FPS,
                      UPGRADE_CHOICES, WIDTH)
 from .mathx import clamp
 from .world import World
@@ -54,6 +56,10 @@ class Game:
         self.banked = 0
         # A chamber built while the offering is on screen; see prepare_floor.
         self._prepared = None
+        self._prep_thread = None
+        self._prep_result = None
+        self._offer = None
+        self._warm_offer = None
         self.width = WIDTH
         self.height = HEIGHT
         self.keys = set()
@@ -418,6 +424,7 @@ class Game:
             if picks:
                 upgrades.grant(self.stats, picks[0])
         self.world.player.refresh_from_stats()
+        self.pick_offer()
         self.ending = False
         self.state = PLAYING
 
@@ -428,7 +435,15 @@ class Game:
             self.finish_run(won=True)
             return
         prepared, self._prepared = self._prepared, None
+        if self._prep_thread is not None:
+            # Started but not finished: wait for it rather than throw the work
+            # away and pay for it twice.
+            self._prep_thread.join(timeout=2.0)
+            self._prep_thread = None
+            if prepared is None:
+                prepared, self._prep_result = self._prep_result, None
         world.enter_floor(depth, prepared=prepared)
+        self.pick_offer()
         self.state = PLAYING
         audio.play('descend', 0.6)
 
@@ -443,15 +458,21 @@ class Game:
         audio.play('upgrade' if won else 'game_over', 0.8)
 
     def open_draft(self):
-        choices = upgrades.offer(self.stats, rng.world, UPGRADE_CHOICES,
-                                 depth=self.world.depth)
+        choices, self._offer = self._offer, None
+        if not choices:
+            choices = upgrades.offer(self.stats, rng.world, UPGRADE_CHOICES,
+                                     depth=self.world.depth)
         if not choices:
             self.next_floor()
             return
+        next_depth = self.world.depth + 1
         self.draft_screen.open(choices, self.world.depth,
-                               rerolls=self.stats.rerolls)
+                               rerolls=self.stats.rerolls,
+                               before_boss=next_depth in BOSS_FLOORS)
         self.state = DRAFT
         self._prepared = None
+        self._prep_thread = None
+        self._prep_result = None
         audio.play('ui_select', 0.4)
 
     def settings_rows(self):
@@ -495,6 +516,88 @@ class Game:
         save.save(self.save)
         audio.play('ui_select', 0.45)
 
+    def pick_offer(self):
+        """Choose the next offering now, and bake its text off the frame.
+
+        `stats.owned` cannot change while a floor is being fought, so the
+        three cards are the same whether they are drawn now or when the floor
+        is cleared - and picking them early means their forty-odd label
+        sprites can be baked on the worker rather than on the frame the
+        offering appears.
+        """
+        if self.world is None:
+            return
+        self._offer = upgrades.offer(self.stats, rng.world, UPGRADE_CHOICES,
+                                     depth=self.world.depth)
+        self._warm_offer = list(self._offer)
+
+    def _pump_warm(self):
+        """Bake the pending offering's text, once, while the floor is fought.
+
+        Fire and forget: it only writes label sprites into a cache keyed by
+        content, so the worst a race can do is bake the same string twice.
+        """
+        warm, self._warm_offer = self._warm_offer, None
+        if not warm:
+            return
+        screen = self.draft_screen
+        if not gpu.wanted():
+            screen.warm(warm)
+            return
+
+        def go():
+            try:
+                screen.warm(warm)
+            except Exception:
+                pass
+
+        threading.Thread(target=go, daemon=True).start()
+
+    def _pump_prepare(self):
+        """Build the next chamber while the offering is up, off this thread.
+
+        Doing it on the main thread was 271 ms in one frame - a quarter of a
+        second of nothing, in the middle of the screen the player is reading.
+        It is about 180 ms of numpy and PIL, and both release the interpreter
+        lock for the parts that cost, so a worker gets it off the frame
+        entirely rather than moving the stall somewhere else.
+
+        Nothing in there touches the GPU: sprites on this backend hold their
+        bytes and upload on first draw, which happens here, later. On the
+        cmu-graphics renderer `_store` forces a conversion through the
+        renderer itself, so that path stays synchronous - it is the
+        compatibility backend and a hitch there is the lesser problem.
+        """
+        if self._prepared is not None or self.world is None:
+            return
+        depth = self.world.depth + 1
+        if depth > FLOORS_PER_RUN:
+            return
+        if self._prep_thread is not None:
+            if self._prep_thread.is_alive():
+                return
+            self._prep_thread = None
+            if self._prep_result is not None:
+                self._prepared, self._prep_result = self._prep_result, None
+            return
+        if self.draft_screen.t <= 0.35:
+            return
+        if not gpu.wanted():
+            self._prepared = self.world.prepare_floor(depth)
+            return
+
+        def build():
+            try:
+                self._prep_result = self.world.prepare_floor(depth)
+            except Exception:
+                import traceback
+                traceback.print_exc(file=sys.stderr)
+                self._prep_result = None
+
+        self._prep_result = None
+        self._prep_thread = threading.Thread(target=build, daemon=True)
+        self._prep_thread.start()
+
     def reroll_draft(self):
         """Redraw the offering, if the run has a redraw left.
 
@@ -511,7 +614,8 @@ class Game:
         if not choices:
             return
         self.draft_screen.open(choices, self.world.depth,
-                               rerolls=self.stats.rerolls)
+                               rerolls=self.stats.rerolls,
+                               before_boss=self.draft_screen.before_boss)
         audio.play('ui_select', 0.5)
 
     def take_upgrade(self, index):
@@ -646,17 +750,14 @@ class Game:
             # single frame of work on a static screen is invisible; the same
             # work on the frame the player presses a key is the hitch they
             # were feeling.
-            if (self._prepared is None and self.world is not None
-                    and self.draft_screen.t > 0.5):
-                depth = self.world.depth + 1
-                if depth <= FLOORS_PER_RUN:
-                    self._prepared = self.world.prepare_floor(depth)
+            self._pump_prepare()
         elif self.state == ENDED:
             self.end_screen.update(dt)
         elif self.state == PLAYING:
             self._step_play(dt)
 
     def _step_play(self, dt):
+        self._pump_warm()
         world = self.world
         cam = world.camera
         aim = (self.mouse[0] + cam.ox, self.mouse[1] + cam.oy)

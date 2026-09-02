@@ -140,7 +140,27 @@ lance shots), flanking is a shortcut rather than the only door, and getting
 behind one still reaches the body while the shield is up. It needs no health
 bar, because the arc shrinking from 132° to 35° *is* the bar.
 
-**Two bosses, and they ask different questions.** The Hollow Choir waits at
+**Two bosses, and they ask different questions.** The Hollow Choir is the one
+you meet first, on floor six: a slow mass that fills the room with bullets, so
+the answer to it is footwork. The Snuffer waits at the bottom, because a boss
+that takes your light away is only frightening once you have spent eleven
+floors relying on it — its aura eats fuel, its signature attack smothers the
+flame to a crawl, and its own light *shrinks* as it rages, so the fight gets
+darker the closer it is to dying.
+
+Both **arrive** rather than simply being there. Three beats, all built out of
+light because that is the language the rest of the game speaks: the room
+answers first with rings running outward, then the thing gathers out of the
+dark with motes falling inward, then it opens its eye. The view swings across
+to watch and comes back as it finishes — an arrival you cannot see is not an
+arrival — and nothing takes control away from you while it happens.
+
+They **come apart** the same way. Two and a half seconds of the body cracking
+open in bursts, the light it carried guttering and flaring, the camera holding
+on it, and one last collapse that lights the whole chamber. The way down does
+not open until it is over.
+
+The offering before a boss floor says so. The Hollow Choir waits at
 the bottom: a slow mass that fills the room with bullets, so the answer to it
 is footwork. The Snuffer is on floor six and is the opposite in every
 direction that matters — fast, small, and it comes for the one resource the

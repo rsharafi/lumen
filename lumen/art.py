@@ -1080,9 +1080,19 @@ def clear_all():
     _font_cache.clear()
 
 
-def clear_level_cache():
-    """Drop baked level images between floors so memory stays flat."""
-    for key in [k for k in _cache if isinstance(k, tuple) and k and k[0] == 'level']:
+def clear_level_cache(keep=()):
+    """Drop baked level images between floors so memory stays flat.
+
+    `keep` is the set of keys belonging to a chamber that is about to be
+    entered. The next floor is now built while the offering is still on
+    screen - and the offering is drawn *over the room you just cleared*, so
+    clearing indiscriminately released the sprites of the floor still being
+    rendered behind it and the room vanished.
+    """
+    keep = set(keep)
+    for key in [k for k in _cache
+                if isinstance(k, tuple) and k and k[0] == 'level'
+                and k not in keep]:
         stale = _cache.pop(key, None)
         _pil_cache.pop(key, None)
         if stale is not None:

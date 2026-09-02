@@ -13,6 +13,7 @@ from . import draw, gpu
 from .draw import drawImage, drawLine, drawPolygon
 
 from . import level as level_mod
+from . import rng as rng_mod
 from . import motes as motes_mod
 from . import (art, audio, boss, enemies as enemy_mod, flow as flow_mod,
                level as level_mod, lighting, palette,
@@ -23,7 +24,7 @@ from .config import (BOSS_FLOORS, BRAZIER_IGNITE_FUEL, BRAZIER_REFILL_RANGE,
                      LANTERN_FLARE_DAMAGE, LANTERN_FLARE_KNOCKBACK,
                      LANTERN_FLARE_TIME, SHADOW_FLOOR_MIX, TILE)
 from .fx import Camera, Effects
-from .mathx import clamp, ease_out_cubic, from_angle, pulse
+from .mathx import clamp, ease_out_cubic, from_angle, lerp, pulse
 from .player import Player
 
 # Seconds you must stand in an open rift before it takes you down.
@@ -103,6 +104,11 @@ class World:
         self.deferred = True        # the light-buffer pipeline
         self.volumetric = True      # air in the lit cone
         self.wall_glow = 0          # masonry lit regardless of the lantern
+        # A boss arrives and dies as an event rather than as a spawn and a
+        # corpse. Both are driven from here so the two bosses share them.
+        self.boss_intro = 0.0
+        self.boss_death = 0.0
+        self.boss_corpse = None
         self.prewarm_lantern_sizes()
 
     def resize(self, view_w, view_h):
@@ -147,9 +153,17 @@ class World:
         static page nobody is looking at for motion, and the descent itself
         is immediate.
         """
-        boss = depth in BOSS_FLOORS
-        art.clear_level_cache()
-        return (depth, boss, level_mod.generate(depth, self.rng, boss=boss))
+        boss_floor = depth in BOSS_FLOORS
+        # No clearing here: the offering is drawn over the room you just
+        # cleared, so releasing its sprites while it is still on screen makes
+        # the room vanish behind the cards. The old floor is dropped when the
+        # new one is adopted instead.
+        #
+        # Its own generator, seeded from the world's, so this can run off the
+        # main thread without two streams interleaving.
+        gen = rng_mod.Rng(self.rng.randint(0, 2 ** 31 - 1))
+        return (depth, boss_floor,
+                level_mod.generate(depth, gen, boss=boss_floor))
 
     def enter_floor(self, depth, prepared=None):
         self.depth = depth
@@ -157,8 +171,10 @@ class World:
         if prepared is not None and prepared[0] == depth:
             self.level = prepared[2]
         else:
-            art.clear_level_cache()
             self.level = level_mod.generate(depth, self.rng, boss=self.is_boss)
+        # Everything baked for any *other* chamber goes now, which is the one
+        # moment nothing is drawing it.
+        art.clear_level_cache(keep=self.level.art_keys)
 
         self.player.x, self.player.y = self.level.player_start
         self.player.vx = self.player.vy = 0.0
@@ -192,7 +208,11 @@ class World:
         # collector's way for the rest of the floor.
         gc.collect()
         gc.freeze()
-        self.set_banner(self.boss_name if self.is_boss else f'FLOOR {depth}')
+        self.set_banner(self.boss_name if self.is_boss else f'FLOOR {depth}',
+                        seconds=3.4 if self.is_boss else 2.4)
+        self.boss_intro = self.BOSS_INTRO_TIME if self.is_boss else 0.0
+        self.boss_death = 0.0
+        self.boss_corpse = None
 
     def _populate(self):
         spots = list(self.level.spawn_points)
@@ -304,7 +324,7 @@ class World:
             self.pickups.spawn(pickup_mod.HEART, enemy.x, enemy.y, 14, self.rng)
 
         if enemy is self.boss_ref:
-            self.effects.slowmo(1.4, 0.22)
+            self.begin_boss_death(enemy)
             self.effects.add_flash(0.9, palette.BOSS_EYE, wash=True)
             self.pickups.spawn(pickup_mod.HEART, enemy.x, enemy.y, 18, self.rng,
                                count=3, speed=(90, 220))
@@ -377,6 +397,10 @@ class World:
         sdt = dt * scale
         self.run_time += dt
         self.motes.step(dt)
+        if self.boss_intro > 0.0:
+            self._tick_boss_intro(dt)
+        if self.boss_death > 0.0:
+            self._tick_boss_death(dt)
         self.floor_time += dt
         self.banner_t = max(0.0, self.banner_t - dt)
 
@@ -471,12 +495,30 @@ class World:
         d = math.hypot(dx, dy)
         if d > 1e-6:
             aim_nx, aim_ny = dx / d, dy / d
-        self.camera.follow(player.x, player.y, aim_nx, aim_ny, dt)
+        # An arrival you cannot see is not an arrival. The view swings across
+        # to whatever is assembling and comes back as it finishes, and it
+        # stays on the corpse while that comes apart - the two moments the
+        # game most wants you looking somewhere other than at your own feet.
+        fx_, fy_ = player.x, player.y
+        if self.boss_intro > 0.0 and self.boss_ref is not None:
+            t = clamp(self.boss_intro / max(self.BOSS_INTRO_TIME, 1e-6),
+                      0.0, 1.0)
+            swing = math.sin(math.pi * (1.0 - t)) ** 0.7 * 0.92
+            fx_ = lerp(player.x, self.boss_ref.x, swing)
+            fy_ = lerp(player.y, self.boss_ref.y, swing)
+        elif self.boss_death > 0.0 and self.boss_corpse:
+            t = clamp(self.boss_death / max(self.BOSS_DEATH_TIME, 1e-6),
+                      0.0, 1.0)
+            hold = min(1.0, t * 1.8) * 0.8
+            fx_ = lerp(player.x, self.boss_corpse[0], hold)
+            fy_ = lerp(player.y, self.boss_corpse[1], hold)
+        self.camera.follow(fx_, fy_, aim_nx, aim_ny, dt)
 
         if self.stats.dash_damage and player.dash_time > 0.0:
             self._dash_cleave(player)
 
-        if not self.cleared and not any(e.alive for e in self.enemies):
+        if (not self.cleared and self.boss_death <= 0.0
+                and not any(e.alive for e in self.enemies)):
             self._open_rift()
 
     # How far a chained arc will reach for its next target, and what share of
@@ -645,6 +687,11 @@ class World:
                 d2 = (e.x - player.x) ** 2 + (e.y - player.y) ** 2
                 if d2 < 210.0 ** 2:
                     e.slow = slow
+            if e is self.boss_ref and self.boss_intro > 0.0:
+                # Still assembling. It is drawn, and it is not yet a fight.
+                e.spawn_t = max(e.spawn_t, self.boss_intro)
+                alive.append(e)
+                continue
             e.update(dt, self)
 
             if light_dps and e.lit and e.alive:
@@ -923,6 +970,10 @@ class World:
 
     # What an elite throws. Enough to be seen across a room and not enough to
     # light the room: the floor stays dark, the thing in it does not.
+    # How long a boss takes to arrive, and to come apart.
+    BOSS_INTRO_TIME = 3.1
+    BOSS_DEATH_TIME = 2.8
+
     ELITE_GLOW = 118.0
     ELITE_GLOW_STRENGTH = 26.0
     ELITE_LIGHT_HEIGHT = 16.0
@@ -1043,6 +1094,7 @@ class World:
         self._draw_wall_light(ox, oy, flicker)
         gpu.end_edge_light()
 
+        self._draw_boss_corpse(ox, oy)
         self.effects.draw_beams(ox, oy)
         # ---- things that are not part of the world -------------------------
         # Eyes are emissive, so they belong on top of the lighting rather than
@@ -1588,6 +1640,128 @@ class World:
                 drawLine(sx, ay - oy, bx - ox, by - oy,
                          fill=palette.wall_light(lit),
                          lineWidth=2, opacity=int(4 + 38 * lit))
+
+    def _tick_boss_intro(self, dt):
+        """A boss arrives instead of simply being there.
+
+        Three beats, and they are all built out of light because that is the
+        language the rest of the game speaks: the room answers first, then the
+        thing itself gathers out of the dark, then it opens its eye and the
+        fight starts. Nothing here takes control away from the player - you
+        can walk about during it - but the boss does not act until it is done.
+        """
+        b = self.boss_ref
+        if b is None:
+            self.boss_intro = 0.0
+            return
+        was = self.boss_intro
+        self.boss_intro = max(0.0, self.boss_intro - dt)
+        t = 1.0 - self.boss_intro / max(self.BOSS_INTRO_TIME, 1e-6)
+        col = art.rgb_tuple(b.eye_color)
+
+        # 1. The room answers: rings running outward from where it stands.
+        if was > self.BOSS_INTRO_TIME * 0.55:
+            if self.fxrng.chance(7.0 * dt):
+                self.particles.ripple(b.x, b.y, b.eye_color,
+                                      120 + 520 * t, 0.7, 60)
+                self.effects.add_shake(1.6)
+        # 2. It gathers: motes falling inward, and its light growing.
+        elif was > self.BOSS_INTRO_TIME * 0.16:
+            self.effects.add_light(b.x, b.y, 90 + 420 * t, 0.14, b.eye_color)
+            if self.fxrng.chance(50.0 * dt):
+                a = self.fxrng.angle()
+                d = b.radius * self.fxrng.uniform(4.0, 11.0)
+                self.particles.emit(
+                    1, b.x + math.cos(a) * d, b.y + math.sin(a) * d,
+                    -math.cos(a) * 260.0, -math.sin(a) * 260.0,
+                    0.5, 4.2, b.eye_color, end_size=0.4, opacity=90)
+            self.effects.add_shake(0.5 + 2.5 * t)
+        # 3. It opens its eye.
+        if was > 0.0 and self.boss_intro <= 0.0:
+            self.effects.add_flash(0.95, b.eye_color, wash=True)
+            self.effects.add_shake(13.0)
+            self.effects.add_hitstop(0.12)
+            self.effects.add_light(b.x, b.y, 760.0, 0.5, b.eye_color)
+            self.particles.burst(b.x, b.y, 70, b.eye_color, self.fxrng,
+                                 speed=(220, 660), life=(0.35, 0.9),
+                                 size=(2.4, 6.0))
+            self.particles.ripple(b.x, b.y, palette.LIGHT_CORE, 900, 0.8, 90)
+            audio.play('roar', 1.0)
+            audio.play('boom', 0.7)
+
+    def begin_boss_death(self, enemy):
+        """Hold the floor open while the thing comes apart."""
+        self.boss_death = self.BOSS_DEATH_TIME
+        self.boss_corpse = [enemy.x, enemy.y, enemy.radius,
+                            art.rgb_tuple(enemy.eye_color),
+                            art.rgb_tuple(enemy.body_color)]
+        self.effects.slowmo(2.2, 0.30)
+        self.effects.add_shake(10.0)
+        audio.play('low', 0.9)
+
+    def _tick_boss_death(self, dt):
+        """It does not simply stop existing.
+
+        Two and a half seconds of coming apart: the body cracking open in
+        bursts, the light it carried guttering and flaring, and then one last
+        collapse that lights the whole chamber before the way down opens.
+        """
+        was = self.boss_death
+        self.boss_death = max(0.0, self.boss_death - dt)
+        if not self.boss_corpse:
+            return
+        x, y, r, eye, body = self.boss_corpse
+        t = 1.0 - self.boss_death / max(self.BOSS_DEATH_TIME, 1e-6)
+
+        # Cracking open, faster as it goes.
+        if self.fxrng.chance((5.0 + 22.0 * t) * dt):
+            a = self.fxrng.angle()
+            d = r * self.fxrng.uniform(0.2, 1.5)
+            px, py = x + math.cos(a) * d, y + math.sin(a) * d
+            self.particles.burst(px, py, 16, eye, self.fxrng,
+                                 speed=(140, 460), life=(0.25, 0.7),
+                                 size=(2.0, 5.4))
+            self.effects.add_light(px, py, 150.0 + 160.0 * t, 0.22, eye)
+            self.effects.add_shake(2.0 + 4.0 * t)
+            audio.play_at('boom', px, py, 0.30 + 0.3 * t)
+        if self.fxrng.chance(4.0 * dt):
+            self.particles.ripple(x, y, eye, 200 + 500 * t, 0.5, 60)
+
+        # The last collapse.
+        if was > 0.0 and self.boss_death <= 0.0:
+            self.effects.add_flash(1.0, palette.LIGHT_CORE, wash=True)
+            self.effects.add_shake(18.0)
+            self.effects.add_hitstop(0.16)
+            self.effects.add_light(x, y, 1100.0, 0.9, palette.LIGHT_CORE)
+            self.particles.burst(x, y, 120, palette.LIGHT_CORE, self.fxrng,
+                                 speed=(260, 900), life=(0.5, 1.4),
+                                 size=(2.6, 7.0))
+            self.particles.ripple(x, y, palette.LIGHT_CORE, 1300, 1.0, 100)
+            audio.play('boom', 1.0)
+            audio.play('upgrade', 0.7)
+            self.boss_corpse = None
+
+    def _draw_boss_corpse(self, ox, oy):
+        """What is left of it, shrinking and guttering as it comes apart."""
+        if not self.boss_corpse:
+            return
+        x, y, r, eye, body = self.boss_corpse
+        t = 1.0 - self.boss_death / max(self.BOSS_DEATH_TIME, 1e-6)
+        sx, sy = x - ox, y - oy
+        shrink = max(0.0, 1.0 - t) ** 0.6
+        wobble = 1.0 + 0.18 * math.sin(self.run_time * 26.0)
+        art.draw_glow(eye, sx, sy, (200 + 300 * t) * shrink,
+                      int(clamp(70 * (1.0 - t) + 40 * t, 0, 100)), power=2.2)
+        pts = []
+        n = 9
+        for i in range(n):
+            a = self.run_time * 1.4 + i * math.tau / n
+            d = r * shrink * wobble * (1.0 + 0.5 * t * self.fxrng.uniform(-1, 1))
+            pts.append(sx + math.cos(a) * d)
+            pts.append(sy + math.sin(a) * d)
+        if shrink > 0.02:
+            drawPolygon(*pts, fill=palette.VOID,
+                        opacity=int(clamp(96 * shrink, 0, 100)))
 
     def _draw_rift_light(self, ox, oy):
         """The rift on the walls around it.
