@@ -17,6 +17,8 @@ import os
 import sys
 import time
 
+import threading
+
 import numpy as np
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
 from cmu_graphics import CMUImage, getImageSize
@@ -131,6 +133,8 @@ def set_scale(scale):
 
 
 _cache = {}
+# Baking happens on a worker as well as on the frame; see `_store`.
+_bake_lock = threading.RLock()
 _pil_cache = {}
 # Pixel dimensions keyed by sprite identity, so callers that need to position
 # a baked sprite do not have to search the cache for it.
@@ -207,10 +211,27 @@ def _store(key, pil, keep_source=True):
                 img._imageParams = None
             except Exception:
                 pass
-    if keep_source:
-        _pil_cache[key] = pil
-    _cache[key] = img
-    _dims[id(img)] = (pil.size[0] / SCALE, pil.size[1] / SCALE)
+    # Two things are being guarded here, and threading made both reachable:
+    # the offering's sprites are baked on a worker while the floor is fought.
+    #
+    # First, `_dims` is written *before* `_cache`, because a reader that finds
+    # the sprite has to be able to find its size - the other order leaves a
+    # window where a sprite is drawable and has no dimensions, and it draws at
+    # whatever the fallback is.
+    #
+    # Second, if another thread got there first its sprite is the one already
+    # in use, so this one is thrown away rather than swapped in underneath it.
+    # That also closes an `id()` reuse hazard: `_dims` is keyed by object id,
+    # and a discarded duplicate that gets collected can leave a stale entry
+    # for whatever lands at that address next.
+    with _bake_lock:
+        existing = _cache.get(key)
+        if existing is not None:
+            return existing
+        _dims[id(img)] = (pil.size[0] / SCALE, pil.size[1] / SCALE)
+        if keep_source:
+            _pil_cache[key] = pil
+        _cache[key] = img
     if _TRACE:
         ms = (time.perf_counter() - started) * 1000.0
         sys.stderr.write(f'[art] built {key!r} in {ms:.1f}ms\n')

@@ -521,6 +521,12 @@ class UpgradeScreen:
         # replaced - you are standing in the room you just cleared.
         drawPolygon(0, 0, w, 0, w, h, 0, h, fill=palette.VOID,
                     opacity=int(88 * appear))
+        # And the grain goes over all of it. The room's own overlay only
+        # covers the room, so anywhere the floor did not reach - the top of
+        # the screen, usually - was plain flat black against a textured
+        # bottom half.
+        drawImage(art.grain(int(w), int(h), 0.05), 0, 0,
+                  opacity=int(52 * appear))
 
         self._draw_header(w, h, appear)
 
@@ -550,14 +556,15 @@ class UpgradeScreen:
             self._draw_card(up, cx, cy, cw, ch, i, selected, delay,
                             cw / self.CARD_W)
 
-        drawLabel('LEFT / RIGHT  CHOOSE      ENTER  TAKE IT      '
-                  'OR CLICK AN OFFERING', w * 0.5, y0 + ch + 42, size=12,
+        drawLabel('CLICK AN OFFERING TO TAKE IT'
+                  + ('        R  REDRAW' if self.rerolls else ''),
+                  w * 0.5, y0 + ch + 42, size=12,
                   fill=palette.UI_DIM, font=palette.FONT_UI,
                   opacity=int(76 * appear))
         self._draw_carrying(world, w, h, appear)
 
     def _draw_header(self, w, h, appear):
-        cx, cy = w * 0.5, h * 0.115
+        cx, cy = w * 0.5, h * 0.085
         size = 300
         _glow(cx, cy + 4, size, palette.LIGHT_WARM, int(13 * appear), 2.7)
         drawLabel('THE VAULT OFFERS', cx, cy, size=30, bold=True,
@@ -574,17 +581,16 @@ class UpgradeScreen:
         if self.before_boss:
             # The one offering that is also a warning. Choosing well matters
             # more here than anywhere else in the run, and the screen should
-            # say so before the door rather than after it.
+            # say so before the door rather than after it. The whole header
+            # sits higher than it used to so this has room of its own - it
+            # was landing on the top edge of the cards.
             beat = 0.5 + 0.5 * math.sin(self.t * 2.3)
-            _glow(cx, cy + 74, 420, palette.UI_DANGER,
+            _glow(cx, cy + 62, 420, palette.UI_DANGER,
                   int((10 + 7 * beat) * appear), 2.6)
-            drawLabel('SOMETHING IS WAITING BELOW', cx, cy + 70, size=15,
+            drawLabel('SOMETHING IS WAITING BELOW', cx, cy + 60, size=15,
                       bold=True, fill=palette.UI_DANGER,
                       font=palette.FONT_DISPLAY,
                       opacity=int((74 + 26 * beat) * appear))
-            drawLabel('the calm before the storm', cx, cy + 88, size=11,
-                      fill=palette.UI_DIM, font=palette.FONT_UI,
-                      opacity=int(64 * appear))
 
     def _draw_card(self, up, x, y, cw, ch, index, selected, delay, k=1.0):
         """One offering. `k` shrinks the whole card, contents included.

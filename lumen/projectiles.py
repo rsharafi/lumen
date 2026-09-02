@@ -17,14 +17,20 @@ class Projectile:
     __slots__ = ('alive', 'owner', 'x', 'y', 'vx', 'vy', 'radius', 'damage',
                  'life', 'max_life', 'pierce', 'hit', 'color', 'glow_color',
                  'length', 'width', 'knockback', 'homing', 'explode',
-                 'chain', 'bounces', 'crit', 'spin', 'wobble', 'phase')
+                 'chain', 'bounces', 'crit', 'spin', 'wobble', 'phase',
+                 'unmaking')
 
     def __init__(self):
         self.alive = False
         self.hit = set()
+        # Seconds left of coming apart. A shot whose owner has just died
+        # loses its bite and unravels rather than blinking out; see
+        # `ProjectilePool.unmake`.
+        self.unmaking = 0.0
 
     def reset(self, owner, x, y, vx, vy, damage, **kw):
         self.alive = True
+        self.unmaking = 0.0
         self.owner = owner
         self.x, self.y = x, y
         self.vx, self.vy = vx, vy
@@ -50,7 +56,13 @@ class Projectile:
 
 
 class ProjectilePool:
-    def __init__(self, capacity=220):
+    # A boss spray plus whatever the player is firing has to fit, or the pool
+    # eats its own tail: when it is full `spawn` recycles the shot closest to
+    # expiring, so bullets fired a moment ago wink out mid-flight - and the
+    # moment the boss stops attacking the pressure comes off and the *same*
+    # attack suddenly carries all the way across the chamber. Measured, the
+    # Choir alone peaked at exactly the old 220.
+    def __init__(self, capacity=900):
         self.pool = [Projectile() for _ in range(capacity)]
         self.capacity = capacity
         self._cursor = 0
@@ -71,6 +83,24 @@ class ProjectilePool:
         idx = min(range(n), key=lambda i: pool[i].life)
         return pool[idx].reset(owner, x, y, vx, vy, damage, **kw)
 
+    # How long a shot takes to come apart once its owner is gone.
+    UNMAKE_TIME = 0.55
+
+    def unmake(self, owner):
+        """Take the bite out of everything `owner` has in the air.
+
+        A boss dies and the camera goes to watch it, which means the dozen
+        bullets it fired a second ago arrive while the player cannot see them.
+        Deleting them outright is worse - a screen full of shot that blinks
+        out reads as a bug - so they lose their damage at once and then spend
+        half a second slowing, shrinking and fading. It looks like the thing
+        that made them letting go, which is what happened.
+        """
+        for p in self.pool:
+            if p.alive and p.owner == owner and p.unmaking <= 0.0:
+                p.unmaking = self.UNMAKE_TIME
+                p.damage = 0.0
+
     def live(self):
         return [p for p in self.pool if p.alive]
 
@@ -80,6 +110,17 @@ class ProjectilePool:
         for p in self.pool:
             if not p.alive:
                 continue
+            if p.unmaking > 0.0:
+                # Coming apart: it slows, it stops steering, and it is gone
+                # when the timer is. Damage was zeroed the moment its owner
+                # died, so it is already harmless while this plays out.
+                p.unmaking -= dt
+                if p.unmaking <= 0.0:
+                    p.alive = False
+                    continue
+                drag = math.exp(-4.5 * dt)
+                p.vx *= drag
+                p.vy *= drag
             p.life -= dt
             if p.life <= 0.0:
                 p.alive = False
@@ -150,6 +191,9 @@ class ProjectilePool:
             if sx < -r or sy < -r or sx > view_w + r or sy > view_h + r:
                 continue
             fade = clamp(p.life / max(p.max_life, 1e-6) * 3.0, 0.25, 1.0)
+            if p.unmaking > 0.0:
+                # Guttering out with whatever fired it.
+                fade *= clamp(p.unmaking / self.UNMAKE_TIME, 0.0, 1.0) ** 0.7
             art.draw_glow(p.glow_color, sx, sy, r, 54 * fade, power=2.4)
 
     def draw(self, ox, oy, view_w, view_h):

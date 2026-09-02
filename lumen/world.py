@@ -1690,7 +1690,15 @@ class World:
             audio.play('boom', 0.7)
 
     def begin_boss_death(self, enemy):
-        """Hold the floor open while the thing comes apart."""
+        """Hold the floor open while the thing comes apart.
+
+        Everything it had in the air goes harmless immediately and unravels
+        over the next half second. The camera is about to swing away to watch
+        it die, and a bullet you cannot see is not a thing you can dodge -
+        but deleting a screenful of shot outright reads as a bug, so they let
+        go instead.
+        """
+        self.projectiles.unmake(projectile_mod.ENEMY)
         self.boss_death = self.BOSS_DEATH_TIME
         self.boss_corpse = [enemy.x, enemy.y, enemy.radius,
                             art.rgb_tuple(enemy.eye_color),
