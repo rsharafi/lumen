@@ -13,6 +13,7 @@ from . import draw, gpu
 from .draw import drawImage, drawLine, drawPolygon
 
 from . import acts as act_mod
+from . import relics as relic_mod
 from . import doors as door_mod
 from . import hazards as hazard_mod
 from . import level as level_mod
@@ -273,6 +274,7 @@ class World:
         # open its door. Naming it on arrival gave the thing away in a
         # threshold room two chambers early, which spends the arrival before
         # the arrival happens.
+        self.fire_relics(relic_mod.ON_FLOOR)
         self.set_banner(f'FLOOR {depth}', seconds=2.4)
         self.enter_room(self.plan.room(self.plan.entrance), from_side=None)
 
@@ -381,6 +383,10 @@ class World:
         if room.kind == plan_mod.DESCENT:
             self._open_rift()
 
+        # Last, so anything a relic does to a room happens to the room as it
+        # finally is - lit braziers, spawned enemies, an opened rift.
+        self.fire_relics(relic_mod.ON_ROOM_ENTER)
+
         # Build what this room opens onto while the player is busy in it.
         self.builder.prefetch([self.plan.room(rid)
                                for rid in room.doors.values()])
@@ -429,7 +435,8 @@ class World:
             if kind == plan_mod.SHOP:
                 pass                      # the shelf is the game's business
             elif kind == plan_mod.CACHE:
-                room.payload = fixture_mod.cache_value(self.depth, self.rng)
+                room.payload = fixture_mod.cache_value(
+                    self.depth, self.rng, self.stats.relics)
             elif kind == plan_mod.SHRINE:
                 room.payload = fixture_mod.shrine_pact(
                     self.depth, self.rng, self.embers)
@@ -442,12 +449,18 @@ class World:
             # shelf, and the game fills it the first time it is opened.
             return
         if kind == plan_mod.CACHE:
-            embers = room.payload[0]
+            embers, oil, relic_key = room.payload
+            # Say which kind it is from across the room. A player choosing
+            # whether a dead end is worth the fuel needs to know what is at
+            # the end of it before they have spent the fuel finding out.
+            relic = relic_mod.BY_KEY.get(relic_key)
+            if relic is not None:
+                terms = relic.name
+            else:
+                terms = f'{embers} embers' + (' and oil' if oil else '')
             self.fixture = fixture_mod.Fixture(
                 fixture_mod.CACHE, cx, cy, label='A CACHE',
-                terms=f'{embers} embers' + (
-                    ' and oil' if room.payload[1] else ''),
-                payload=room.payload)
+                terms=terms, payload=room.payload)
         elif kind == plan_mod.HEARTH:
             self.fixture = fixture_mod.Fixture(
                 fixture_mod.HEARTH, cx, cy, label='A HEARTH',
@@ -499,12 +512,16 @@ class World:
             self._take_shrine(fixture)
 
     def _take_cache(self, fixture):
-        embers, oil = fixture.payload
-        self.pickups.spawn(pickup_mod.EMBER, fixture.x, fixture.y, 1,
-                           self.fxrng, count=embers, speed=(90, 260))
+        embers, oil, relic_key = fixture.payload
+        if embers:
+            self.pickups.spawn(pickup_mod.EMBER, fixture.x, fixture.y, 1,
+                               self.fxrng, count=embers, speed=(90, 260))
         if oil:
             self.pickups.spawn(pickup_mod.OIL, fixture.x, fixture.y, 26,
                                self.fxrng, count=2, speed=(70, 180))
+        relic = relic_mod.BY_KEY.get(relic_key)
+        if relic is not None and self.take_relic(relic):
+            return                      # the relic announces itself
         self.set_banner('THE CACHE OPENS', 1.8)
         audio.play('cache_open', 0.75)
         self.effects.add_light(fixture.x, fixture.y, 260, 0.7,
@@ -551,6 +568,44 @@ class World:
         audio.play('shrine', 0.8)
         self.effects.add_light(fixture.x, fixture.y, 300, 0.9, palette.WARD)
         self.effects.add_shake(2.2)
+
+    # ------------------------------------------------------------ relics --
+    def take_relic(self, relic):
+        """Pick one up. Applies once, and joins the run."""
+        if relic.unique and relic.key in self.stats.relics:
+            return False
+        self.stats.relics.append(relic.key)
+        if relic.apply is not None:
+            relic.apply(self.stats)
+        self.player.refresh_from_stats()
+        self.effects.add_text(self.player.x, self.player.y - 40, relic.name,
+                              relic.color, 17, True)
+        self.effects.add_flash(0.5, relic.color)
+        self.effects.add_light(self.player.x, self.player.y, 300.0, 0.7,
+                               relic.color)
+        self.particles.burst(self.player.x, self.player.y, 30, relic.color,
+                             self.fxrng, speed=(120, 380), life=(0.3, 0.8),
+                             size=(2.2, 5.0))
+        audio.play('relic', 0.85)
+        return True
+
+    def fire_relics(self, hook, *args):
+        """Run whatever the run is carrying that cares about `hook`.
+
+        By key rather than by object so the held list stays a list of plain
+        strings - it goes in the save, and it is read back by the run summary
+        long after the objects are gone.
+        """
+        held = self.stats.relics
+        if not held:
+            return
+        for key in held:
+            relic = relic_mod.BY_KEY.get(key)
+            if relic is None:
+                continue
+            fn = relic.hooks.get(hook)
+            if fn is not None:
+                fn(self, relic, *args)
 
     def music_intensity(self):
         """How worried the score should sound, 0 to 1.
@@ -1083,6 +1138,7 @@ class World:
 
     def on_kill(self, enemy, angle=None):
         enemy.death_burst(self, angle)
+        self.fire_relics(relic_mod.ON_KILL, enemy)
         self.kills += 1
         self.player.kills += 1
         self.streak += 1
@@ -1536,6 +1592,7 @@ class World:
                         # Gated on the hit landing, so invulnerability frames
                         # protect the flame as well as the body.
                         e.on_touch(self)
+                        self.fire_relics(relic_mod.ON_HURT, e.damage)
                         e.touch_cd = 0.65
                         self.camera.add_shake(4.5)
                         push = 240.0

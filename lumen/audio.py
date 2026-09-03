@@ -19,7 +19,7 @@ import wave
 import numpy as np
 
 SAMPLE_RATE = 44100
-CACHE_VERSION = 17
+CACHE_VERSION = 18
 
 _bank = None
 
@@ -455,6 +455,20 @@ def _make_sounds():
     desc = _mix(_sweep(1.3, 330, 52, 'sine', 1.2) * _env(n, 0.05, 0.4, 0.35, 0.7),
                 _filter(_noise(n, rng), 450, 'low', 2.0) * _env(n, 0.1, 0.4, 0.2, 0.7) * 0.7)
     out['descend'] = _normalise(_room(_soft_clip(desc), 1.6, 2.8, 0.42, rng=rng), 0.6)
+
+    # ---- a relic ------------------------------------------------------
+    # Something old being picked up. A struck bell with a long tail and a
+    # second note that arrives underneath it late - the sound of a thing that
+    # has been in the dark a long while and is still ringing.
+    n = int(2.2 * SAMPLE_RATE)
+    bell = _struck(2.2, 294, (1.0, 2.76, 5.4, 8.9), (0.9, 1.8, 3.0, 4.4),
+                   bright=1.05) * _env(n, 0.001, 0.9, 0.22, 1.1)
+    under = _struck(2.2, 98, (1.0, 2.0), (0.8, 1.4), bright=0.5) \
+        * _env(n, 0.18, 0.7, 0.1, 0.9)
+    shine = _struck(2.2, 1176, bright=1.2) * _env(n, 0.02, 0.4, 0.0, 0.6)
+    out['relic'] = _normalise(
+        _room(_soft_clip(_mix(bell, under * 0.6, shine * 0.3)),
+              2.6, 2.4, 0.44, rng=rng), 0.62)
 
     # ---- the vault's own fire ------------------------------------------
     # A vent letting go. Gas catching rather than a bang: a soft rush that

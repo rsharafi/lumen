@@ -54,6 +54,8 @@ class Player:
         self.choke = 0.0
         #: How much of this frame's speed the ground is taking, 0 to 1.
         self.ground_slow = 0.0
+        #: Seconds of a temporary turn of speed. SECOND WIND puts it there.
+        self.haste = 0.0
         self.muzzle_flash = 0.0
 
         self.kills = 0
@@ -153,6 +155,8 @@ class Player:
             # dash is the way *out* of a pool, and taking that away would
             # make a flooded room a trap rather than a decision.
             speed = PLAYER_SPEED * s.speed_mult * (1.0 - self.ground_slow)
+            if self.haste > 0.0:
+                speed *= 1.32
             target_vx = mx * speed
             target_vy = my * speed
             k = 1.0 - math.exp(-PLAYER_ACCEL * dt)
@@ -192,6 +196,7 @@ class Player:
                     self.dash_cd = DASH_COOLDOWN * s.dash_cooldown_mult
         self.iframes = max(0.0, self.iframes - dt)
         self.choke = max(0.0, self.choke - dt)
+        self.haste = max(0.0, self.haste - dt)
         self.hurt_flash = max(0.0, self.hurt_flash - dt * 3.0)
         self.cooldown = max(0.0, self.cooldown - dt)
         self.flare_cd = max(0.0, self.flare_cd - dt)

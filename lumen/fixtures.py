@@ -228,14 +228,30 @@ class Fixture:
 # ---------------------------------------------------------------------------
 # What each kind is worth
 # ---------------------------------------------------------------------------
-def cache_value(depth, rng):
-    """Embers in a cache, and whether it also carries oil.
+def cache_value(depth, rng, held=()):
+    """What is in a cache: embers, maybe oil, and often a relic.
 
-    Scaled off depth so a spur is worth the same fraction of a floor's income
-    all the way down, rather than being generous early and pointless late.
+    Embers are scaled off depth so a spur is worth the same fraction of a
+    floor's income all the way down. But embers alone were the whole of it
+    for a long time, and they are the least interesting thing a cache can
+    hold - the same currency killing already pays, in a room the player went
+    out of their way for. Most caches carry a relic now, and the ember pile
+    is what a cache holds when it does not.
+
+    Returns (embers, oil, relic_key_or_None).
     """
-    embers = int(round((14 + depth * 3.2) * rng.uniform(0.85, 1.2)))
-    return embers, rng.chance(0.55)
+    from . import relics as relic_mod
+    relic = None
+    if rng.chance(0.62):
+        picks = relic_mod.offer(held, rng, depth, count=1)
+        if picks:
+            relic = picks[0].key
+    # A cache that gave a relic gives fewer embers with it - the relic *is*
+    # the reward, and paying twice for one detour makes the other rooms on
+    # the floor look like a waste of a walk.
+    scale = 0.35 if relic else 1.0
+    embers = int(round((14 + depth * 3.2) * rng.uniform(0.85, 1.2) * scale))
+    return embers, rng.chance(0.25 if relic else 0.55), relic
 
 
 #: The bargains a shrine can offer. Each is (label, terms, key) and each one

@@ -63,6 +63,10 @@ class Stats:
         self.weapons = ['lance']
 
         self.owned = []
+        #: Relic keys this run carries, in the order they were found. Kept
+        #: apart from `owned` because a relic is a thing with a name and a
+        #: row in the HUD, not a mutation that has already happened.
+        self.relics = []
 
     def describe(self):
         lines = []

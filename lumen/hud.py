@@ -174,6 +174,37 @@ def _draw_run_info(world, view_w):
     drawLabel(f'EMBERS {world.embers}   KILLS {world.kills}', x, y + 46,
               size=11, fill=palette.UI_DIM, align='left-top',
               font=palette.FONT_UI)
+    _draw_relics(world, x, y + 66)
+
+
+def _draw_relics(world, x, y):
+    """What the run is carrying, as marks rather than a list.
+
+    A relic is an object, and the difference between it and an offering is
+    that it keeps its identity - so it gets a permanent row on screen. Names
+    would be a wall of text after five of them; a coloured mark each is
+    readable at a glance and says how many and roughly what.
+    """
+    held = getattr(world.stats, 'relics', None)
+    if not held:
+        return
+    from . import relics as relic_mod
+    for i, key in enumerate(held[:10]):
+        relic = relic_mod.BY_KEY.get(key)
+        if relic is None:
+            continue
+        cx = x + 6 + i * 15
+        cy = y + 6
+        r = 4.6
+        drawPolygon(cx, cy - r, cx + r * 0.8, cy, cx, cy + r, cx - r * 0.8, cy,
+                    fill=relic.color, opacity=88)
+        # A ring around the ones that are not merely common, so a legendary
+        # in the row is visible as one without reading anything.
+        if relic.tier != relic_mod.COMMON:
+            rr = r + 2.4
+            drawPolygon(cx, cy - rr, cx + rr * 0.8, cy, cx, cy + rr,
+                        cx - rr * 0.8, cy, fill=None, border=relic.color,
+                        borderWidth=1.2, opacity=64)
 
 
 def _draw_streak(world, view_w, view_h):

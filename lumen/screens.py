@@ -1295,6 +1295,7 @@ class EndScreen:
             'streak': world.best_streak,
             'damage': world.player.damage_dealt,
             'upgrades': list(world.stats.owned),
+            'relics': list(getattr(world.stats, 'relics', [])),
             'best': save_data.get('best_score', 0),
             'held': int(save_data.get('embers', 0)),
         }
