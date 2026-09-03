@@ -19,7 +19,7 @@ import wave
 import numpy as np
 
 SAMPLE_RATE = 44100
-CACHE_VERSION = 13
+CACHE_VERSION = 14
 
 _bank = None
 
@@ -455,6 +455,36 @@ def _make_sounds():
     desc = _mix(_sweep(1.3, 330, 52, 'sine', 1.2) * _env(n, 0.05, 0.4, 0.35, 0.7),
                 _filter(_noise(n, rng), 450, 'low', 2.0) * _env(n, 0.1, 0.4, 0.2, 0.7) * 0.7)
     out['descend'] = _normalise(_room(_soft_clip(desc), 1.6, 2.8, 0.42, rng=rng), 0.6)
+
+    # ---- the doors ----------------------------------------------------
+    # A door is stone and metal moving in a stone frame, so all of this is
+    # struck and scraped rather than tonal - and long, because the leaves
+    # take half a second to travel and a sound that finishes first makes the
+    # animation look like it is coasting.
+
+    # Leaves withdrawing. A low grind that gets out of its own way, with the
+    # seal's own note ringing off the top of it as the lock gives.
+    n = int(1.5 * SAMPLE_RATE)
+    grind = _filter(_noise(n, rng), 1500, 'low', 1.5) * _env(n, 0.02, 0.55, 0.25, 0.5)
+    grind *= 0.6 + 0.4 * np.sin(np.linspace(0.0, 34.0, n))     # stone on stone
+    ring = _struck(1.5, 523, (1.0, 2.0, 3.01), (1.2, 2.2, 3.6), bright=1.15) \
+        * _env(n, 0.001, 0.5, 0.05, 0.7)
+    thud = _struck(1.5, 74, bright=0.4) * _env(n, 0.002, 0.22, 0.0, 0.3)
+    out['door_open'] = _normalise(
+        _room(_soft_clip(_mix(grind * 0.7, ring * 0.5, thud * 0.8)),
+              1.8, 3.0, 0.42, rng=rng), 0.62)
+
+    # And coming back. The same grind reversed - it arrives rather than
+    # departs - and it ends on the lock rather than starting from it.
+    n = int(1.1 * SAMPLE_RATE)
+    close = _filter(_noise(n, rng), 1200, 'low', 1.6) * _env(n, 0.02, 0.4, 0.2, 0.3)
+    close *= 0.6 + 0.4 * np.sin(np.linspace(0.0, 26.0, n))
+    latch = _struck(1.1, 98, (1.0, 2.0), (1.0, 1.8), bright=0.6) \
+        * _env(n, 0.001, 0.3, 0.0, 0.4)
+    seal = _struck(1.1, 392, bright=0.9) * _env(n, 0.55, 0.24, 0.0, 0.3)
+    out['door_shut'] = _normalise(
+        _room(_soft_clip(_mix(close * 0.6, latch * 0.9, seal * 0.45)),
+              1.4, 3.6, 0.36, rng=rng), 0.6)
 
     # ---- the Keeper ---------------------------------------------------
     # The other two bosses sound like things. This one has to sound like a

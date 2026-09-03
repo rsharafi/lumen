@@ -12,6 +12,7 @@ import os
 from . import draw, gpu
 from .draw import drawImage, drawLine, drawPolygon
 
+from . import doors as door_mod
 from . import level as level_mod
 from . import rng as rng_mod
 from . import motes as motes_mod
@@ -37,22 +38,6 @@ SHADOW_OPACITY = int(os.environ.get('LUMEN_SHADOW_OPACITY', '100'))
 NO_LANTERN = bool(os.environ.get('LUMEN_NO_LANTERN'))
 # Test hook: leave the wards out of the frame, to price them.
 NO_WARDS = bool(os.environ.get('LUMEN_NO_WARDS'))
-
-
-class Ward:
-    """The light sealing one doorway while a fight is on.
-
-    An object rather than a tuple because `_static_light` caches the
-    visibility sweep it casts on the owner it is handed - the ward does not
-    move and neither do the walls, so the sweep is worth exactly one cast.
-    """
-
-    __slots__ = ('side', 'shape', 'edges')
-
-    def __init__(self, side):
-        self.side = side
-        self.shape = None
-        self.edges = None
 
 
 class Rift:
@@ -105,9 +90,7 @@ class World:
         self.door_lock = 0.0
         #: True while a fight has this room's doors sealed.
         self.warded = False
-        self.ward_t = 0.0
         #: side -> Ward, rebuilt with the room. They hold a cast sweep each.
-        self.wards = {}
         #: The one interactable object in a reward room, or None.
         self.fixture = None
         #: Set for one frame when the player has walked into the Ferryman.
@@ -308,9 +291,13 @@ class World:
         self._populate_room(room, first_time)
         self.cleared = room.cleared or not room.hostile
         self.warded = room.hostile and not room.cleared
-        # From zero either way, so a sealing room is seen to seal.
-        self.ward_t = 0.0
-        self.wards = {side: Ward(side) for side in self.level.doors}
+        # The doors carry the state now. A room you are sealed into shows
+        # its leaves already shut - the seal is a fact about the room, not an
+        # event you watch happen after arriving - and one you are free to
+        # leave shows them already withdrawn.
+        for door in self.level.door_objects.values():
+            door.snap(not self.warded)
+        self.level.refresh_occluders()
         if self.warded:
             audio.play('ward_seal', 0.7)
 
@@ -527,11 +514,33 @@ class World:
 
     def _check_doors(self):
         """Has the player stepped into a doorway that will answer?"""
-        if self.door_lock > 0.0 or self.warded or self.pending_door:
+        if self.door_lock > 0.0 or self.pending_door:
             return
         side = self.level.door_at(self.player.x, self.player.y)
-        if side is not None and side in self.room.doors:
-            self.pending_door = side
+        if side is None or side not in self.room.doors:
+            return
+        # The leaves decide, not the room. A door still sliding open is a
+        # door you are standing in, and letting the player through one before
+        # it has finished is the thing that would give the game away as a
+        # state machine rather than a place.
+        door = self.level.door_objects.get(side)
+        if door is not None and not door.passable:
+            return
+        self.pending_door = side
+
+    def _update_doors(self, dt):
+        """Advance every leaf, and re-derive the light's occluders if one
+        crossed between blocking and clear.
+
+        Only on the crossing: the arrays the lighting reads are rebuilt from
+        the chamber's own, and doing that every frame would be a concatenate
+        per frame for no change in the result.
+        """
+        if self.level is None:
+            return
+        if any(door.update(dt) for door in
+               list(self.level.door_objects.values())):
+            self.level.refresh_occluders()
 
     def break_wards(self):
         """The last thing in the room is dead; the doors give."""
@@ -540,7 +549,10 @@ class World:
         self.warded = False
         self.room.cleared = True
         self.cleared = True
+        for door in self.level.door_objects.values():
+            door.open()
         audio.play('ward_break', 0.8)
+        audio.play('door_open', 0.6)
         self.effects.add_shake(3.4)
         # Cold, like the rift and unlike the lantern. The ward is the
         # vault's light, not yours, and the two should never be confused.
@@ -1002,10 +1014,7 @@ class World:
         self._touch_fixture(sdt)
         if self.door_lock > 0.0:
             self.door_lock = max(0.0, self.door_lock - dt)
-        if self.warded:
-            self.ward_t = min(1.0, self.ward_t + dt * self.WARD_SEAL_RATE)
-        elif self.ward_t > 0.0:
-            self.ward_t = max(0.0, self.ward_t - dt * self.WARD_BREAK_RATE)
+        self._update_doors(dt)
         self._check_doors()
 
     # How far a chained arc will reach for its next target, and what share of
@@ -1582,7 +1591,7 @@ class World:
         gpu.scene_coverage(True)
         self._draw_braziers(ox, oy)
         self._draw_fixture(ox, oy)
-        self._draw_wards(ox, oy)
+        self._draw_doors(ox, oy)
 
         for e in self.enemies:
             if not e.alive:
@@ -1820,7 +1829,7 @@ class World:
         self._mark('braziers+wards')
         self._draw_braziers(ox, oy)
         self._draw_fixture(ox, oy)
-        self._draw_wards(ox, oy)
+        self._draw_doors(ox, oy)
         # Pools, and then keeners' tethers, both under the bodies: they are
         # things on the floor and things between things, and either drawn
         # over a silhouette reads as being in front of it.
@@ -2429,67 +2438,34 @@ class World:
     WARD_REACH = 190.0
     WARD_HEIGHT = 26.0
 
-    #: How fast a ward rises and how fast it goes. Sealing is quicker than
-    #: breaking because it is an interruption and should feel like one; the
-    #: break is a release and gets to be seen.
-    WARD_SEAL_RATE = 3.4
-    WARD_BREAK_RATE = 2.2
+    def _draw_doors(self, ox, oy):
+        """Every doorway in the room: frame, leaves, and the seal on them.
 
-    def ward_strength(self):
-        """0 while the doors are open, 1 while they are sealed."""
-        return ease_out_cubic(clamp(self.ward_t, 0.0, 1.0))
-
-    def _draw_wards(self, ox, oy):
-        """A plane of light filling each doorway.
-
-        Drawn bright enough to be read across an unlit room on purpose. Being
-        sealed in is information the player needs *before* the fight starts,
-        and in a game where you carry the only light the only way to deliver
-        it is to make the thing itself luminous.
+        Drawn after the walls and before the bodies, so a leaf occludes the
+        floor and the threshold but never the player standing in it.
         """
-        k = 0.0 if NO_WARDS else self.ward_strength()
-        if k <= 0.01 or self.level is None:
+        if self.level is None or NO_WARDS:
             return
-        wobble = self.run_time * 2.4
-        for side in self.level.doors:
-            x0, y0, x1, y1 = self.level.door_zone(side)
-            sx0, sy0 = x0 - ox, y0 - oy
-            sx1, sy1 = x1 - ox, y1 - oy
-            if sx1 < -60 or sy1 < -60 or sx0 > self.view_w + 60 \
-                    or sy0 > self.view_h + 60:
+        for door in self.level.door_objects.values():
+            sx, sy = door.cx - ox, door.cy - oy
+            if (sx < -110 or sy < -110 or sx > self.view_w + 110
+                    or sy > self.view_h + 110):
                 continue
-            cx, cy = (sx0 + sx1) * 0.5, (sy0 + sy1) * 0.5
-            art.draw_glow(art.rgb_tuple(self.WARD_COLOR), cx, cy,
-                          86 * k, int(30 * k), power=2.0)
+            door_mod.draw_frame(door, ox, oy)
+            door_mod.draw_leaves(door, ox, oy, self.run_time,
+                                 self._door_lit(door))
 
-            # Bars across the short axis of the opening, so the plane reads
-            # as something stretched over the gap rather than a smear of
-            # colour in it. They rise into place as the ward seals.
-            wide = (sx1 - sx0) > (sy1 - sy0)
-            span = (sx1 - sx0) if wide else (sy1 - sy0)
-            bars = 7
-            for i in range(bars):
-                f = (i + 0.5) / bars
-                # Each bar arrives a beat after the one before it.
-                a = clamp((k - f * 0.25) / 0.75, 0.0, 1.0)
-                if a <= 0.0:
-                    continue
-                shimmer = 0.68 + 0.32 * math.sin(wobble + i * 0.9)
-                op = int(58 * a * shimmer)
-                if op <= 0:
-                    continue
-                if wide:
-                    bx = sx0 + span * f
-                    drawPolygon(bx - 3, sy0, bx + 3, sy0,
-                                bx + 3, sy1, bx - 3, sy1,
-                                fill=self.WARD_COLOR, opacity=op)
-                else:
-                    by = sy0 + span * f
-                    drawPolygon(sx0, by - 3, sx1, by - 3,
-                                sx1, by + 3, sx0, by + 3,
-                                fill=self.WARD_COLOR, opacity=op)
-            drawPolygon(sx0, sy0, sx1, sy0, sx1, sy1, sx0, sy1,
-                        fill=self.WARD_COLOR, opacity=int(16 * k))
+    def _door_lit(self, door):
+        """Is the player's light reaching this doorway?
+
+        Cheap, and deliberately generous: a door half in the light should
+        draw as a lit door rather than flicker between two treatments as the
+        player edges around it.
+        """
+        dx = door.cx - self.player.x
+        dy = door.cy - self.player.y
+        reach = self.light_radius + 60.0
+        return (dx * dx + dy * dy) <= reach * reach
 
     def _draw_fixture(self, ox, oy):
         if self.fixture is not None:
@@ -2523,24 +2499,23 @@ class World:
 
     def _draw_ward_lights(self, ox, oy):
         """What the wards throw onto the stone around them."""
-        k = 0.0 if NO_WARDS else self.ward_strength()
-        if k <= 0.01 or self.level is None:
+        if NO_WARDS or self.level is None:
             return
-        for side in self.level.doors:
-            cx, cy = self.level.door_center(side)
-            sx, sy = cx - ox, cy - oy
+        for door in self.level.door_objects.values():
+            k = (1.0 - door.open_t) + door.seam
+            if k <= 0.02:
+                continue
+            sx, sy = door.cx - ox, door.cy - oy
             if (sx < -self.WARD_REACH or sy < -self.WARD_REACH
                     or sx > self.view_w + self.WARD_REACH
                     or sy > self.view_h + self.WARD_REACH):
                 continue
-            ward = self.wards.get(side)
-            if ward is None:
-                ward = self.wards[side] = Ward(side)
-            breathe = 0.82 + 0.18 * math.sin(self.run_time * 3.4 + cx * 0.01)
-            self._static_light(ward, cx, cy, ox, oy,
+            breathe = 0.82 + 0.18 * math.sin(self.run_time * 3.4 + door.phase)
+            self._static_light(door, door.cx, door.cy, ox, oy,
                                self.WARD_REACH, self.WARD_COLOR,
-                               46 * k * breathe, power=2.0,
-                               spread=k * breathe, height=self.WARD_HEIGHT)
+                               24 * min(k, 1.4) * breathe, power=2.4,
+                               spread=min(k, 1.0) * breathe,
+                               height=self.WARD_HEIGHT)
 
     def _draw_braziers(self, ox, oy):
         for b in self.level.braziers:

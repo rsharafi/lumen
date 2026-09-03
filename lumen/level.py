@@ -123,6 +123,13 @@ class Level:
         self.player_start = (self.width * 0.5, self.height * 0.5)
         #: side -> (col0, col1, row0, row1), the tiles of the opening.
         self.doors = {}
+        #: `doors.Door` objects, one per opening. Built after the geometry,
+        #: because a door needs the world rectangle of its span.
+        self.door_objects = {}
+        #: The chamber's own edges, before any door's are folded in. Kept so
+        #: the arrays the lighting reads can be rebuilt from a clean base
+        #: every time a leaf moves - see `doors.collect_segments`.
+        self.base_segments = None
         #: The floorplan seed this chamber was baked under; `rebake` needs it
         #: to reproduce the same stone after a render-scale change.
         self.bake_room = 0
@@ -151,9 +158,11 @@ class Level:
 
     def collide_circle(self, x, y, radius):
         """Push a disc out of every rectangle it overlaps. Returns (x, y)."""
+        solid = self.rects if not self.door_objects else \
+            self.rects + self.door_rects()
         for _ in range(2):
             moved = False
-            for rect in self.rects:
+            for rect in solid:
                 qx = clamp(x, rect.x, rect.right)
                 qy = clamp(y, rect.y, rect.bottom)
                 dx = x - qx
@@ -187,7 +196,8 @@ class Level:
         return x, y
 
     def blocked(self, x, y, radius):
-        for rect in self.rects:
+        for rect in self.rects if not self.door_objects else \
+                self.rects + self.door_rects():
             qx = clamp(x, rect.x, rect.right)
             qy = clamp(y, rect.y, rect.bottom)
             dx = x - qx
@@ -385,6 +395,8 @@ class Level:
         self.seg_by = np.array(by, dtype=np.float64)
         self.corners = np.array(corners, dtype=np.float64) if corners else np.zeros((0, 2))
         self.segments = list(zip(ax, ay, bx, by))
+        self.base_segments = (self.seg_ax, self.seg_ay, self.seg_bx,
+                              self.seg_by, self.corners, self.segments)
 
     def open_tiles(self, margin_tiles=1):
         out = []
@@ -396,6 +408,33 @@ class Level:
 
     def tile_center(self, col, row):
         return (col + 0.5) * TILE, (row + 0.5) * TILE
+
+    def build_doors(self):
+        """Make a `Door` for each carved opening.
+
+        Late, and separately from `_carve_doors`, because a door is a world
+        rectangle and the carve works in tiles - and because `doors` imports
+        `Rect` from here, so the import has to go the other way.
+        """
+        from . import doors as door_mod
+        self.door_objects = {}
+        for side in self.doors:
+            x0, y0, x1, y1 = self.door_zone(side)
+            self.door_objects[side] = door_mod.Door(side, x0, y0, x1, y1)
+        return self.door_objects
+
+    def door_rects(self):
+        """Collision rectangles for every leaf currently in an opening."""
+        out = []
+        for door in self.door_objects.values():
+            out.extend(door.rects())
+        return out
+
+    def refresh_occluders(self):
+        """Rebuild the arrays the lighting reads from the doors' current state."""
+        from . import doors as door_mod
+        door_mod.collect_segments(
+            self, [d for d in self.door_objects.values() if d.blocking])
 
     # -------------------------------------------------------------- doors --
     def door_center(self, side):
@@ -977,6 +1016,7 @@ def generate(depth, rng, boss=False, doors=(), size='medium', seed=0,
     level._carve_doors(doors)
     level._merge_rects()
     level._build_segments()
+    level.build_doors()
 
     # Player starts on the most open tile near the centre. Only the room a
     # floor begins in actually uses this; every other room is entered

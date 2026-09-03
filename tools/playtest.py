@@ -48,6 +48,8 @@ parser.add_argument('--stop-at', default='',
                     help='stop as soon as the game reaches this state')
 parser.add_argument('--settle', type=int, default=0,
                     help='extra frames to run after --stop-at matches')
+parser.add_argument('--open-doors', type=int, default=0,
+                    help='break the room seal on this frame, to watch it')
 parser.add_argument('--embers', type=int, default=0,
                     help='seed the purse, so the shelf can be read')
 parser.add_argument('--room', default='',
@@ -572,6 +574,11 @@ def onStep(app):
         if not STATE['jumped']:
             sys.stderr.write(
                 f'[playtest] no {ARGS.room} room on this floor\n')
+    if ARGS.open_doors and n == ARGS.open_doors:
+        world = GAME.world
+        if world is not None and world.warded:
+            world.break_wards()
+            sys.stderr.write(f'[playtest] seal broken at frame {n}\n')
     if ARGS.auto:
         autopilot(app)
     for action in TIMELINE.get(n, ()):

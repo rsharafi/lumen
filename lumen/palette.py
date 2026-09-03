@@ -79,6 +79,13 @@ WALL_FACE = _c(0x141A28)
 WALL_TOP = _c(0x232C41)
 WALL_EDGE = _c(0x39496B)
 WALL_LIT = _c(0x6E7FA8)
+# The doors. Worked metal rather than the masonry around them, so a leaf
+# reads as a made thing set into a wall and not as more wall - it is a shade
+# warmer and a shade lighter than WALL_TOP, which is the smallest difference
+# that still separates them at a glance in an unlit room.
+WALL_DOOR = _c(0x2E3346)
+WALL_DOOR_LIT = _c(0x7C87A6)
+WALL_DEEP = _c(0x0E121C)
 
 # -- the lantern ------------------------------------------------------------
 LIGHT_CORE = _c(0xFFE9BC)
