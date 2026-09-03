@@ -105,6 +105,9 @@ SHAKE_DECAY = 7.0
 HITSTOP_MAX = 0.09
 
 # ------------------------------------------------------------ progression ---
-FLOORS_PER_RUN = 12
-BOSS_FLOORS = (6, 12)
+# Twenty floors in three acts, each closing on a boss. Six, seven and seven:
+# acts lengthen as they go, because a later act has more to show before its
+# boss than the one that was still teaching you to walk.
+FLOORS_PER_RUN = 20
+BOSS_FLOORS = (6, 13, 20)
 UPGRADE_CHOICES = 3

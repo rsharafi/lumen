@@ -41,6 +41,23 @@ class PickupField:
     def __init__(self):
         self.items = []
 
+    def collect_all(self, on_collect):
+        """Hand everything still on the floor to the player, and empty out.
+
+        Called when a room is left. Embers are light, and light follows the
+        one carrying it - so nothing is abandoned in a room behind you and
+        no room has to remember what was dropped in it. It is also simply
+        better to play: hoovering a cleared room for stragglers is a chore,
+        not a decision.
+        """
+        taken = 0
+        for item in self.items:
+            if item.alive:
+                on_collect(item)
+                taken += 1
+        self.items = []
+        return taken
+
     def clear(self):
         self.items.clear()
 

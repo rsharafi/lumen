@@ -23,7 +23,7 @@ import time
 from .draw import drawLabel, drawPolygon
 
 from . import (art, audio, draw, gpu, hud, palette, rng, runtime, save,
-               screens, upgrades, vigil)
+               screens, shop, upgrades, vigil)
 from .config import (BOSS_FLOORS, DESIGN_HEIGHT, FPS, FLOORS_PER_RUN, HEIGHT,
                      MAX_FPS,
                      UPGRADE_CHOICES, WIDTH)
@@ -35,6 +35,7 @@ HELP = 'help'
 PLAYING = 'playing'
 PAUSED = 'paused'
 DRAFT = 'draft'
+SHOP = 'shop'
 ENDED = 'ended'
 VIGIL = 'vigil'
 SETTINGS = 'settings'
@@ -83,6 +84,7 @@ class Game:
 
         self.fade = 1.0
         self.fade_target = 0.0
+        self.fade_speed = 1.0
         self._last_dt = 1.0 / FPS
         self.pending = None
         self.ending = False
@@ -165,6 +167,17 @@ class Game:
         bank = audio.bank()
         bank.set_enabled(self.sound_on and not os.environ.get('LUMEN_HEADLESS'))
         bank.build()
+        # Decode them here too, not on the first `play`. `load` bakes every
+        # take of every effect into a mixer sound - 163 of them, about half a
+        # second - and it used to happen lazily, which put all of it on
+        # whichever frame first made a noise. That is the same mistake as
+        # rasterising a sprite mid-frame, and it got worse when the bosses
+        # got their own half of the bank. Only when sound is actually on:
+        # headless runs and a player who starts muted should not pay to
+        # decode a bank nothing is going to play. Turning it back on later
+        # falls through to the lazy path in `play`, as it always did.
+        if bank.enabled:
+            bank.load()
 
         rng.fx.reseed(self.forced_seed if self.forced_seed is not None
                       else int(time.time() * 1000) % 2 ** 31)
@@ -172,6 +185,7 @@ class Game:
                                                 self.save)
         self.help_screen = screens.HelpScreen(self.width, self.height, rng.fx)
         self.draft_screen = screens.UpgradeScreen(self.width, self.height)
+        self.shop_screen = screens.ShopScreen(self.width, self.height)
         self.end_screen = screens.EndScreen(self.width, self.height, rng.fx)
         self.vigil_screen = screens.VigilScreen(self.width, self.height)
         self.settings_screen = screens.SettingsScreen(self.width, self.height)
@@ -225,6 +239,11 @@ class Game:
         self.height = int(design_h)
         draw.set_scale(self.scale)
         art.set_scale(self.scale)
+        # Fullscreen now covers the whole panel rather than stopping short of
+        # a notch, so the strip behind one is ours to draw into - the chamber
+        # should run right to the edge. What must not is the HUD's top row.
+        self.safe_top = runtime.safe_top_fraction() * self.height
+        hud.set_safe_top(self.safe_top)
 
     def _warm_cache(self):
         """Bake every screen-sized sprite up front, so none is built mid-frame.
@@ -266,7 +285,7 @@ class Game:
             level_mod.rebake(self.world.level)
         for screen in (self.title_screen, self.help_screen, self.draft_screen,
                        self.end_screen, self.vigil_screen,
-                       self.settings_screen):
+                       self.settings_screen, self.shop_screen):
             if screen is not None:
                 screen.resize(self.width, self.height)
         if self.world is not None:
@@ -457,6 +476,79 @@ class Game:
         self.state = ENDED
         audio.play('upgrade' if won else 'game_over', 0.8)
 
+    # ------------------------------------------------------------- shop --
+    def open_shop(self):
+        """Stand at the Ferryman's shelf."""
+        world = self.world
+        room = world.room
+        if room.payload is None:
+            room.payload = {
+                'slots': shop.stock(world.depth, self.stats, rng.world),
+                'rerolls': 0,
+            }
+        self.shop_screen.open(room.payload['slots'], world.embers,
+                              world.depth,
+                              shop.reroll_price(world.depth,
+                                                room.payload['rerolls']))
+        self.state = SHOP
+        audio.play('shop_open', 0.7)
+
+    def close_shop(self):
+        if self.state != SHOP:
+            return
+        self.state = PLAYING
+        # Stepping away from the shelf must not walk straight back onto it.
+        self.world.rearm_fixture()
+        audio.play('ui_back', 0.4)
+
+    def buy(self, index):
+        """Take one thing off the shelf, if the embers are there."""
+        world = self.world
+        slots = self.shop_screen.slots
+        if not (0 <= index < len(slots)):
+            return
+        slot = slots[index]
+        if slot.sold or world.embers < slot.price:
+            audio.play('shop_deny', 0.6)
+            return
+
+        world.embers -= slot.price
+        slot.sold = True
+        if slot.kind == shop.OFFERING:
+            upgrades.grant(self.stats, slot.upgrade)
+            world.player.refresh_from_stats()
+        elif slot.kind == shop.WEAPON:
+            carried = list(getattr(self.stats, 'weapons', None) or ['lance'])
+            if slot.weapon not in carried:
+                carried.append(slot.weapon)
+            self.stats.weapons = carried
+            world.player.refresh_from_stats()
+        elif slot.kind == shop.RESTORE:
+            world.player.add_fuel(world.player.fuel_max)
+            world.player.heal(self.stats.max_hp * 0.5)
+        elif slot.kind == shop.REDRAW:
+            self.stats.rerolls += 1
+        self.shop_screen.embers = world.embers
+        audio.play('shop_buy', 0.8)
+
+    def restock(self):
+        """Pay to see a different shelf."""
+        world = self.world
+        payload = world.room.payload
+        if self.state != SHOP or payload is None:
+            return
+        cost = shop.reroll_price(world.depth, payload['rerolls'])
+        if world.embers < cost:
+            audio.play('shop_deny', 0.6)
+            return
+        world.embers -= cost
+        payload['rerolls'] += 1
+        payload['slots'] = shop.stock(world.depth, self.stats, rng.world)
+        self.shop_screen.open(payload['slots'], world.embers, world.depth,
+                              shop.reroll_price(world.depth,
+                                                payload['rerolls']))
+        audio.play('shop_open', 0.6)
+
     def open_draft(self):
         choices, self._offer = self._offer, None
         if not choices:
@@ -628,10 +720,18 @@ class Game:
         audio.play('upgrade', 0.6)
         self.transition(self.next_floor)
 
-    def transition(self, action):
-        """Fade out, run `action`, fade back in."""
+    def transition(self, action, speed=1.0):
+        """Fade out, run `action`, fade back in.
+
+        `speed` scales the fade. A floor change earns its half second - it is
+        a place ending. A door does not: crossing a threshold eight times a
+        floor at that length would be a minute of black screen a run, so
+        doors go through at three times the rate and read as a step rather
+        than a scene.
+        """
         self.pending = action
         self.fade_target = 1.0
+        self.fade_speed = speed
 
     # -------------------------------------------------------------- update --
     def step(self, app, dt_arg=None):
@@ -706,7 +806,7 @@ class Game:
 
         # Screen fade / scene handoff.
         if self.fade_target > self.fade:
-            self.fade = min(1.0, self.fade + dt * 5.0)
+            self.fade = min(1.0, self.fade + dt * 5.0 * self.fade_speed)
             if self.fade >= 1.0 and self.pending is not None:
                 action, self.pending = self.pending, None
                 action()
@@ -715,11 +815,11 @@ class Game:
                 self._auto_settle(app)
                 self.fade_target = 0.0
         elif self.fade > 0.0:
-            self.fade = max(0.0, self.fade - dt * 3.2)
+            self.fade = max(0.0, self.fade - dt * 3.2 * self.fade_speed)
         elif self.state == VIGIL:
             self.title_screen.update(dt)
             self.vigil_screen.update(dt)
-        elif self.state in (TITLE, PAUSED, DRAFT):
+        elif self.state in (TITLE, PAUSED, DRAFT, SHOP):
             # Menus are calm enough to absorb the pause too, and a player who
             # never changes floor would otherwise never be re-measured.
             self._auto_settle(app)
@@ -743,6 +843,9 @@ class Game:
             self._hover(self.settings_screen)
         elif self.state == HELP:
             self.help_screen.update(dt)
+        elif self.state == SHOP:
+            self.shop_screen.update(dt)
+            self._hover(self.shop_screen)
         elif self.state == DRAFT:
             self.draft_screen.update(dt)
             self._hover(self.draft_screen)
@@ -778,6 +881,22 @@ class Game:
                 self.transition(lambda: self.finish_run(won=True))
             else:
                 self.transition(self.open_draft)
+            return
+
+        # The Ferryman, walked into. Same division of labour as the door
+        # below: the world notices, the game owns the screen.
+        if world.pending_shop and self.pending is None:
+            world.pending_shop = False
+            self.open_shop()
+            return
+
+        # A doorway the player has walked into. The world only flags it; the
+        # crossing itself is a scene change and belongs here with the other
+        # scene changes.
+        if world.pending_door is not None and self.pending is None:
+            side = world.pending_door
+            world.pending_door = None
+            self.transition(lambda: world.use_door(side), speed=3.0)
 
     # -------------------------------------------------------------- input --
     def key_press(self, app, key):
@@ -802,6 +921,8 @@ class Game:
             self._play_key(key)
         elif self.state == PAUSED:
             self._pause_key(key)
+        elif self.state == SHOP:
+            self._shop_key(key)
         elif self.state == DRAFT:
             self._draft_key(key)
         elif self.state == ENDED:
@@ -826,6 +947,9 @@ class Game:
         elif self.state == SETTINGS:
             if self._click(self.settings_screen):
                 self.settings_apply(self.settings_screen.index)
+        elif self.state == SHOP:
+            if self._click(self.shop_screen):
+                self.buy(self.shop_screen.index)
         elif self.state == DRAFT:
             if self._click(self.draft_screen):
                 self.take_upgrade(self.draft_screen.index)
@@ -964,6 +1088,12 @@ class Game:
         elif key == 'q':
             audio.play('ui_back', 0.5)
             self.transition(lambda: self.finish_run(won=False))
+
+    def _shop_key(self, key):
+        if key == 'r':
+            self.restock()
+        elif key in ('escape', 'backspace', 'p'):
+            self.close_shop()
 
     def _draft_key(self, key):
         # Redrawing is an action rather than a choice of card, so it keeps its
@@ -1238,22 +1368,24 @@ class Game:
             self.help_screen.draw()
         elif self.state == ENDED:
             self.end_screen.draw()
-        elif self.state in (PLAYING, PAUSED, DRAFT):
+        elif self.state in (PLAYING, PAUSED, DRAFT, SHOP):
             self.world.draw(app)
-            if self.state != DRAFT:
-                # The draft takes over the screen entirely; pause keeps the
-                # vitals but drops the callouts, which would otherwise bleed
-                # through the panel.
+            if self.state not in (DRAFT, SHOP):
+                # The draft and the shelf take over the screen entirely;
+                # pause keeps the vitals but drops the callouts, which would
+                # otherwise bleed through the panel.
                 hud.draw(app, self.world, quiet=self.state == PAUSED)
             if self.state == PAUSED:
                 screens.draw_pause(self.width, self.height, self.t,
                                    self.sound_on)
             elif self.state == DRAFT:
                 self.draft_screen.draw(self.world)
+            elif self.state == SHOP:
+                self.shop_screen.draw(self.world)
             if self.state == PLAYING:
                 self._draw_cursor()
 
-        if self.state in (TITLE, HELP, ENDED, DRAFT, PAUSED, VIGIL,
+        if self.state in (TITLE, HELP, ENDED, DRAFT, SHOP, PAUSED, VIGIL,
                           SETTINGS):
             self._draw_cursor(menu=True)
 

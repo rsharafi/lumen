@@ -50,6 +50,13 @@ parser.add_argument('--stop-at', default='',
                     help='stop as soon as the game reaches this state')
 parser.add_argument('--settle', type=int, default=0,
                     help='extra frames to run after --stop-at matches')
+parser.add_argument('--embers', type=int, default=0,
+                    help='seed the purse, so the shelf can be read')
+parser.add_argument('--room', default='',
+                    help='jump straight to a room of this kind, if the '
+                         'floor has one (cache, hearth, shrine, elite, ...)')
+parser.add_argument('--explore', action='store_true',
+                    help='clear every room rather than heading for the way down')
 parser.add_argument('--click-at', default='',
                     help='STATE:X:Y - click once at X,Y when STATE is reached')
 ARGS = parser.parse_args()
@@ -281,6 +288,155 @@ def _hold(app, key, want):
         held.discard(key)
 
 
+def click_row(app, which, index):
+    """Click row `index` of a screen, through its own hit rectangles.
+
+    Every menu in the game is the pointer's, so this is the only way to
+    choose on one - the harness has no keyboard path to fall back on and
+    should not grow one. Returns True if a row was actually hit; the
+    rectangles do not exist until the screen has drawn itself once, so an
+    early call is a miss rather than an error.
+    """
+    screen = {'title': GAME.title_screen,
+              'draft': GAME.draft_screen,
+              'shop': GAME.shop_screen,
+              'vigil': GAME.vigil_screen,
+              'settings': GAME.settings_screen}.get(which)
+    rects = getattr(screen, 'hit_rects', None) if screen else None
+    if not rects or not (0 <= index < len(rects)):
+        return False
+    x, y, rw, rh, _i = rects[index]
+    dx, dy = x + rw * 0.5, y + rh * 0.5
+    from lumen import runtime as _rt
+    k = _rt.pointer_scale() / GAME.scale
+    GAME.mouse = (dx, dy)
+    GAME.mouse_press(app, dx / k, dy / k, 0)
+    GAME.mouse_release(app, dx / k, dy / k, 0)
+    return True
+
+
+def _route_side(world, want):
+    """The door to take from this room to get nearer a room matching `want`.
+
+    A breadth-first search over the floor graph, not the tiles - the tile
+    pathing inside a room is `_bot_step`'s job and the two should not be
+    confused. Returns None when nothing matching is reachable.
+    """
+    from collections import deque
+    plan, room = world.plan, world.room
+    if plan is None or room is None:
+        return None
+    came = {room.id: (None, None)}
+    q = deque([room.id])
+    found = None
+    while q:
+        rid = q.popleft()
+        here = plan.rooms[rid]
+        if rid != room.id and want(here):
+            found = rid
+            break
+        for side, other in here.doors.items():
+            if other not in came:
+                came[other] = (rid, side)
+                q.append(other)
+    if found is None:
+        return None
+    # Walk the chain back to the step taken out of the room we are in.
+    rid = found
+    while came[rid][0] is not None and came[rid][0] != room.id:
+        rid = came[rid][0]
+    return came[rid][1]
+
+
+def _floor_goal(world):
+    """Where the bot wants to be, as a world point in the current room.
+
+    Nothing to fight and nothing to take means it is time to leave, so this
+    resolves to a doorway - or, in the room with the way down in it, to the
+    way down.
+    """
+    from lumen import floorplan as fp
+    room = world.room
+    if room is None:
+        return None
+    if world.warded:
+        return None
+
+    side = None
+    if ARGS.explore:
+        # Everything else first. Standing on the rift ends the floor, so a
+        # bot that takes it the moment it sees it is not exploring, it is
+        # leaving through the first room that lets it.
+        #
+        # A door straight into somewhere new beats a route to somewhere new,
+        # and the difference is not cosmetic: routing alone let the bot walk
+        # A to B, decide the nearest unvisited room was back through A, walk
+        # back, and repeat - nineteen door crossings and two rooms seen in
+        # seven thousand frames. Taking an unvisited neighbour when there is
+        # one makes exploration monotonic.
+        for candidate, other in world.room.doors.items():
+            if (not world.plan.rooms[other].visited
+                    and candidate in world.level.doors):
+                side = candidate
+                break
+        if side is None:
+            side = _route_side(world, lambda r: not r.visited)
+        if side is None and world.rift is not None:
+            return (world.rift.x, world.rift.y)
+    elif world.rift is not None:
+        return (world.rift.x, world.rift.y)
+    if side is None:
+        side = _route_side(world, lambda r: r.kind == fp.DESCENT)
+    if side is None:
+        side = _route_side(world, lambda r: not r.visited)
+    if side is None or side not in world.level.doors:
+        return None
+    return world.level.door_center(side)
+
+
+def _bot_step(world, player, goal):
+    """A unit vector one tile downhill toward `goal`, or None if it is moot.
+
+    None means "walk straight at it": the goal is in this tile already, or
+    nothing open connects to it. Both are cases where the caller's own
+    straight line is as good an answer as any.
+    """
+    from lumen import flow as flow_mod
+    field = STATE.get('bot_flow')
+    if field is None or field.level is not world.level:
+        field = flow_mod.FlowField(world.level)
+        STATE['bot_flow'] = field
+        STATE['bot_goal'] = None
+    tile = (int(goal[0] // 64), int(goal[1] // 64))
+    if STATE.get('bot_goal') != tile:
+        STATE['bot_goal'] = tile
+        field.rebuild(goal[0], goal[1])
+    return field.direction_at(player.x, player.y)
+
+
+def jump_to_room(kind):
+    """Stand the player in the first room of `kind` on this floor.
+
+    Reward rooms are off the critical path by design, so a bot walking the
+    floor may not reach one for a thousand frames - which is a long way to
+    go to look at a shrine.
+    """
+    world = GAME.world
+    if world is None or world.plan is None:
+        return False
+    for room in world.plan.rooms.values():
+        if room.kind == kind:
+            world.enter_room(room)
+            if ARGS.embers:
+                world.embers = ARGS.embers
+            # A shop room is worth nothing to look at with the Ferryman
+            # still waiting to be walked into, so open the shelf too.
+            if kind == 'shop':
+                GAME.open_shop()
+            return True
+    return False
+
+
 def autopilot(app):
     """A crude bot: aim at the nearest threat, keep away from it, and take
     every prompt. Enough to drive a whole run end to end for testing."""
@@ -296,10 +452,30 @@ def autopilot(app):
             GAME.key_press(app, 'enter')
             GAME.key_release(app, 'enter')
         return
+    if state == app_mod.SHOP:
+        # Buy whatever is affordable, cheapest first, then leave. A bot that
+        # bought nothing would never exercise the purchase paths, and one
+        # that never left would end the run standing at a shelf.
+        if n % 14 == 0:
+            slots = GAME.shop_screen.slots
+            embers = GAME.world.embers
+            can = [i for i, sl in enumerate(slots)
+                   if not sl.sold and sl.price <= embers]
+            if can:
+                can.sort(key=lambda i: slots[i].price)
+                STATE['bought'] = STATE.get('bought', 0) + 1
+                click_row(app, 'shop', can[0])
+            else:
+                GAME.key_press(app, 'escape')
+                GAME.key_release(app, 'escape')
+        return
     if state == app_mod.DRAFT:
+        # The offering is chosen with the pointer and nothing else - pressing
+        # enter at it does nothing, which is how the bot came to sit on floor
+        # one forever. Give it a frame to lay its cards out, then take one.
         if n % 18 == 0:
-            GAME.key_press(app, 'enter')
-            GAME.key_release(app, 'enter')
+            STATE['drafts'] = STATE.get('drafts', 0) + 1
+            click_row(app, 'draft', STATE['drafts'] % 3)
         return
     if state != app_mod.PLAYING:
         return
@@ -310,6 +486,9 @@ def autopilot(app):
     if world.depth not in STATE['floors']:
         STATE['floors'].add(world.depth)
         STATE.setdefault('floor_frames', []).append((world.depth, STATE['n']))
+    if world.rooms_entered != STATE.get('_last_entered'):
+        STATE['_last_entered'] = world.rooms_entered
+        STATE['rooms_entered'] = STATE.get('rooms_entered', 0) + 1
     player = world.player
     cam = world.camera
 
@@ -338,8 +517,7 @@ def autopilot(app):
             goal = (target.x, target.y)
     else:
         GAME.mouse_down = False
-        if world.rift is not None:
-            goal = (world.rift.x, world.rift.y)
+        goal = _floor_goal(world)
 
     if goal is None:
         goal = (player.x, player.y)
@@ -352,12 +530,27 @@ def autopilot(app):
                      * (0.5 if not b.lit else 1.0))
         goal = (best_b.x, best_b.y)
 
-    # The rift always wins once the room is clear.
-    if world.rift is not None and target is None:
-        goal = (world.rift.x, world.rift.y)
+    # Leaving always wins once the room is clear - the way down if this is
+    # the room that has one, the right doorway otherwise.
+    if target is None:
+        onward = _floor_goal(world)
+        if onward is not None:
+            goal = onward
 
-    dx = goal[0] - player.x
-    dy = goal[1] - player.y
+    # Walk there, around the stone rather than into it. Steering straight at
+    # the goal is what left the bot pressed against a pillar for nineteen
+    # thousand frames with the rift open on the far side of it: the world's
+    # own flow field is built toward the *player*, so it cannot route the
+    # player anywhere. This is a second field, owned by the harness and
+    # aimed at wherever the bot currently wants to be. A rebuild is a BFS
+    # over one chamber - well under a millisecond - and it only happens when
+    # the goal crosses a tile.
+    step = _bot_step(world, player, goal)
+    if step is None:
+        dx = goal[0] - player.x
+        dy = goal[1] - player.y
+    else:
+        dx, dy = step[0] * 64.0, step[1] * 64.0
     _hold(app, 'd', dx > 8)
     _hold(app, 'a', dx < -8)
     _hold(app, 's', dy > 8)
@@ -379,6 +572,11 @@ def onAppStart(app):
 
 def onStep(app):
     n = STATE['n']
+    if ARGS.room and n == 8 and not STATE.get('jumped'):
+        STATE['jumped'] = jump_to_room(ARGS.room)
+        if not STATE['jumped']:
+            sys.stderr.write(
+                f'[playtest] no {ARGS.room} room on this floor\n')
     if ARGS.auto:
         autopilot(app)
     for action in TIMELINE.get(n, ()):
@@ -403,20 +601,7 @@ def onStep(app):
         elif kind == 'cycle':
             GAME.cycle_display(GAME._app_ref)
         elif kind == 'row':
-            which, index = action[1], action[2]
-            screen = {'title': GAME.title_screen,
-                      'draft': GAME.draft_screen,
-                      'vigil': GAME.vigil_screen,
-                      'settings': GAME.settings_screen}.get(which)
-            rects = getattr(screen, 'hit_rects', None) if screen else None
-            if rects and 0 <= index < len(rects):
-                x, y, rw, rh, _i = rects[index]
-                dx, dy = x + rw * 0.5, y + rh * 0.5
-                from lumen import runtime as _rt
-                k = _rt.pointer_scale() / GAME.scale
-                GAME.mouse = (dx, dy)
-                GAME.mouse_press(app, dx / k, dy / k, 0)
-                GAME.mouse_release(app, dx / k, dy / k, 0)
+            click_row(app, action[1], action[2])
         elif kind == 'braziers':
             world = getattr(GAME, 'world', None)
             lit = 0
@@ -483,6 +668,23 @@ def report(app):
         info.append(f'shots={getattr(world.player, "shots_fired", -1)}')
         info.append(f'hp={world.player.hp:.0f}')
         info.append(f'fuel={world.player.fuel:.0f}')
+        if world.plan is not None:
+            plan = world.plan
+            info.append(f'room={world.room_kind}')
+            info.append(f'rooms={sum(1 for r in plan.rooms.values() if r.visited)}'
+                        f'/{len(plan.rooms)}')
+            info.append(f'entered={STATE.get("rooms_entered", 0)}')
+            info.append(f'embers={world.embers}')
+            info.append(f'bought={STATE.get("bought", 0)}')
+        if world.builder is not None:
+            # How often a doorway had to be answered by building the room
+            # behind it there and then. Every one of these is a stall the
+            # player sees, so it is the number the bake-ahead exists to keep
+            # at zero.
+            info.append(f'bake_waits={world.builder.waits}'
+                        f'@{world.builder.waited_ms:.0f}ms')
+            info.append(f'held={len(world.builder._built)}'
+                        f'/built{world.builder.built_count}')
     if draws:
         info.append(f'draw_med={statistics.median(draws):.2f}ms')
         info.append(f'draw_p95={sorted(draws)[int(len(draws) * 0.95)]:.2f}ms')
@@ -511,6 +713,20 @@ def report(app):
     if STATE['peak']:
         info.append('peak=' + ','.join(f'{k}:{v}' for k, v in
                                        sorted(STATE['peak'].items())))
+    try:
+        import resource
+        peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        # ru_maxrss is bytes on macOS and kilobytes on Linux. There is no
+        # portable flag for it; the platform is the flag.
+        div = 1024.0 * 1024.0 if sys.platform == 'darwin' else 1024.0
+        info.append(f'peak_rss={peak / div:.0f}MB')
+    except Exception:
+        pass
+    info.append(f'fade={GAME.fade:.2f}')
+    if world is not None and getattr(world, 'draw_marks', None):
+        parts = sorted(world.draw_marks.items(), key=lambda kv: -kv[1][0])
+        info.append('DRAW=' + ','.join(
+            f'{k}:{v[0] / max(1, v[1]):.2f}' for k, v in parts if k))
     if draws:
         worst = sorted(range(len(draws)), key=lambda i: -draws[i])[:4]
         info.append('slow_frames=' + ','.join(

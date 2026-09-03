@@ -74,6 +74,9 @@ _targets = {}
 _targets_size = None
 _target_name = None
 _viewport = (1, 1)
+# The real drawable, as the host measured it. `ctx.screen.size` is stale from
+# the moment the window is resized; see `set_viewport`.
+_screen = (1, 1)
 
 # One draw of a full-screen triangle pair, for the post passes.
 _SCREEN_QUAD = np.array([-1, -1, 0, 0, 3, -1, 2, 0, -1, 3, 0, 2], dtype='f4')
@@ -1035,7 +1038,13 @@ def _use(name):
     _target_name = name
     if name is None:
         _ctx.screen.use()
-        _viewport = _ctx.screen.size
+        # Deliberately *not* `_ctx.screen.size`, and not whatever viewport
+        # `use()` just restored from it - see `set_viewport`.
+        _viewport = _screen
+        try:
+            _ctx.screen.viewport = (0, 0, _screen[0], _screen[1])
+        except Exception:
+            pass
     else:
         tex, fbo = _targets[name]
         fbo.use()
@@ -1043,9 +1052,22 @@ def _use(name):
 
 
 def set_viewport(size):
-    """Told by the host what the drawable is."""
-    global _viewport
-    _viewport = (max(1, int(size[0])), max(1, int(size[1])))
+    """Told by the host what the drawable is - and the only word for it.
+
+    moderngl reads the default framebuffer's size once, when the context is
+    created, and never revises it. `ctx.screen` therefore goes on describing
+    the window the context was born in: 2560x1440 for a 1280x720 window that
+    has since gone fullscreen into a 3600x2338 one.
+
+    Believing it meant `screen.use()` restored that stale viewport on every
+    frame, so the game drew into a 2560x1440 corner of a 3600x2338
+    framebuffer and never touched the rest. OpenGL's origin is bottom-left,
+    which is why the part it never reached showed up as a band across the
+    *top* of the screen.
+    """
+    global _viewport, _screen
+    _screen = (max(1, int(size[0])), max(1, int(size[1])))
+    _viewport = _screen
 
 
 def begin_frame(background):
@@ -1095,8 +1117,8 @@ def read_frame():
         return None
     import pygame
     flush()
-    w, h = _ctx.screen.size
-    raw = _ctx.screen.read(components=3, alignment=1)
+    w, h = _screen
+    raw = _ctx.screen.read(viewport=(0, 0, w, h), components=3, alignment=1)
     surf = pygame.image.frombuffer(raw, (w, h), 'RGB')
     return pygame.transform.flip(surf, False, True)
 

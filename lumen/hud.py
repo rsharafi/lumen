@@ -14,6 +14,19 @@ from .mathx import clamp, ease_out_cubic, pulse
 
 PAD = 22
 
+# How far down the top row has to start to clear the display's notch, in
+# design units. Set from `Game._adopt_size` alongside the drawing scale,
+# because it depends on both the panel and how the window is filling it; zero
+# in a window, and zero on any screen without one. Only the three things that
+# hang off the top of the screen use it - the world underneath is supposed to
+# run right to the edge, notch and all.
+_safe_top = 0.0
+
+
+def set_safe_top(units):
+    global _safe_top
+    _safe_top = max(0.0, float(units))
+
 def draw_text(message, x, y, role, size, color, align='left', opacity=100):
     """Blit baked HUD text; shares the cache in `art`."""
     art.draw_label_sprite(message, x, y, role, size, color, align=align,
@@ -50,7 +63,11 @@ def draw(app, world, quiet=False):
     _draw_vitals(player, stats, h)
     _draw_weapon(player, w, h)
     _draw_run_info(world, w)
-    _draw_minimap(world, w)
+    # The floor map replaced the chamber map. A room is close to a screenful
+    # now, so a plan of the one you are standing in tells you what you can
+    # already see; what you cannot see is the floor, and that is what the
+    # corner is worth spending on.
+    _draw_floor_map(world, w)
     if world.boss_ref is not None and world.boss_ref.alive:
         _draw_boss_bar(world, w)
     if quiet:
@@ -148,7 +165,7 @@ def _draw_weapon(player, view_w, view_h):
 
 def _draw_run_info(world, view_w):
     x = PAD
-    y = PAD
+    y = PAD + _safe_top
     label = (world.boss_name if world.is_boss
              else f'FLOOR {world.depth:02d}')
     draw_text(label, x, y + 10, 'display', 19, (255, 178, 84), align='left')
@@ -176,7 +193,7 @@ def _draw_boss_bar(world, view_w):
     frac = clamp(b.hp / max(b.max_hp, 1e-6), 0.0, 1.0)
     w = view_w * 0.52
     x = (view_w - w) * 0.5
-    y = 30
+    y = 30 + _safe_top
     _bar(x, y, w, 13, frac, palette.BOSS_EYE, back_opacity=78)
     _frame(x - 1, y - 1, w + 2, 15, palette.UI_LINE, 76)
     # Where the fight actually changes, from the boss's own thresholds -
@@ -191,11 +208,202 @@ def _draw_boss_bar(world, view_w):
               fill=palette.UI_DIM, align='left', font=palette.FONT_UI)
 
 
+# --------------------------------------------------------------------------
+# The floor map
+# --------------------------------------------------------------------------
+#: How big a room reads on the map, and how far apart two of them sit. The
+#: gap between the two is the corridor a door is drawn along.
+CELL = 21.0
+PITCH = 30.0
+
+#: Rooms whose kind is known before you walk in, because they are *loud*.
+#: The rift hums, the Ferryman keeps a lantern, a hearth is a fire - all of
+#: them announce themselves through a wall. Everything else in this vault is
+#: silent and unlit, so a room you have only seen the door of stays a
+#: question mark. This is the map obeying the same rule as the game: you know
+#: what you have been shown, and the dark keeps the rest.
+LOUD = ('descent', 'shop', 'hearth', 'boss')
+
+
+def _seg(x0, y0, x1, y1, t, color, opacity):
+    """A thick line segment, as a quad. The map is drawn from these."""
+    dx, dy = x1 - x0, y1 - y0
+    length = math.hypot(dx, dy) or 1.0
+    nx, ny = -dy / length * t, dx / length * t
+    drawPolygon(x0 + nx, y0 + ny, x1 + nx, y1 + ny,
+                x1 - nx, y1 - ny, x0 - nx, y0 - ny,
+                fill=color, opacity=opacity)
+
+
+def _room_glyph(kind, cx, cy, color, opacity, r=5.4):
+    """A small mark saying what a room is for.
+
+    Every one of these has to be told apart from every other at about eleven
+    pixels, which rules out shading, and it rules out two of them being the
+    same shape at different sizes. So each is a different *silhouette*, and
+    where it can be, it is the silhouette of the thing itself - the hearth is
+    a flame, the shrine is the standing stone, the Ferryman is his lantern.
+    """
+    op = int(opacity)
+    if kind == 'descent':
+        drawPolygon(cx - r, cy - r * 0.7, cx + r, cy - r * 0.7, cx, cy + r,
+                    fill=color, opacity=op)
+    elif kind == 'entrance':
+        # An arch: two posts and a lintel. Deliberately not a triangle -
+        # a shrine is a triangle, and the two were indistinguishable.
+        _seg(cx - r * 0.75, cy - r * 0.2, cx - r * 0.75, cy + r, 1.3, color, op)
+        _seg(cx + r * 0.75, cy - r * 0.2, cx + r * 0.75, cy + r, 1.3, color, op)
+        _seg(cx - r * 0.75, cy - r * 0.5, cx + r * 0.75, cy - r * 0.5,
+             1.3, color, op)
+    elif kind == 'boss':
+        # A hollow diamond, so it reads apart from the elite's solid one.
+        for i in range(4):
+            a0 = i * math.tau / 4 - math.pi / 2
+            a1 = (i + 1) * math.tau / 4 - math.pi / 2
+            _seg(cx + math.cos(a0) * r * 1.25, cy + math.sin(a0) * r * 1.25,
+                 cx + math.cos(a1) * r * 1.25, cy + math.sin(a1) * r * 1.25,
+                 1.3, color, op)
+    elif kind == 'elite':
+        drawPolygon(cx, cy - r, cx + r * 0.78, cy, cx, cy + r, cx - r * 0.78,
+                    cy, fill=color, opacity=op)
+    elif kind == 'cache':
+        # A chest: wider at the base than the lid.
+        drawPolygon(cx - r * 0.55, cy - r * 0.6, cx + r * 0.55, cy - r * 0.6,
+                    cx + r * 0.85, cy + r * 0.6, cx - r * 0.85, cy + r * 0.6,
+                    fill=color, opacity=op)
+    elif kind == 'shop':
+        # The Ferryman's lantern: a ring, and hollow, so it cannot be
+        # mistaken for anything solid.
+        for i in range(8):
+            a0 = i * math.tau / 8
+            a1 = (i + 1) * math.tau / 8
+            _seg(cx + math.cos(a0) * r * 0.85, cy + math.sin(a0) * r * 0.85,
+                 cx + math.cos(a1) * r * 0.85, cy + math.sin(a1) * r * 0.85,
+                 1.2, color, op)
+    elif kind == 'shrine':
+        # The standing stone, as it is drawn in the room: narrow, upright,
+        # shouldered.
+        drawPolygon(cx - r * 0.42, cy + r, cx - r * 0.30, cy - r * 0.9,
+                    cx + r * 0.30, cy - r * 0.9, cx + r * 0.42, cy + r,
+                    fill=color, opacity=op)
+    elif kind == 'hearth':
+        # A flame: round at the base, drawn to a point.
+        drawPolygon(cx, cy - r * 1.15, cx + r * 0.62, cy - r * 0.1,
+                    cx + r * 0.42, cy + r * 0.85, cx - r * 0.42, cy + r * 0.85,
+                    cx - r * 0.62, cy - r * 0.1, fill=color, opacity=op)
+    elif kind == 'gauntlet':
+        for dx in (-0.62, 0.0, 0.62):
+            _seg(cx + dx * r, cy - r, cx + dx * r, cy + r, 1.1, color, op)
+    else:
+        # A fight, or something not yet known to be anything else.
+        drawPolygon(cx - 2.0, cy - 2.0, cx + 2.0, cy - 2.0,
+                    cx + 2.0, cy + 2.0, cx - 2.0, cy + 2.0,
+                    fill=color, opacity=op)
+
+
+def _draw_floor_map(world, view_w):
+    """The floor as rooms and doors, drawn from what the player has seen."""
+    plan = world.plan
+    if plan is None:
+        return
+    c0, r0, cols, rows = plan.extent()
+    width = (cols - 1) * PITCH + CELL
+    height = (rows - 1) * PITCH + CELL
+
+    pad = 10.0
+    box_w = max(width + pad * 2, 92.0)
+    box_h = max(height + pad * 2, 62.0)
+    bx = view_w - PAD - box_w
+    by = PAD + _safe_top
+    drawPolygon(bx, by, bx + box_w, by, bx + box_w, by + box_h, bx, by + box_h,
+                fill=palette.UI_PANEL, opacity=54)
+    _frame(bx, by, box_w, box_h, palette.UI_LINE, 56)
+
+    ox = bx + (box_w - width) * 0.5
+    oy = by + (box_h - height) * 0.5
+
+    def cell_xy(room):
+        return (ox + (room.col - c0) * PITCH + CELL * 0.5,
+                oy + (room.row - r0) * PITCH + CELL * 0.5)
+
+    # Doors first, so the rooms sit on top of them.
+    for room in plan.rooms.values():
+        if not room.seen:
+            continue
+        ax, ay = cell_xy(room)
+        for side, rid in room.doors.items():
+            other = plan.rooms[rid]
+            if not other.seen or other.id < room.id:
+                continue
+            bx2, by2 = cell_xy(other)
+            both = room.visited and other.visited
+            # Drawn across the short axis so a door reads as a link rather
+            # than a hairline: the cells are what carry the information and
+            # the corridors only have to say which of them touch.
+            horizontal = abs(bx2 - ax) > abs(by2 - ay)
+            t = 2.2
+            if horizontal:
+                drawPolygon(ax, ay - t, bx2, by2 - t, bx2, by2 + t, ax, ay + t,
+                            fill=palette.UI_LINE if both else palette.UI_FAINT,
+                            opacity=88 if both else 44)
+            else:
+                drawPolygon(ax - t, ay, bx2 - t, by2, bx2 + t, by2, ax + t, ay,
+                            fill=palette.UI_LINE if both else palette.UI_FAINT,
+                            opacity=88 if both else 44)
+
+    here = world.room
+    for room in plan.rooms.values():
+        if not room.seen:
+            continue
+        cx, cy = cell_xy(room)
+        half = CELL * 0.5
+        current = here is not None and room.id == here.id
+        known = room.visited or room.kind in LOUD
+
+        if room.visited:
+            fill = palette.UI_PANEL
+            op = 92
+        else:
+            fill = palette.UI_PANEL
+            op = 40
+        drawPolygon(cx - half, cy - half, cx + half, cy - half,
+                    cx + half, cy + half, cx - half, cy + half,
+                    fill=fill, opacity=op)
+
+        # An unfought room keeps its edge lit, so what is left to do on a
+        # floor can be counted at a glance.
+        pending = room.hostile and not room.cleared and room.visited
+        edge = (palette.UI_ACCENT if pending
+                else palette.UI_LINE if room.visited else palette.UI_FAINT)
+        _frame(cx - half, cy - half, CELL, CELL, edge,
+               70 if room.visited else 38)
+
+        if known:
+            colour = palette.UI_TEXT if room.visited else palette.UI_DIM
+            r = 5.4
+            if room.kind == 'descent':
+                colour = palette.PLAYER_TRIM
+            elif room.kind == 'boss':
+                colour = palette.UI_DANGER
+            elif pending:
+                colour = palette.UI_ACCENT
+            _room_glyph(room.kind, cx, cy, colour,
+                        92 if room.visited else 58, r=r)
+        else:
+            drawLabel('?', cx, cy, size=12, fill=palette.UI_DIM,
+                      opacity=62, font=palette.FONT_UI)
+
+        if current:
+            k = 1.6 + 1.4 * pulse(world.run_time, 1.3)
+            _frame(cx - half - k, cy - half - k, CELL + k * 2, CELL + k * 2,
+                   palette.PLAYER_BODY, 92)
+
+
 def _draw_minimap(world, view_w):
     lv = world.level
     size = 148
     x = view_w - PAD - size
-    y = PAD
+    y = PAD + _safe_top
     inset_x, inset_y, _mw, _mh, scale = lv.minimap_rect
     ox = x + inset_x
     oy = y + inset_y

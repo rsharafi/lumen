@@ -205,7 +205,27 @@ def detect_refresh_rate(default=60, low=50, high=240):
 # `display.flip()` and `display.get_surface()` raise "Display mode not set",
 # and `get_current_refresh_rate()` raises "No open window". Each gets a shim.
 
+# macOS puts a *desktop* fullscreen window inside the display's safe area. On
+# a notched MacBook that is 38 points short of the top of the panel, so the
+# game got an 1800x1130 window on an 1800x1169 screen and macOS filled the
+# difference with black - a band across the full width that was never ours to
+# draw into. The comments above, and the 3600x2338 measurements the rest of
+# this file is built on, all assume the whole panel; this is how we get it
+# back. It has to be set before the window is created - SDL reads it when it
+# picks the window's collection behaviour, and setting it afterwards does
+# nothing - which is why it lives at import time rather than in
+# `set_video_mode`.
+#
+# The trade is macOS's own fullscreen behaviour: no separate Space, and
+# Mission Control treats the window as an ordinary one. That is the usual
+# bargain for a game, and `LUMEN_MAC_SPACES=1` takes the black band back for
+# anyone who would rather have it.
+if sys.platform == 'darwin':
+    os.environ.setdefault('SDL_VIDEO_MAC_FULLSCREEN_SPACES',
+                          os.environ.get('LUMEN_MAC_SPACES', '0'))
+
 _win = None                 # pygame.Window, once we have taken over
+_fullscreen = [False]       # whether the live window is covering the display
 _renderer = None            # only used when rendering below the drawable size
 _texture = None
 _render_size = None         # the size cmu-graphics actually draws at
@@ -224,6 +244,88 @@ TITLE_TEXT = 'LUMEN'
 def own_window():
     """The pygame.Window the game owns, or None while the framework's is up."""
     return _win
+
+
+_safe_top = [None]
+
+
+def safe_area_top():
+    """The display's unusable top inset, in points.
+
+    Now that fullscreen covers the whole panel, the strip behind a MacBook's
+    camera housing is part of our framebuffer: real pixels either side of it,
+    and nothing at all behind it. Anything the HUD pins to the very top of the
+    screen has to sit below that, or the boss's name spends the fight inside
+    the notch.
+
+    macOS knows the number and SDL does not expose it, so this asks AppKit
+    directly through `ctypes` rather than taking a dependency on pyobjc for
+    one float. Anything that goes wrong - a different platform, an older
+    macOS, no screen - answers zero, which is the right answer everywhere
+    there is no notch anyway.
+    """
+    if _safe_top[0] is not None:
+        return _safe_top[0]
+    _safe_top[0] = 0.0
+    if sys.platform != 'darwin':
+        return 0.0
+    try:
+        import ctypes
+        import ctypes.util
+
+        class _Insets(ctypes.Structure):
+            _fields_ = [('top', ctypes.c_double), ('left', ctypes.c_double),
+                        ('bottom', ctypes.c_double), ('right', ctypes.c_double)]
+
+        ctypes.CDLL(ctypes.util.find_library('AppKit'))
+        objc = ctypes.CDLL(ctypes.util.find_library('objc'))
+        objc.objc_getClass.restype = ctypes.c_void_p
+        objc.objc_getClass.argtypes = [ctypes.c_char_p]
+        objc.sel_registerName.restype = ctypes.c_void_p
+        objc.sel_registerName.argtypes = [ctypes.c_char_p]
+
+        def send(obj, selector, restype):
+            fn = ctypes.CDLL(None).objc_msgSend
+            fn.restype = restype
+            fn.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+            return fn(ctypes.c_void_p(obj),
+                      ctypes.c_void_p(objc.sel_registerName(selector)))
+
+        screen = send(objc.objc_getClass(b'NSScreen'), b'mainScreen',
+                      ctypes.c_void_p)
+        if screen:
+            _safe_top[0] = float(send(screen, b'safeAreaInsets', _Insets).top)
+    except Exception:
+        pass
+    return _safe_top[0]
+
+
+def safe_top_fraction():
+    """The inset as a fraction of the window's height, where it applies.
+
+    A fraction rather than a count of pixels, because there are three
+    different pixels in play - points, the framebuffer, and the possibly
+    smaller buffer the game draws into below full sharpness - and only a
+    ratio is the same number in all of them. Multiplying it by the design
+    height gives the design units the HUD has to come down by, at any
+    setting.
+
+    Three ways it does not apply. In a window, because macOS has already
+    placed us below the menu bar. On a screen with no notch, because the
+    inset is zero. And under `LUMEN_MAC_SPACES=1`, because SDL is then
+    keeping the window clear of the strip itself - so the test is not "are we
+    fullscreen" but "is our window actually standing on the part of the panel
+    the notch is in", which is true only when it is as tall as the desktop.
+    """
+    if not _fullscreen[0] or _logical is None:
+        return 0.0
+    desktop = desktop_size()
+    if not desktop or _logical[1] < desktop[1] - 1:
+        return 0.0
+    height = float(_logical[1])
+    if height <= 0.0:
+        return 0.0
+    return max(0.0, min(0.5, safe_area_top() / height))
 
 
 def backing_scale():
@@ -464,6 +566,7 @@ def set_video_mode(app, size, fullscreen, quality=1.0):
         _win_high_dpi[0] = high_dpi
         _surface = None
 
+    _fullscreen[0] = bool(fullscreen)
     try:
         if fullscreen:
             _win.set_fullscreen(desktop=True)
@@ -523,7 +626,17 @@ def _attach_surface(pygame, render_scale, debug):
                 gpu.attach(ctx)
                 _renderer_for[0] = _win
             gpu.set_window(_win)
-            _render_size = tuple(ctx.screen.size)
+            # From the window, not from `ctx.screen`: moderngl fixes the
+            # default framebuffer's size when the context is made and never
+            # revises it, so after a resize - and after the window goes
+            # fullscreen, which is every time - it still describes the
+            # window the context was born in. The window's own size in
+            # points times the display's backing scale is the drawable, and
+            # it agrees with `glGetIntegerv(GL_VIEWPORT)` exactly.
+            factor = display_scale_factor() if _win_high_dpi[0] else 1.0
+            _render_size = (max(1, int(round(_win.size[0] * factor))),
+                            max(1, int(round(_win.size[1] * factor))))
+            _drawable_px[0] = _render_size
             gpu.set_viewport(_render_size)
             gpu.lighting_ready(_render_size)
             _surface = pygame.Surface((1, 1), 0, 32)
@@ -564,8 +677,16 @@ def _attach_surface(pygame, render_scale, debug):
                 # to honour, and a weaker machine may want it. SDL's logical
                 # size scales every draw call on the way out, so the game goes
                 # on working in whatever pixels it was told about.
-                _render_size = (max(320, int(dw * scale) & ~1),
-                                max(240, int(dh * scale) & ~1))
+                # Derived from the height rather than scaled independently:
+                # SDL's logical size preserves aspect ratio and letterboxes
+                # what is left over, so truncating both axes to even numbers
+                # on their own leaves a black line top and bottom - up to
+                # 2.3px on this panel at the lowest rung. Taking the width
+                # from the height keeps the two aspects as close as whole
+                # even pixels allow, which puts it under half a pixel.
+                rh = max(240, int(round(dh * scale)) & ~1)
+                rw = max(320, int(round(rh * dw / max(dh, 1))) & ~1)
+                _render_size = (rw, rh)
             if _render_size != (dw, dh):
                 # Only when it is actually doing something: a logical size
                 # equal to the framebuffer still makes `to_surface()` read a

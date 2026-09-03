@@ -345,6 +345,39 @@ class Player:
             self.alive = False
         return True
 
+    def scorch(self, amount, effects, particles, rng):
+        """Attrition: standing in something that is hurting you.
+
+        Not a blow, and deliberately not routed through `hurt`. A pool of rot
+        applies its damage sixty times a second, and every one of those would
+        otherwise burn a ward, reset the invulnerability window, shake the
+        camera and play the hurt sound - so a player who stepped in one would
+        be immune to everything else in the room while it drained them, which
+        is exactly backwards.
+
+        The ward turns aside blows. It does not keep your feet dry.
+        """
+        if not self.alive or amount <= 0.0:
+            return False
+        self.hp -= amount * self.stats.taken_mult
+        self.hurt_flash = max(self.hurt_flash, 0.35)
+        if rng.chance(6.0 * amount):
+            particles.burst(self.x, self.y, 2, palette.DAMAGE, rng,
+                            speed=(40, 140), life=(0.2, 0.5), size=(1.6, 3.2))
+        if self.hp <= 0.0:
+            if self.stats.revives > 0:
+                self.stats.revives -= 1
+                self.hp = 1.0
+                self.iframes = max(self.iframes, PLAYER_IFRAMES * 3.0)
+                effects.add_flash(1.0, palette.LIGHT_CORE, wash=True)
+                effects.add_text(self.x, self.y - 34, 'LAST LIGHT',
+                                 palette.LIGHT_CORE, 22, True)
+                audio.play('upgrade', 0.9)
+                return True
+            self.hp = 0.0
+            self.alive = False
+        return True
+
     def heal(self, amount):
         """Restore health. Healing only ever goes up.
 

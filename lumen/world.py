@@ -15,10 +15,11 @@ from .draw import drawImage, drawLine, drawPolygon
 from . import level as level_mod
 from . import rng as rng_mod
 from . import motes as motes_mod
-from . import (art, audio, boss, enemies as enemy_mod, flow as flow_mod,
-               level as level_mod, lighting, palette,
-               particles as particle_mod, pickups as pickup_mod,
-               projectiles as projectile_mod)
+from . import (art, audio, boss, enemies as enemy_mod, fixtures as fixture_mod,
+               flow as flow_mod, floorplan as plan_mod, level as level_mod,
+               lighting, palette, particles as particle_mod,
+               pickups as pickup_mod, projectiles as projectile_mod,
+               rooms as rooms_mod)
 from .config import (BOSS_FLOORS, BRAZIER_IGNITE_FUEL, BRAZIER_REFILL_RANGE,
                      BRAZIER_REFILL_RATE, FLOOR_ENTRY_FUEL,
                      LANTERN_FLARE_DAMAGE, LANTERN_FLARE_KNOCKBACK,
@@ -34,6 +35,24 @@ SHADOW_OPACITY = int(os.environ.get('LUMEN_SHADOW_OPACITY', '100'))
 
 # Test hook: render a frame with no lantern, to diff for light leaks.
 NO_LANTERN = bool(os.environ.get('LUMEN_NO_LANTERN'))
+# Test hook: leave the wards out of the frame, to price them.
+NO_WARDS = bool(os.environ.get('LUMEN_NO_WARDS'))
+
+
+class Ward:
+    """The light sealing one doorway while a fight is on.
+
+    An object rather than a tuple because `_static_light` caches the
+    visibility sweep it casts on the owner it is handed - the ward does not
+    move and neither do the walls, so the sweep is worth exactly one cast.
+    """
+
+    __slots__ = ('side', 'shape', 'edges')
+
+    def __init__(self, side):
+        self.side = side
+        self.shape = None
+        self.edges = None
 
 
 class Rift:
@@ -74,6 +93,31 @@ class World:
         self.cleared = False
         self.boss_ref = None
 
+        # A floor is a graph of rooms now; `plan` is that graph, `room` is
+        # the one being stood in, and `builder` owns the chambers behind
+        # them. `cleared` above is this room's, not the floor's.
+        self.plan = None
+        self.room = None
+        self.builder = None
+        #: Seconds left before a doorway will answer again. Arriving in a
+        #: room puts the player near the door they came through, and without
+        #: this a single step back is enough to bounce between two rooms.
+        self.door_lock = 0.0
+        #: True while a fight has this room's doors sealed.
+        self.warded = False
+        self.ward_t = 0.0
+        #: side -> Ward, rebuilt with the room. They hold a cast sweep each.
+        self.wards = {}
+        #: The one interactable object in a reward room, or None.
+        self.fixture = None
+        #: Set for one frame when the player has walked into the Ferryman.
+        #: Read by the game, which owns screens; the world owns rooms.
+        self.pending_shop = False
+        #: Set for one frame when the player has walked into a doorway; the
+        #: game reads it, plays the transition, and calls `enter_room`.
+        self.pending_door = None
+        self.rooms_entered = 0
+
         self.score = 0
         self.embers = 0
         self.kills = 0
@@ -93,10 +137,13 @@ class World:
         # long fight in one room should not end up drawing a hundred sprites
         # over the same square metre.
         self.decals = []
+        #: Standing rot: [x, y, radius, left, total, dps]. See `add_pool`.
+        self.pools = []
         self.hunt_timer = 0.0
         self.banner = ''
         self.banner_t = 0.0
 
+        self.draw_marks = {}
         self.motes = motes_mod.Motes(fxrng, view_w, view_h)
         self.overlay = art.screen_overlay(view_w, view_h, 0.94, 0.6, 0.05,
                                           0.1, 4)
@@ -144,16 +191,19 @@ class World:
 
     # ------------------------------------------------------------- floors --
     def prepare_floor(self, depth):
-        """Build the next chamber ahead of time, without entering it.
+        """Plan the next floor ahead of time, and build the room it starts in.
 
-        Generating and baking a floor costs about 120 ms - four to seven
-        frames - and it used to happen at the instant the player chose an
-        offering, which is the one moment they are watching for a response.
-        Done while the offering is still on screen the same work lands on a
-        static page nobody is looking at for motion, and the descent itself
-        is immediate.
+        Generating and baking a chamber costs 80-190 ms - several frames -
+        and it used to happen at the instant the player chose an offering,
+        which is the one moment they are watching for a response. Done while
+        the offering is still on screen the same work lands on a static page
+        nobody is looking at for motion, and the descent itself is immediate.
+
+        Only the entrance is built here. The rest of the floor is built by
+        the builder's own worker once the player is standing in it, which is
+        both cheaper and better timed - the floor's shape is not known to be
+        worth building until it is being walked.
         """
-        boss_floor = depth in BOSS_FLOORS
         # No clearing here: the offering is drawn over the room you just
         # cleared, so releasing its sprites while it is still on screen makes
         # the room vanish behind the cards. The old floor is dropped when the
@@ -162,77 +212,415 @@ class World:
         # Its own generator, seeded from the world's, so this can run off the
         # main thread without two streams interleaving.
         gen = rng_mod.Rng(self.rng.randint(0, 2 ** 31 - 1))
-        return (depth, boss_floor,
-                level_mod.generate(depth, gen, boss=boss_floor))
+        plan = plan_mod.generate(depth, gen)
+        builder = rooms_mod.RoomBuilder(plan, gen.randint(0, 2 ** 31 - 1))
+        first = plan.room(plan.entrance)
+        first.level = builder.level_for(first)
+        return (depth, depth in BOSS_FLOORS, plan, builder)
 
     def enter_floor(self, depth, prepared=None):
+        """Arrive on a new floor, in the room it starts in."""
         self.depth = depth
         self.is_boss = depth in BOSS_FLOORS
-        if prepared is not None and prepared[0] == depth:
-            self.level = prepared[2]
-        else:
-            self.level = level_mod.generate(depth, self.rng, boss=self.is_boss)
-        # Everything baked for any *other* chamber goes now, which is the one
-        # moment nothing is drawing it.
-        art.clear_level_cache(keep=self.level.art_keys)
 
-        self.player.x, self.player.y = self.level.player_start
-        self.player.vx = self.player.vy = 0.0
+        if self.builder is not None:
+            self.builder.release()
+
+        if prepared is not None and prepared[0] == depth:
+            _, _, self.plan, self.builder = prepared
+        else:
+            gen = rng_mod.Rng(self.rng.randint(0, 2 ** 31 - 1))
+            self.plan = plan_mod.generate(depth, gen)
+            self.builder = rooms_mod.RoomBuilder(
+                self.plan, gen.randint(0, 2 ** 31 - 1))
+
+        # Per-floor, as opposed to per-room: the things that should not reset
+        # every time the player walks through a door.
         self.player.on_floor_start()
         self.player.refresh_from_stats()
         self.player.add_fuel(FLOOR_ENTRY_FUEL)
+        self.floor_time = 0.0
+        self.rooms_entered = 0
 
+        # The floor announces itself; the *boss* announces itself when you
+        # open its door. Naming it on arrival gave the thing away in a
+        # threshold room two chambers early, which spends the arrival before
+        # the arrival happens.
+        self.set_banner(f'FLOOR {depth}', seconds=2.4)
+        self.enter_room(self.plan.room(self.plan.entrance), from_side=None)
+
+        # Once a floor, behind the fade. `unfreeze` first or the previous
+        # floor's chambers stay pinned for the rest of the run.
+        gc.unfreeze()
+        gc.collect()
+        gc.freeze()
+
+    # ------------------------------------------------------------- rooms --
+    def enter_room(self, room, from_side=None):
+        """Stand the player in `room`, building its chamber if need be.
+
+        `from_side` is the side of *this* room the player comes in through,
+        which is the opposite of the one they left by. None means they
+        arrived from above, on a rift, and start where the chamber says.
+        """
+        self.room = room
+        self.plan.current = room.id
+        if room.level is None:
+            room.level = self.builder.level_for(room)
+        self.level = room.level
+
+        if from_side is not None and from_side in self.level.doors:
+            self.player.x, self.player.y = self.level.door_entry(from_side)
+        else:
+            self.player.x, self.player.y = self.level.player_start
+        self.player.vx = self.player.vy = 0.0
+
+        # Everything in the old room belonged to it. Loose embers do not:
+        # they follow the light, so anything still on the floor comes with
+        # the player rather than being abandoned - which also spares the
+        # floor having to remember what was dropped where.
+        self.pickups.collect_all(self._collect)
         self.enemies = []
         self.projectiles.clear()
         self.particles.clear()
-        self.pickups.clear()
         self.effects.clear()
+        self.decals = []
+        self.pools = []
         self.rift = None
-        self.cleared = False
         self.hunt_timer = 0.0
         self.boss_ref = None
-        self.floor_time = 0.0
+        self.door_lock = 0.55
+        self.pending_door = None
 
         self.flow = flow_mod.FlowField(self.level)
         self.flow.rebuild(self.player.x, self.player.y)
 
         # Upgrades change the lantern's reach, so re-bake the sizes this
-        # floor can use while the screen is still behind the fade.
+        # room can use while the screen is still behind the fade.
         self.prewarm_lantern_sizes()
-
         self.camera.set_bounds(self.level.width, self.level.height)
         self.camera.snap_to(self.player.x, self.player.y)
 
-        self._populate()
-        # The chamber's baked images are long-lived; keep them out of the
-        # collector's way for the rest of the floor.
-        gc.collect()
-        gc.freeze()
-        self.set_banner(self.boss_name if self.is_boss else f'FLOOR {depth}',
-                        seconds=3.4 if self.is_boss else 2.4)
-        self.boss_intro = self.BOSS_INTRO_TIME if self.is_boss else 0.0
+        first_time = not room.visited
+        self.plan.reveal_from(room)
+        self.rooms_entered += 1
+
+        self._populate_room(room, first_time)
+        self.cleared = room.cleared or not room.hostile
+        self.warded = room.hostile and not room.cleared
+        # From zero either way, so a sealing room is seen to seal.
+        self.ward_t = 0.0
+        self.wards = {side: Ward(side) for side in self.level.doors}
+        if self.warded:
+            audio.play('ward_seal', 0.7)
+
+        self._place_fixture(room)
+
+        # What this room is, said once, on the way in. Only for the rooms
+        # where knowing changes what you do next - a combat room announces
+        # itself perfectly well by having things in it trying to kill you.
+        if first_time:
+            if room.kind == plan_mod.BOSS:
+                self.set_banner(self.boss_name, 3.4)
+            elif room.kind == plan_mod.GAUNTLET:
+                self.set_banner('A GAUNTLET', 2.6)
+            elif room.kind == plan_mod.ELITE:
+                self.set_banner('SOMETHING CARRIES ITS OWN LIGHT', 2.2)
+
+        # The descent is open the moment it is reached. A floor is a budget,
+        # not a checklist: what the player leaves behind is the price of
+        # going down early, and that only reads as a choice if the way down
+        # is never withheld.
+        if room.kind == plan_mod.DESCENT:
+            self._open_rift()
+
+        # Build what this room opens onto while the player is busy in it.
+        self.builder.prefetch([self.plan.room(rid)
+                               for rid in room.doors.values()])
+        self.builder.trim(room)
+
+        # No collection here. Freezing the heap out of the collector's way
+        # was right when a floor was one chamber entered once; a dozen room
+        # changes a floor makes it wrong twice over - it pins every chamber
+        # the builder has since dropped so nothing baked is ever freed, and
+        # the collect in front of it is a third of a second of stall on a
+        # heap this size. Both moved to `enter_floor`, which happens twenty
+        # times a run rather than two hundred.
+
+        self.boss_intro = self.BOSS_INTRO_TIME if self.boss_ref else 0.0
         self.boss_death = 0.0
         self.boss_corpse = None
+        if self.boss_ref is not None:
+            # The first beat of the arrival, before anything is visible: the
+            # room answering. The other two hang off `boss_intro` in
+            # `_tick_boss_intro`, and this is where that clock starts.
+            audio.play(f'{self.boss_ref.voice}_wake', 0.85)
 
-    def _populate(self):
+    def _place_fixture(self, room):
+        """Stand the room's offer in the middle of it, if it has one.
+
+        The middle, and not by the door, on purpose: a reward that pays out
+        as you cross the threshold makes the room a formality. Making the
+        player walk to it is what charges them the light and the seconds that
+        taking the branch was supposed to cost.
+        """
+        self.fixture = None
+        self.pending_shop = False
+        kind = room.kind
+        if kind not in (plan_mod.CACHE, plan_mod.HEARTH, plan_mod.SHRINE,
+                        plan_mod.SHOP):
+            return
+        cx, cy = self.level.width * 0.5, self.level.height * 0.5
+        if not self.level.is_open_at(cx, cy, 30.0):
+            spots = self.level.spawn_points
+            if spots:
+                cx, cy = spots[len(spots) // 2]
+
+        if room.payload is None:
+            # Decided on first entry rather than at plan time, so a shrine
+            # offers terms that make sense for the run walking in.
+            if kind == plan_mod.SHOP:
+                pass                      # the shelf is the game's business
+            elif kind == plan_mod.CACHE:
+                room.payload = fixture_mod.cache_value(self.depth, self.rng)
+            elif kind == plan_mod.SHRINE:
+                room.payload = fixture_mod.shrine_pact(
+                    self.depth, self.rng, self.embers)
+
+        if kind == plan_mod.SHOP:
+            self.fixture = fixture_mod.Fixture(
+                fixture_mod.FERRYMAN, cx, cy, label='THE FERRYMAN',
+                terms='he takes embers')
+            # A shop is not consumed by being visited; its payload is the
+            # shelf, and the game fills it the first time it is opened.
+            return
+        if kind == plan_mod.CACHE:
+            embers = room.payload[0]
+            self.fixture = fixture_mod.Fixture(
+                fixture_mod.CACHE, cx, cy, label='A CACHE',
+                terms=f'{embers} embers' + (
+                    ' and oil' if room.payload[1] else ''),
+                payload=room.payload)
+        elif kind == plan_mod.HEARTH:
+            self.fixture = fixture_mod.Fixture(
+                fixture_mod.HEARTH, cx, cy, label='A HEARTH',
+                terms='stand in it')
+            # A hearth is a room made of light. Everything in it is already
+            # burning before the player arrives.
+            for b in self.level.braziers:
+                b.lit = True
+                b.ignite_t = 1.0
+                b.edges = None
+        else:
+            name, terms, key = room.payload
+            self.fixture = fixture_mod.Fixture(
+                fixture_mod.SHRINE, cx, cy, label=name, terms=terms,
+                payload=key)
+        self.fixture.taken = room.spent
+        if room.spent:
+            self.fixture.take_t = 99.0
+
+    def _touch_fixture(self, dt):
+        """Tick the room's fixture, and answer it if the player is on it."""
+        fixture = self.fixture
+        if fixture is None:
+            return
+        fixture.update(dt)
+        if fixture.taken:
+            return
+        close = fixture.reach(self.player.x, self.player.y)
+        if not fixture.armed:
+            # Arms the moment the player is clear of it, never before.
+            fixture.armed = not close
+            return
+        if not close:
+            return
+        if fixture.kind == fixture_mod.FERRYMAN:
+            # He is not spent by being spoken to. The game opens the shelf
+            # and disarms the fixture on the way out; walking back into him
+            # opens it again, because a shop you can only enter once is a
+            # vending machine.
+            self.pending_shop = True
+            return
+        fixture.taken = True
+        self.room.spent = True
+        if fixture.kind == fixture_mod.CACHE:
+            self._take_cache(fixture)
+        elif fixture.kind == fixture_mod.HEARTH:
+            self._take_hearth(fixture)
+        else:
+            self._take_shrine(fixture)
+
+    def _take_cache(self, fixture):
+        embers, oil = fixture.payload
+        self.pickups.spawn(pickup_mod.EMBER, fixture.x, fixture.y, 1,
+                           self.fxrng, count=embers, speed=(90, 260))
+        if oil:
+            self.pickups.spawn(pickup_mod.OIL, fixture.x, fixture.y, 26,
+                               self.fxrng, count=2, speed=(70, 180))
+        self.set_banner('THE CACHE OPENS', 1.8)
+        audio.play('cache_open', 0.75)
+        self.effects.add_light(fixture.x, fixture.y, 260, 0.7,
+                               palette.LIGHT_WARM)
+
+    def _take_hearth(self, fixture):
+        player = self.player
+        player.add_fuel(player.fuel_max)
+        player.heal(player.stats.max_hp * 0.30)
+        self.set_banner('THE HEARTH TAKES YOU IN', 2.2)
+        audio.play('hearth', 0.8)
+        self.effects.add_light(fixture.x, fixture.y, 360, 1.1,
+                               palette.LIGHT_WARM)
+
+    def _take_shrine(self, fixture):
+        """Strike the bargain. Every one of these costs something real."""
+        player = self.player
+        key = fixture.payload
+        depth = self.depth
+        if key == 'fuel':
+            player.fuel = max(0.0, player.fuel - player.fuel_max / 3.0)
+            gained = int(30 + depth * 4.0)
+            self.pickups.spawn(pickup_mod.EMBER, fixture.x, fixture.y, 1,
+                               self.fxrng, count=gained, speed=(90, 260))
+        elif key == 'blood':
+            player.hp = max(1.0, player.hp - player.stats.max_hp * 0.20)
+            gained = int(36 + depth * 4.6)
+            self.pickups.spawn(pickup_mod.EMBER, fixture.x, fixture.y, 1,
+                               self.fxrng, count=gained, speed=(90, 260))
+        elif key == 'spend':
+            paid = self.embers
+            self.embers = 0
+            player.heal(player.stats.max_hp * 0.45)
+            player.add_fuel(player.fuel_max)
+            self.effects.add_text(fixture.x, fixture.y - 30,
+                                  f'-{paid} EMBERS', palette.UI_DANGER)
+        elif key == 'redraw':
+            cost = 25
+            self.embers = max(0, self.embers - cost)
+            self.stats.rerolls += 1
+            self.effects.add_text(fixture.x, fixture.y - 30,
+                                  f'-{cost} EMBERS', palette.UI_DANGER)
+        self.set_banner(fixture.label, 2.2)
+        audio.play('shrine', 0.8)
+        self.effects.add_light(fixture.x, fixture.y, 300, 0.9, palette.WARD)
+        self.effects.add_shake(2.2)
+
+    def rearm_fixture(self):
+        """Disarm the room's fixture until the player steps clear of it.
+
+        Called when the shop closes. Without it the player is still standing
+        on the Ferryman when the screen goes away, and walks straight back
+        into him on the next frame.
+        """
+        if self.fixture is not None:
+            self.fixture.armed = False
+
+    def use_door(self, side):
+        """Walk through the door on `side`. Returns the room arrived in."""
+        rid = self.room.doors.get(side)
+        if rid is None:
+            return None
+        self.enter_room(self.plan.room(rid),
+                        from_side=plan_mod.OPPOSITE[side])
+        audio.play('door_through', 0.5)
+        return self.room
+
+    def _check_doors(self):
+        """Has the player stepped into a doorway that will answer?"""
+        if self.door_lock > 0.0 or self.warded or self.pending_door:
+            return
+        side = self.level.door_at(self.player.x, self.player.y)
+        if side is not None and side in self.room.doors:
+            self.pending_door = side
+
+    def break_wards(self):
+        """The last thing in the room is dead; the doors give."""
+        if not self.warded:
+            return
+        self.warded = False
+        self.room.cleared = True
+        self.cleared = True
+        audio.play('ward_break', 0.8)
+        self.effects.add_shake(3.4)
+        # Cold, like the rift and unlike the lantern. The ward is the
+        # vault's light, not yours, and the two should never be confused.
+        for side in self.level.doors:
+            cx, cy = self.level.door_center(side)
+            self.effects.add_light(cx, cy, 190.0, 0.55, palette.PLAYER_TRIM)
+            for _ in range(10):
+                a = self.fxrng.angle()
+                sp = self.fxrng.uniform(60, 240)
+                self.particles.emit(1, cx, cy,
+                                    math.cos(a) * sp, math.sin(a) * sp,
+                                    0.5, 2.4, palette.PLAYER_TRIM,
+                                    end_size=0.3, opacity=85, drag=0.5)
+
+    def _populate_room(self, room, first_time):
+        """Fill a room with whatever it is for, once.
+
+        A cleared room stays cleared. Walking back through a fight you have
+        already won to reach a spur you skipped should cost you the walk and
+        nothing else - respawning it would make the map a punishment for
+        reading it.
+        """
+        if not first_time or room.cleared or not room.hostile:
+            return
         spots = list(self.level.spawn_points)
-        if self.is_boss:
+
+        if room.kind == plan_mod.BOSS:
             far = spots[0] if spots else (self.level.width * 0.5,
                                           self.level.height * 0.25)
-            # Two boss floors, two different fights. The Snuffer comes
-            # first and goes after the lantern; the Choir waits at the bottom
-            # and goes after you.
             kind = boss.for_depth(self.depth)
             self.boss_ref = kind(far[0], far[1], self.depth, self.rng)
             self.enemies.append(self.boss_ref)
-            for key in enemy_mod.wave_for_depth(max(1, self.depth - 3), self.rng)[:5]:
+            for key in enemy_mod.wave_for_depth(
+                    max(1, self.depth - 3), self.rng)[:5]:
                 self._spawn_at_spot(enemy_mod.SPECIES[key], spots)
             return
 
-        for key in enemy_mod.wave_for_depth(self.depth, self.rng):
-            self._spawn_at_spot(enemy_mod.SPECIES[key], spots)
+        for key, elite in self._roster_for(room):
+            enemy = self._spawn_at_spot(enemy_mod.SPECIES[key], spots)
+            if elite and enemy is not None:
+                enemy_mod.make_elite(
+                    enemy, self.rng.choice(enemy_mod.ELITE_AFFIXES),
+                    self.depth)
+
+    #: How much of a floor's worth of enemies a room of each kind is due.
+    #: A floor used to be one wave; it is four to seven fights now, so a
+    #: single room cannot be a whole floor's budget or a floor would be five
+    #: times the fight it was. These are shares of the old whole-floor wave.
+    ROOM_WEIGHT = {
+        plan_mod.COMBAT: 0.46,
+        plan_mod.ELITE: 0.52,
+        plan_mod.GAUNTLET: 0.85,
+    }
+
+    def _roster_for(self, room):
+        """(species, is_elite) pairs for one room's fight."""
+        weight = self.ROOM_WEIGHT.get(room.kind, 0.46)
+        keys = enemy_mod.wave_for_depth(self.depth, self.rng, weight=weight)
+
+        out = [(k, False) for k in keys]
+        if not out:
+            return out
+        chance = enemy_mod.elite_chance(self.depth)
+        if room.kind == plan_mod.ELITE:
+            # The room is named for it: one is guaranteed, and the rest of
+            # the room rolls as usual.
+            out[0] = (out[0][0], True)
+            rest = [(k, self.rng.chance(chance)) for k, _ in out[1:]]
+            return out[:1] + rest
+        if room.kind == plan_mod.GAUNTLET:
+            # The optional hard room. Elites are the difficulty, and being
+            # able to see them coming is what makes it a fair offer.
+            return [(k, self.rng.chance(min(0.75, chance * 2.6)))
+                    for k, _ in out]
+        return [(k, self.rng.chance(chance)) for k, _ in out]
 
     def _spawn_at_spot(self, cls, spots):
+        """Put one enemy somewhere sensible. Returns it, for the caller to
+        decorate - whether a spawn is an elite is the room's business now,
+        not the spawner's."""
         if not spots:
             spots = list(self.level.spawn_points) or [self.level.player_start]
         x, y = self.rng.choice(spots)
@@ -240,10 +628,8 @@ class World:
         y += self.rng.uniform(-TILE * 0.4, TILE * 0.4)
         x, y = self.level.collide_circle(x, y, cls.radius)
         enemy = cls(x, y, self.depth, self.rng)
-        if self.rng.chance(enemy_mod.elite_chance(self.depth)):
-            enemy_mod.make_elite(
-                enemy, self.rng.choice(enemy_mod.ELITE_AFFIXES), self.depth)
         self.enemies.append(enemy)
+        return enemy
 
     @property
     def boss_name(self):
@@ -251,6 +637,10 @@ class World:
         if not self.is_boss:
             return f'FLOOR {self.depth}'
         return boss.NAMES.get(boss.for_depth(self.depth), 'THE HOLLOW CHOIR')
+
+    @property
+    def room_kind(self):
+        return self.room.kind if self.room is not None else None
 
     def set_banner(self, text, seconds=2.4):
         self.banner = text
@@ -262,6 +652,90 @@ class World:
             return
         x, y = self.level.collide_circle(x, y, cls.radius)
         self.enemies.append(cls(x, y, self.depth, self.rng))
+
+    def adopt_enemy(self, enemy):
+        """Take an enemy an enemy made. Used by anything that splits.
+
+        Separate from `spawn_enemy` because the caller has already built the
+        thing, positioned it and given it a velocity - a splitter's children
+        inherit a direction, and re-deriving that here would lose it.
+        """
+        if len(self.enemies) > 120:
+            return None
+        enemy.x, enemy.y = self.level.collide_circle(
+            enemy.x, enemy.y, enemy.radius)
+        self.enemies.append(enemy)
+        return enemy
+
+    def add_pool(self, x, y, radius, seconds, dps, color=None, arm=0.0):
+        """Standing rot on the floor, left by something that died here.
+
+        Bounded like the decals are: a long fight in one room should not end
+        up with forty overlapping pools, each of them being tested against
+        the player every frame.
+        """
+        # `arm` is a delay before it bites, for anything that marks the floor
+        # before it lights it. The mark is drawn the whole time, so what the
+        # circle covers when it arms is exactly what will burn.
+        self.pools.append([x, y, radius, seconds, seconds, dps,
+                           color or palette.CARRION_POOL, arm])
+        if len(self.pools) > 22:
+            self.pools.pop(0)
+
+    def _update_pools(self, dt):
+        player = self.player
+        for pool in self.pools:
+            if pool[7] > 0.0:
+                pool[7] -= dt
+                continue                # still only a mark on the floor
+            pool[3] -= dt
+            if pool[3] <= 0.0:
+                continue
+            dx = player.x - pool[0]
+            dy = player.y - pool[1]
+            if dx * dx + dy * dy <= pool[2] * pool[2] and player.alive:
+                # Standing in it, not walking through it: the damage is a
+                # rate, so a player who keeps moving pays almost nothing and
+                # one who stands and shoots pays for the whole eight seconds.
+                player.scorch(pool[5] * dt, self.effects, self.particles,
+                              self.fxrng)
+            if self.fxrng.chance(7.0 * dt):
+                a = self.fxrng.angle()
+                d = self.fxrng.uniform(0, pool[2])
+                self.particles.emit(
+                    1, pool[0] + math.cos(a) * d, pool[1] + math.sin(a) * d,
+                    0.0, -22.0, 0.8, 2.6, pool[6],
+                    end_size=0.4, opacity=64, drag=0.6)
+        self.pools = [p for p in self.pools if p[3] > 0.0]
+
+    def _draw_pools(self, ox, oy):
+        for x, y, radius, left, total, _dps, color, arm in self.pools:
+            sx, sy = x - ox, y - oy
+            if arm > 0.0:
+                # Not yet burning. Drawn at full reach and brightening as it
+                # arms, so the ring you are standing outside of when it
+                # closes is the ring that will not catch you.
+                pts = []
+                for i in range(11):
+                    a = i * math.tau / 11
+                    pts.append(sx + math.cos(a) * radius)
+                    pts.append(sy + math.sin(a) * radius)
+                drawPolygon(*pts, fill=None, border=color, borderWidth=2.0,
+                            opacity=int(28 + 46 * (1.0 - min(arm, 1.0))))
+                continue
+            k = clamp(left / max(total, 1e-6), 0.0, 1.0)
+            # It shrinks as it dries, so what the circle covers is always
+            # what will actually hurt you.
+            r = radius * (0.55 + 0.45 * k)
+            pts = []
+            for i in range(11):
+                a = i * math.tau / 11
+                wob = 1.0 + 0.12 * math.sin(self.run_time * 1.6 + i * 1.7)
+                pts.append(sx + math.cos(a) * r * wob)
+                pts.append(sy + math.sin(a) * r * wob)
+            drawPolygon(*pts, fill=color, opacity=int(34 * k))
+            drawPolygon(*pts, fill=None, border=color,
+                        borderWidth=1.6, opacity=int(46 * k))
 
     def chase_dir(self, x, y):
         """Unit vector from (x, y) toward the player, routed around walls.
@@ -328,7 +802,7 @@ class World:
             self.effects.add_flash(0.9, palette.BOSS_EYE, wash=True)
             self.pickups.spawn(pickup_mod.HEART, enemy.x, enemy.y, 18, self.rng,
                                count=3, speed=(90, 220))
-            audio.play_at('boom', enemy.x, enemy.y, 1.0)
+            audio.play_at('boom', enemy.x, enemy.y, 0.6)
             self.add_decal(enemy.x, enemy.y, 1.6)
         else:
             audio.play_at('kill', enemy.x, enemy.y, 0.4)
@@ -469,6 +943,7 @@ class World:
         self._update_enemies(sdt)
         self._update_projectiles(sdt)
         self._update_braziers(sdt)
+        self._update_pools(sdt)
 
         self.pickups.update(sdt, player, self.level, self.particles, self.fxrng,
                             self._collect, self.flow)
@@ -517,9 +992,21 @@ class World:
         if self.stats.dash_damage and player.dash_time > 0.0:
             self._dash_cleave(player)
 
-        if (not self.cleared and self.boss_death <= 0.0
+        # The room is won when the last thing in it stops moving. That
+        # breaks the wards; it does not open a way down, because the way down
+        # is a room of its own now and it was never closed.
+        if (self.warded and self.boss_death <= 0.0
                 and not any(e.alive for e in self.enemies)):
-            self._open_rift()
+            self.break_wards()
+
+        self._touch_fixture(sdt)
+        if self.door_lock > 0.0:
+            self.door_lock = max(0.0, self.door_lock - dt)
+        if self.warded:
+            self.ward_t = min(1.0, self.ward_t + dt * self.WARD_SEAL_RATE)
+        elif self.ward_t > 0.0:
+            self.ward_t = max(0.0, self.ward_t - dt * self.WARD_BREAK_RATE)
+        self._check_doors()
 
     # How far a chained arc will reach for its next target, and what share of
     # the original hit it carries there. Short and lossy on purpose: chaining
@@ -694,7 +1181,7 @@ class World:
                 continue
             e.update(dt, self)
 
-            if light_dps and e.lit and e.alive:
+            if light_dps and e.lit and e.alive and not e.immune():
                 # Through the same door as everything else, so it counts
                 # toward the run's damage and feeds lifesteal like any other
                 # hit. Subtracting hp directly skipped both.
@@ -711,7 +1198,7 @@ class World:
                 if e.hp <= 0.0:
                     e.die(self)
 
-            if e.alive and player.alive and e.touch_cd <= 0.0:
+            if e.alive and player.alive and e.touch_cd <= 0.0 and not e.immune():
                 rr = e.radius + player.radius
                 dx = player.x - e.x
                 dy = player.y - e.y
@@ -719,6 +1206,11 @@ class World:
                     angle = math.atan2(dy, dx)
                     if player.hurt(e.damage, self.effects, self.particles,
                                    self.fxrng, angle):
+                        # Anything that takes something other than health
+                        # takes it here - a douser's bite at the lantern.
+                        # Gated on the hit landing, so invulnerability frames
+                        # protect the flame as well as the body.
+                        e.on_touch(self)
                         e.touch_cd = 0.65
                         self.camera.add_shake(4.5)
                         push = 240.0
@@ -763,6 +1255,16 @@ class World:
                     if dx * dx + dy * dy > rr * rr:
                         continue
                     angle = math.atan2(p.vy, p.vx)
+                    if e.immune():
+                        continue          # under the floor; the shot passes
+                    # A mirror turns anything that lands on its face back the
+                    # way it came, and it becomes hostile fire - which is the
+                    # point of it. Shooting one from the front is not merely
+                    # useless, it is a mistake.
+                    if getattr(e, 'reflects', None) is not None \
+                            and e.reflects(angle):
+                        self._reflect(p, e, angle)
+                        break
                     # Bonuses that depend on what was hit rather than on who
                     # fired, so they cannot be settled at the muzzle.
                     dmg = p.damage
@@ -800,6 +1302,34 @@ class World:
                                    self.fxrng, angle):
                         self.camera.add_shake(3.4)
                     p.alive = False
+
+    def _reflect(self, p, mirror, angle):
+        """Send a shot back off a mirror's face, as hostile fire.
+
+        It keeps its damage and loses its pierce and its chain: a reflected
+        coilbeam that still passed through everything would be lethal in a
+        way nothing else in the game is, and the reflection is meant to be a
+        warning rather than a death sentence.
+        """
+        back = angle + math.pi + self.fxrng.uniform(-0.10, 0.10)
+        speed = math.hypot(p.vx, p.vy) * 0.86
+        p.alive = False
+        mirror.shield_flash = 1.0
+        self.projectiles.spawn(
+            projectile_mod.ENEMY,
+            mirror.x + math.cos(back) * (mirror.radius + 4.0),
+            mirror.y + math.sin(back) * (mirror.radius + 4.0),
+            math.cos(back) * speed, math.sin(back) * speed,
+            self.enemy_bullet_damage(p.damage * 0.7),
+            radius=p.radius, life=1.4, color=palette.MIRROR_EYE,
+            glow_color=(220, 236, 255), length=p.length, width=p.width,
+            knockback=90.0)
+        self.particles.burst(mirror.x, mirror.y, 7, palette.MIRROR_EYE,
+                             self.fxrng, speed=(120, 300), life=(0.1, 0.3),
+                             size=(1.6, 3.4), direction=back, spread=1.2)
+        self.effects.add_light(mirror.x, mirror.y, 110.0, 0.14,
+                               art.rgb_tuple(palette.MIRROR_EYE))
+        audio.play_at('reflect', mirror.x, mirror.y, 0.55)
 
     def _detonate(self, x, y, source):
         radius = self.stats.explode_radius
@@ -899,16 +1429,17 @@ class World:
         return True
 
     def _open_rift(self):
+        """Put the way down in the middle of the room that is the way down.
+
+        It used to be placed off to one side of a cleared chamber, because
+        the chamber was the whole floor and the rift had to go somewhere in
+        it. A descent room exists only to hold it, so it goes in the middle
+        where it can be seen from every door.
+        """
         self.cleared = True
-        spots = self.level.spawn_points
-        if spots:
-            px, py = self.player.x, self.player.y
-            best = min(spots, key=lambda s: abs(math.hypot(s[0] - px, s[1] - py) - 340))
-        else:
-            best = self.level.player_start
-        self.rift = Rift(best[0], best[1])
-        self.set_banner('THE WAY DOWN OPENS', 2.6)
-        self.effects.add_light(best[0], best[1], 320, 1.2, palette.PLAYER_TRIM)
+        self.rift = Rift(self.level.width * 0.5, self.level.height * 0.5)
+        self.effects.add_light(self.rift.x, self.rift.y, 320, 1.2,
+                               palette.PLAYER_TRIM)
         audio.play('upgrade', 0.5)
 
     def rift_reached(self):
@@ -974,6 +1505,21 @@ class World:
     BOSS_INTRO_TIME = 3.1
     BOSS_DEATH_TIME = 2.8
 
+    # The arrival, written as a score instead of as a run of probabilities.
+    #
+    # Its first beat used to be `fxrng.chance(7.0 * dt)` - a random scatter of
+    # rings across a second and a half. Nothing could be synchronised to that,
+    # because there was nothing to synchronise *to*: the audio under it could
+    # only ever be a drone. These are five strikes at closing intervals,
+    # fractions of `BOSS_INTRO_TIME` so that retiming the arrival retimes the
+    # sound with it and the two cannot drift. Each one is a ring, a shake, a
+    # light and a toll, and they accelerate into the gathering.
+    INTRO_TOLLS = (0.02, 0.14, 0.245, 0.33, 0.40)
+    # Where the motes start falling inward - and where the riser starts, cut
+    # to climax a tenth of a second before the eye opens rather than a second
+    # after it, which is what it used to do.
+    INTRO_GATHER = 0.45
+
     ELITE_GLOW = 118.0
     ELITE_GLOW_STRENGTH = 26.0
     ELITE_LIGHT_HEIGHT = 16.0
@@ -1035,6 +1581,8 @@ class World:
         # out. See `gpu.scene_coverage`.
         gpu.scene_coverage(True)
         self._draw_braziers(ox, oy)
+        self._draw_fixture(ox, oy)
+        self._draw_wards(ox, oy)
 
         for e in self.enemies:
             if not e.alive:
@@ -1147,6 +1695,8 @@ class World:
                                64 * b.ignite_t * flicker,
                                power=2.2, spread=wobble,
                                height=self.BRAZIER_HEIGHT)
+        self._draw_fixture_light(ox, oy)
+        self._draw_ward_lights(ox, oy)
         self.projectiles.draw_lights(ox, oy, self.view_w, self.view_h)
         self.effects.draw_lights(ox, oy, self.view_w, self.view_h)
         # Eyes throw just enough light to catch the ground under them. Any
@@ -1172,6 +1722,17 @@ class World:
                               self.ELITE_GLOW * breathe,
                               self.ELITE_GLOW_STRENGTH * breathe, power=2.3,
                               height=self.ELITE_LIGHT_HEIGHT)
+            # Anything that carries its own light says so here. Only the
+            # Keeper does, and it is the whole of that fight: its reach grows
+            # as it dies, so the last room in the game fills up with light
+            # until there is nowhere left to stand in the dark.
+            glow = getattr(e, 'glow_radius', None)
+            if glow is not None:
+                reach = glow()
+                breathe = 0.9 + 0.1 * math.sin(self.run_time * 1.7)
+                art.draw_glow(art.rgb_tuple(e.eye_color), sx, sy,
+                              reach * breathe, 58, power=2.0,
+                              height=getattr(e, 'LIGHT_HEIGHT', 24.0))
         gpu.set_mode(gpu.NORMAL)
 
     # How far a brazier throws. Fixed, because its shadow is cast once at
@@ -1220,6 +1781,23 @@ class World:
                        screen, art.rgb_tuple(color), strength, power=power,
                        height=height * scale)
 
+    #: Temporary section timing for the draw path. `LUMEN_TRACE_DRAW=1`
+    #: accumulates milliseconds per stage into `draw_marks`.
+    TRACE_DRAW = bool(os.environ.get('LUMEN_TRACE_DRAW'))
+
+    def _mark(self, name):
+        if not self.TRACE_DRAW:
+            return
+        import time as _t
+        now = _t.perf_counter()
+        prev = getattr(self, '_mark_last', None)
+        if prev is not None:
+            slot = self.draw_marks.setdefault(self._mark_name, [0.0, 0])
+            slot[0] += (now - prev) * 1000.0
+            slot[1] += 1
+        self._mark_last = now
+        self._mark_name = name
+
     def _draw_flat(self, app):
         """The original single-pass path, for the cmu-graphics renderer."""
         cam = self.camera
@@ -1227,15 +1805,30 @@ class World:
         lv = self.level
         player = self.player
 
+        self._mark('light')
         # Light first, then the floor over it. See SHADOW_FLOOR_MIX.
         self._draw_light(ox, oy)
+        self._mark('floor_blit')
         drawImage(lv.floor_image, -ox, -oy, opacity=SHADOW_FLOOR_MIX)
+        self._mark('rift+pickups')
         self._draw_rift(ox, oy)
         self.pickups.draw(ox, oy, self.view_w, self.view_h)
-
+        self._mark('wall_blit')
         drawImage(lv.wall_image, -ox, -oy)
+        self._mark('wall_light')
         self._draw_wall_light(ox, oy, self.lantern_flicker())
+        self._mark('braziers+wards')
         self._draw_braziers(ox, oy)
+        self._draw_fixture(ox, oy)
+        self._draw_wards(ox, oy)
+        # Pools, and then keeners' tethers, both under the bodies: they are
+        # things on the floor and things between things, and either drawn
+        # over a silhouette reads as being in front of it.
+        self._draw_pools(ox, oy)
+        for e in self.enemies:
+            if e.alive and e.species == enemy_mod.KEENER:
+                e.draw_link(ox, oy)
+        self._mark('entities')
 
         for e in self.enemies:
             if not e.alive:
@@ -1251,14 +1844,15 @@ class World:
         if player.alive:
             player.draw(ox, oy)
 
+        self._mark('proj+particles')
         self.projectiles.draw(ox, oy, self.view_w, self.view_h)
         self.particles.draw(ox, oy, self.view_w, self.view_h)
         self.effects.draw_lights(ox, oy, self.view_w, self.view_h)
-
+        self._mark('overlay')
         drawImage(self.overlay, 0, 0)
-
         self.effects.draw_texts(ox, oy)
         self.effects.draw_flash(self.view_w, self.view_h)
+        self._mark(None)
 
     def lantern_flicker(self):
         """The lantern's breathing, as a multiplier around 1.0.
@@ -1641,6 +2235,17 @@ class World:
                          fill=palette.wall_light(lit),
                          lineWidth=2, opacity=int(4 + 38 * lit))
 
+    def _intro_cue(self, was, mark):
+        """True on the one frame the arrival passes `mark`.
+
+        `mark` is elapsed fraction and `boss_intro` counts down, so the edge
+        is the time *remaining* at that point. Testing the interval the step
+        crossed rather than the side it landed on is what makes each cue fire
+        exactly once however long the frame was.
+        """
+        edge = self.BOSS_INTRO_TIME * (1.0 - mark)
+        return was > edge >= self.boss_intro
+
     def _tick_boss_intro(self, dt):
         """A boss arrives instead of simply being there.
 
@@ -1659,23 +2264,40 @@ class World:
         t = 1.0 - self.boss_intro / max(self.BOSS_INTRO_TIME, 1e-6)
         col = art.rgb_tuple(b.eye_color)
 
-        # 1. The room answers: rings running outward from where it stands.
-        if was > self.BOSS_INTRO_TIME * 0.55:
-            if self.fxrng.chance(7.0 * dt):
-                self.particles.ripple(b.x, b.y, b.eye_color,
-                                      120 + 520 * t, 0.7, 60)
-                self.effects.add_shake(1.6)
+        # 1. The room answers: one ring per toll, running outward from where
+        #    it stands, each larger and louder than the last.
+        for i, mark in enumerate(self.INTRO_TOLLS):
+            if not self._intro_cue(was, mark):
+                continue
+            k = i / (len(self.INTRO_TOLLS) - 1)
+            self.particles.ripple(b.x, b.y, b.eye_color,
+                                  200 + 640 * k, 0.7, 58 + 34 * k)
+            self.effects.add_light(b.x, b.y, 180 + 520 * k, 0.3, b.eye_color)
+            self.effects.add_shake(2.2 + 6.8 * k)
+            audio.play(f'{b.voice}_toll', 0.5 + 0.45 * k,
+                       pitch=-1.0 + 2.0 * k)
+
+        if self._intro_cue(was, self.INTRO_GATHER):
+            # The riser goes through the room backwards, so its reflections
+            # arrive ahead of it exactly as the motes do.
+            audio.play(f'{b.voice}_gather', 0.9)
+
         # 2. It gathers: motes falling inward, and its light growing.
-        elif was > self.BOSS_INTRO_TIME * 0.16:
+        if was > self.BOSS_INTRO_TIME * 0.16 and t >= self.INTRO_GATHER:
+            # How far through the gathering we are, so the motes thicken at
+            # the same rate the riser under them climbs. A flat 50 a second
+            # against a sound that is visibly accelerating was the other half
+            # of why this beat did not read as one event.
+            g = clamp((t - self.INTRO_GATHER) / 0.39, 0.0, 1.0)
             self.effects.add_light(b.x, b.y, 90 + 420 * t, 0.14, b.eye_color)
-            if self.fxrng.chance(50.0 * dt):
+            if self.fxrng.chance((24.0 + 96.0 * g) * dt):
                 a = self.fxrng.angle()
                 d = b.radius * self.fxrng.uniform(4.0, 11.0)
                 self.particles.emit(
                     1, b.x + math.cos(a) * d, b.y + math.sin(a) * d,
                     -math.cos(a) * 260.0, -math.sin(a) * 260.0,
                     0.5, 4.2, b.eye_color, end_size=0.4, opacity=90)
-            self.effects.add_shake(0.5 + 2.5 * t)
+            self.effects.add_shake(0.5 + 3.4 * g)
         # 3. It opens its eye.
         if was > 0.0 and self.boss_intro <= 0.0:
             self.effects.add_flash(0.95, b.eye_color, wash=True)
@@ -1686,8 +2308,7 @@ class World:
                                  speed=(220, 660), life=(0.35, 0.9),
                                  size=(2.4, 6.0))
             self.particles.ripple(b.x, b.y, palette.LIGHT_CORE, 900, 0.8, 90)
-            audio.play('roar', 1.0)
-            audio.play('boom', 0.7)
+            audio.play(f'{b.voice}_eye', 1.0)
 
     def begin_boss_death(self, enemy):
         """Hold the floor open while the thing comes apart.
@@ -1705,7 +2326,11 @@ class World:
                             art.rgb_tuple(enemy.body_color)]
         self.effects.slowmo(2.2, 0.30)
         self.effects.add_shake(10.0)
-        audio.play('low', 0.9)
+        # Two and a bit seconds of slow motion to fill, so this is long and
+        # it sags - a structure failing rather than an explosion. It is also
+        # the sound this moment should always have had: `low` was never in
+        # the bank, so `play` looked it up, found nothing and returned.
+        audio.play(f'{enemy.voice}_break', 0.95)
 
     def _tick_boss_death(self, dt):
         """It does not simply stop existing.
@@ -1731,7 +2356,7 @@ class World:
                                  size=(2.0, 5.4))
             self.effects.add_light(px, py, 150.0 + 160.0 * t, 0.22, eye)
             self.effects.add_shake(2.0 + 4.0 * t)
-            audio.play_at('boom', px, py, 0.30 + 0.3 * t)
+            audio.play_at('boss_crack', px, py, 0.34 + 0.3 * t)
         if self.fxrng.chance(4.0 * dt):
             self.particles.ripple(x, y, eye, 200 + 500 * t, 0.5, 60)
 
@@ -1745,8 +2370,10 @@ class World:
                                  speed=(260, 900), life=(0.5, 1.4),
                                  size=(2.6, 7.0))
             self.particles.ripple(x, y, palette.LIGHT_CORE, 1300, 1.0, 100)
-            audio.play('boom', 1.0)
-            audio.play('upgrade', 0.7)
+            # The chamber goes white and the way down opens. The only effect
+            # in the game that resolves upward, and it does the work `boom`
+            # and `upgrade` were sharing.
+            audio.play('boss_gone', 1.0)
             self.boss_corpse = None
 
     def _draw_boss_corpse(self, ox, oy):
@@ -1793,6 +2420,127 @@ class World:
                                ease_out_cubic(rift.open_t) * self.RIFT_ON_WALLS,
                                height=self.RIFT_HEIGHT,
                                tint=self.RIFT_LIGHT)
+
+    # The ward across a sealed doorway. Cold, because it is the vault's
+    # light and not the player's, and the two must never be mistaken for one
+    # another: warm is yours and means safety, cold is the building's and
+    # means a decision has been made for you.
+    WARD_COLOR = palette.WARD
+    WARD_REACH = 190.0
+    WARD_HEIGHT = 26.0
+
+    #: How fast a ward rises and how fast it goes. Sealing is quicker than
+    #: breaking because it is an interruption and should feel like one; the
+    #: break is a release and gets to be seen.
+    WARD_SEAL_RATE = 3.4
+    WARD_BREAK_RATE = 2.2
+
+    def ward_strength(self):
+        """0 while the doors are open, 1 while they are sealed."""
+        return ease_out_cubic(clamp(self.ward_t, 0.0, 1.0))
+
+    def _draw_wards(self, ox, oy):
+        """A plane of light filling each doorway.
+
+        Drawn bright enough to be read across an unlit room on purpose. Being
+        sealed in is information the player needs *before* the fight starts,
+        and in a game where you carry the only light the only way to deliver
+        it is to make the thing itself luminous.
+        """
+        k = 0.0 if NO_WARDS else self.ward_strength()
+        if k <= 0.01 or self.level is None:
+            return
+        wobble = self.run_time * 2.4
+        for side in self.level.doors:
+            x0, y0, x1, y1 = self.level.door_zone(side)
+            sx0, sy0 = x0 - ox, y0 - oy
+            sx1, sy1 = x1 - ox, y1 - oy
+            if sx1 < -60 or sy1 < -60 or sx0 > self.view_w + 60 \
+                    or sy0 > self.view_h + 60:
+                continue
+            cx, cy = (sx0 + sx1) * 0.5, (sy0 + sy1) * 0.5
+            art.draw_glow(art.rgb_tuple(self.WARD_COLOR), cx, cy,
+                          86 * k, int(30 * k), power=2.0)
+
+            # Bars across the short axis of the opening, so the plane reads
+            # as something stretched over the gap rather than a smear of
+            # colour in it. They rise into place as the ward seals.
+            wide = (sx1 - sx0) > (sy1 - sy0)
+            span = (sx1 - sx0) if wide else (sy1 - sy0)
+            bars = 7
+            for i in range(bars):
+                f = (i + 0.5) / bars
+                # Each bar arrives a beat after the one before it.
+                a = clamp((k - f * 0.25) / 0.75, 0.0, 1.0)
+                if a <= 0.0:
+                    continue
+                shimmer = 0.68 + 0.32 * math.sin(wobble + i * 0.9)
+                op = int(58 * a * shimmer)
+                if op <= 0:
+                    continue
+                if wide:
+                    bx = sx0 + span * f
+                    drawPolygon(bx - 3, sy0, bx + 3, sy0,
+                                bx + 3, sy1, bx - 3, sy1,
+                                fill=self.WARD_COLOR, opacity=op)
+                else:
+                    by = sy0 + span * f
+                    drawPolygon(sx0, by - 3, sx1, by - 3,
+                                sx1, by + 3, sx0, by + 3,
+                                fill=self.WARD_COLOR, opacity=op)
+            drawPolygon(sx0, sy0, sx1, sy0, sx1, sy1, sx0, sy1,
+                        fill=self.WARD_COLOR, opacity=int(16 * k))
+
+    def _draw_fixture(self, ox, oy):
+        if self.fixture is not None:
+            self.fixture.draw(ox, oy, self.run_time)
+            self.fixture.draw_terms(ox, oy, self.player.x, self.player.y)
+
+    def _draw_fixture_light(self, ox, oy):
+        """What the room's offer throws on the stone around it.
+
+        A cache and a hearth are worth finding from the doorway, so both are
+        lights rather than shapes lying in the dark. The shrine is one too,
+        and cold, so that a room with a bargain in it reads differently from
+        a room with a gift in it before you have crossed the floor.
+        """
+        fixture = self.fixture
+        if fixture is None or self.level is None:
+            return
+        k = 1.0 if not fixture.taken else clamp(
+            1.0 - fixture.take_t / 1.4, 0.0, 1.0)
+        if k <= 0.02:
+            return
+        reach = 300.0 if fixture.kind == fixture_mod.HEARTH else 210.0
+        sx, sy = fixture.x - ox, fixture.y - oy
+        if (sx < -reach or sy < -reach or sx > self.view_w + reach
+                or sy > self.view_h + reach):
+            return
+        breathe = 0.84 + 0.16 * math.sin(self.run_time * 3.0)
+        self._static_light(fixture, fixture.x, fixture.y, ox, oy, reach,
+                           fixture.color, 58 * k * breathe, power=2.1,
+                           spread=breathe, height=22.0)
+
+    def _draw_ward_lights(self, ox, oy):
+        """What the wards throw onto the stone around them."""
+        k = 0.0 if NO_WARDS else self.ward_strength()
+        if k <= 0.01 or self.level is None:
+            return
+        for side in self.level.doors:
+            cx, cy = self.level.door_center(side)
+            sx, sy = cx - ox, cy - oy
+            if (sx < -self.WARD_REACH or sy < -self.WARD_REACH
+                    or sx > self.view_w + self.WARD_REACH
+                    or sy > self.view_h + self.WARD_REACH):
+                continue
+            ward = self.wards.get(side)
+            if ward is None:
+                ward = self.wards[side] = Ward(side)
+            breathe = 0.82 + 0.18 * math.sin(self.run_time * 3.4 + cx * 0.01)
+            self._static_light(ward, cx, cy, ox, oy,
+                               self.WARD_REACH, self.WARD_COLOR,
+                               46 * k * breathe, power=2.0,
+                               spread=k * breathe, height=self.WARD_HEIGHT)
 
     def _draw_braziers(self, ox, oy):
         for b in self.level.braziers:

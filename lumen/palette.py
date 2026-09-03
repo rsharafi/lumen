@@ -52,6 +52,12 @@ LIGHT_WARM = _c(0xFFC46B)
 LIGHT_DEEP = _c(0xC97A2E)
 FLARE = _c(0xFFF4D6)
 
+# The vault's own light, as against the lantern's. Everything cold in this
+# game belongs to the building - the way down, and the wards it draws across
+# a doorway while something in the room is still alive. Warm is yours and
+# means safety; cold is the vault's and means it has decided something.
+WARD = _c(0x96D2FF)
+
 # -- the player -------------------------------------------------------------
 PLAYER_BODY = _c(0xE8EEF7)
 PLAYER_CLOAK = _c(0x2C3E63)
@@ -75,6 +81,40 @@ WARDEN_SHIELD = _c(0xFFD98A)
 BOSS = _c(0x4C2456)
 BOSS_EYE = _c(0xFF3D7F)
 BOSS_FLASH = _c(0x9C5AA8)
+
+# The second bestiary. Each pair is a body dark enough to be part of the
+# vault and an eye bright enough to be the only thing you see of it at range -
+# the eye-glint is how every one of these is first met, so no two may share a
+# hue the eye cannot separate at four pixels.
+LURKER = _c(0x231C36)
+LURKER_EYE = _c(0xD9C2FF)
+PALE = _c(0x6E6A58)
+PALE_EYE = _c(0xFFF2B8)
+DOUSER = _c(0x102A31)
+DOUSER_EYE = _c(0x2FE0D6)
+BOLTER = _c(0x5C1E1E)
+BOLTER_EYE = _c(0xFF8A3D)
+KEENER = _c(0x2B4A2E)
+KEENER_EYE = _c(0x9CFF6B)
+SPLITTER = _c(0x4A2A55)
+SPLITTER_EYE = _c(0xE07BFF)
+CINDER = _c(0x5A3410)
+CINDER_EYE = _c(0xFFC24D)
+MIRROR = _c(0x37424F)
+MIRROR_EYE = _c(0xDCEBFF)
+DELVER = _c(0x3A2C1B)
+DELVER_EYE = _c(0xE8B36B)
+CARRION = _c(0x2E3B22)
+CARRION_EYE = _c(0xC3E86B)
+# What a carrion leaves behind, and what a keener's tether is drawn in.
+CARRION_POOL = _c(0x7FA83A)
+KEENER_LINK = _c(0x7FE05A)
+
+# The Keeper, at the bottom. Warm and pale rather than hostile-coloured:
+# it is not a monster's palette, it is a *lantern's* - which is the whole
+# unpleasantness of the thing. Its light looks exactly like safety.
+KEEPER = _c(0x4A4030)
+KEEPER_EYE = _c(0xFFE9A8)
 
 EYE_GLINT = _c(0xFF6B8A)
 

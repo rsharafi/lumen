@@ -8,7 +8,7 @@ real-time 2D shadowcasting — **you carry the only light**, and everything you
 cannot see is still there.
 
 No asset files ship with the game. Every texture, sprite, glow and item icon,
-and all 26 sound effects, are generated at startup from numpy and PIL.
+and all 50 sound effects, are generated at startup from numpy and PIL.
 
 It runs on three renderers behind one interface — cmu-graphics' own
 rasteriser, SDL's renderer, and OpenGL. On the last of those the lighting is
@@ -229,6 +229,85 @@ that reason.
 is wired and working but wants a line of enemies the harness cannot reliably
 arrange, and is reported as UNPROVEN rather than counted as a pass.
 
+### Which boss is harder
+
+The Snuffer waits at the bottom of the vault and the Hollow Choir is met
+halfway down, so the Snuffer should be the harder fight. It was not, and the
+same kind of probe says why: a fixed kiting policy, a build drafted one
+offering a floor from the real pool at the real depth, and the player made
+immortal so every fight runs to the end and the numbers are comparable.
+
+| | fight | damage/s | over the fight | hits/s |
+| --- | --- | --- | --- | --- |
+| Hollow Choir, floor 6 | 81 s | 18.92 | 1540 | 0.829 |
+| Snuffer, floor 12 | 154 s | **17.04** | 2633 | **0.468** |
+
+The last thing in the vault was landing *fewer* hits per second than the thing
+halfway down, against a player with eleven floors of upgrades rather than five.
+Three reasons, all visible in the trace:
+
+- **It opened with two attacks**, one of which — `rush` — does no damage. The
+  Choir opens with three.
+- **Its phases arrived far too late.** Thresholds are fractions of health, and
+  it has two and a half times the Choir's, so the same fraction is a much
+  longer wait in seconds. A player spent the first *fifty seconds* of the final
+  fight watching its opening pair, and `choke`, the move the whole floor is
+  built around, did not unlock until a third of its health was gone.
+- **The choke did nothing to it.** The class docstring says the Snuffer
+  "fights hardest in the dark it has just made"; nothing implemented that. It
+  put the lantern out and then carried on at exactly the same pace.
+
+So: thresholds moved to `(0.80, 0.52, 0.24)`, `motes` in the opening set, and
+`choke` became a set-up rather than an inconvenience — while `player.choke` is
+running, its idle gap, its recovery and its telegraphs are all divided by 1.55
+and its bolts fly 22% faster. The rush is two or three dashes now, re-aimed
+between and trailing a spreading V of slow bolts, so the line it took stays
+dangerous after it has gone.
+
+| | fight | damage/s | over the fight | hits/s |
+| --- | --- | --- | --- | --- |
+| Hollow Choir, floor 6 | 88 s | 17.28 | 1521 | 0.712 |
+| Snuffer, floor 12 | 132 s | **31.03** | 4088 | **0.782** |
+
+Standard error over eight seeds is ±2.5 and ±3.4, so the Snuffer's near
+doubling is real and the Choir's small dip is not.
+
+#### The ring, and reading a boss by ear and eye
+
+The Choir's `ring` is the one attack it has that is not a stream of bolts but a
+*release* — the same shape as the lantern flare the player throws with shift,
+aimed the other way. It was also the filler of its book: ten damage a bolt,
+slower than the lash, and safest of all exactly where the boss was standing,
+which is backwards for something that looks like a detonation.
+
+It now has the close-range half it always looked like it had. Everything inside
+268 units is hit, hardest at the middle, and thrown out of it — built from the
+same parts as the player's own flare, knockback included. The shove is the
+mercy in it: being thrown clear is what stops the second volley of the same
+attack landing while you are still getting up.
+
+Measured in its last stand at floor 6:
+
+| | before | after |
+| --- | --- | --- |
+| ring bolt | 17.4 | **41.7** |
+| close-range wave | — | **52.1** |
+| lash bolt | 20.9 | 20.9 |
+| spiral bolt | 15.6 | 15.6 |
+| touching it | 31.9 | 31.9 |
+
+Both bosses now also *draw* the attack that matters. A telegraph ring used to
+expand to a fixed radius whatever was coming; for the Choir's ring and the
+Snuffer's choke it expands to the actual reach, so what the circle covers when
+it closes is exactly what will hit you. The choke gained a radius at the same
+time — it used to happen to you wherever you were standing, which made the
+fight's signature move the one thing in it you could not play against.
+
+Neither boss's biggest hit is an accident of contact any more. The heaviest
+thing each can do is the thing it spends most time warning you about: the
+Choir's wave at 52.1 over its 31.9 touch, and the Snuffer's choke at 46.0 over
+its 41.8.
+
 ## How it is built
 
 The interesting problem here is that `cmu-graphics` is a teaching library, not
@@ -352,9 +431,105 @@ across 1.7 pixels, which is what the game used to look like.
 `pygame.Window` does expose the flag, so `lumen/runtime.py` takes the window
 over: on the first frame the framework's window is destroyed and replaced with
 an equivalent high-DPI one, and cmu-graphics is pointed at the new buffer.
-That turns the same fullscreen window into a **3600x2260** framebuffer — the
+That turns the same fullscreen window into a **3600x2338** framebuffer — the
 one a native Mac app draws into, and the one the compositor samples back down
 to the panel.
+
+##### The band across the top
+
+For a while it was 3600x**2260**, not 2338, and the missing 78 pixels showed
+as a black band across the full width of the screen. macOS puts a *desktop*
+fullscreen window inside the display's safe area, which on a notched MacBook
+stops 38 points short of the top of the panel — so the game was handed a
+1800x1130 window on an 1800x1169 screen and the compositor filled the rest
+with black. Nothing was drawn wrong; those rows were never ours.
+
+`SDL_VIDEO_MAC_FULLSCREEN_SPACES=0` asks for the older, non-Spaces fullscreen,
+which covers the whole panel. It has to be set before the window is created —
+SDL reads it when it picks the window's collection behaviour, and setting it
+afterwards does nothing at all — so it lives at import time in
+`lumen/runtime.py` rather than in `set_video_mode`. The trade is macOS's own
+fullscreen behaviour: no separate Space, and Mission Control treats the window
+as an ordinary one. `LUMEN_MAC_SPACES=1` gives that back, black band included.
+
+Those 78 pixels are then real, except for the ones behind the camera housing.
+So the chamber runs to the edge and the *HUD's top row* does not:
+`runtime.safe_area_top()` asks AppKit for `NSScreen.safeAreaInsets` through
+`ctypes` (38.0 points here) rather than taking a dependency on pyobjc for one
+float, and the floor counter, the minimap and the boss's health bar start
+below it. It applies only when the window is genuinely standing on that strip
+— not in a window, not on a screen without a notch, and not under
+`LUMEN_MAC_SPACES=1`, where SDL is already keeping clear of it.
+
+That inset is handed over as a **fraction of the window height**, not as a
+count of pixels, and the first version of it was wrong for exactly that
+reason. There are three different pixels in play here — points, the
+framebuffer, and the smaller buffer the game actually draws into below full
+sharpness — and only a ratio means the same thing in all of them. Dividing
+the inset in *framebuffer* pixels by a scale expressed in *render* pixels
+overstates it by the render scale, which is fine at NATIVE and 3.3x too much
+at FASTEST:
+
+| rung | inset, as pixels ÷ scale | as a fraction |
+| --- | --- | --- |
+| NATIVE | 23.4 units | 23.4 |
+| BALANCED | 33.4 | 23.4 |
+| FAST | 58.6 | 23.4 |
+| FASTEST | **78.2** | 23.4 |
+
+At the bottom rung that pushed the whole top row of the HUD down 10.9% of the
+screen instead of 3.2% — a far thicker empty band than the notch it was
+supposed to be clearing, and one that got *worse* the lower the sharpness
+dial went. Measured across all six rungs, the floor counter now sits at
+6.8–7.0% of the frame height at every one of them.
+
+##### The band across the top, again
+
+None of that was what most players were seeing, because the OpenGL backend
+had a much larger version of the same bug and it is the one `run.sh` picks by
+default. It reported an 1800x1169 point window as a **3600x2056** framebuffer,
+so the game drew into 2056 rows of 2338 and never touched the other 282 — and
+OpenGL's origin is bottom-left, which is why the rows it never reached were a
+band across the *top* of the screen. 12% of the display, against the notch's
+3.3%.
+
+moderngl reads the default framebuffer's size once, when the context is
+created, and never revises it. `ctx.screen` therefore goes on describing the
+window the context was born in — 2560x1440 for a 1280x720 window that has
+since gone fullscreen — and `lumen/runtime.py` was taking `_render_size`
+straight from it. Worse, `glx._use(None)` restored that stale viewport from
+`ctx.screen` on *every frame*, so even a correct size set at attach time was
+overwritten before anything was drawn.
+
+The evidence is unambiguous once you ask two sources instead of one:
+
+| | windowed 1280x720 | fullscreen 1800x1169 |
+| --- | --- | --- |
+| `ctx.screen.size` | 2560x1440 | 2560x1440 |
+| `glGetIntegerv(GL_VIEWPORT)` | — | **3600x2338** |
+| `win.size` x backing scale | 2560x1440 | **3600x2338** |
+
+So the host now measures the drawable from the window and tells `glx` once,
+`glx` keeps that as `_screen` and sets `ctx.screen.viewport` from it rather
+than reading it back, and `backing_scale()` — which was quietly returning
+1.42 instead of 2.0 on this path, because it divides a stale drawable by a
+live window — comes out right as a side effect. Verified across five
+fullscreen toggles and all three sharpness rungs: 3600x2338 every time, no
+blank row or column on any edge.
+
+The moral is the one this file keeps arriving at: **measure the window, not
+the abstraction over it.** `ctx.screen`, `_renderer.get_viewport()` and
+`app.width` are all caches of a number that SDL changes underneath them.
+
+##### And a small twin
+
+Below full sharpness the game draws into a
+smaller buffer and hands SDL a *logical size*, which preserves aspect ratio
+and letterboxes the remainder — and the two axes were each being truncated to
+an even number independently, so their aspect no longer quite matched the
+framebuffer's. That left a black line top and bottom: 0.4 px at BALANCED,
+2.3 px at FASTEST. Deriving the width from the height instead puts every rung
+under a quarter of a pixel.
 
 It matters twice over, because **the renderer does not antialias polygon
 edges** — text is antialiased, vector shapes get one blended pixel of constant
@@ -753,7 +928,7 @@ crash mid-frame, so computed opacities go through `mathx.opacity`. And
 ### Procedural sound
 
 `cmu-graphics`' `Sound` can only load a file, so `lumen/audio.py` synthesises
-21 effects with numpy at first run and writes them to a small WAV cache beside
+50 effects with numpy at first run and writes them to a small WAV cache beside
 the game. Each effect gets a pool of voices, because `Sound.play()` reuses one
 channel per sound — without that, rapid fire retriggers a single channel and
 stutters instead of overlapping.
@@ -766,7 +941,7 @@ energy sits, how much of it is above 4 kHz, the ratio of odd to even harmonics
 (a pure tone or a square wave has almost no even harmonics, which is the
 chiptune signature), and how long each effect rings after its peak.
 
-Three changes, measured across all 21 effects:
+Three changes, measured across the 21 effects that existed at the time:
 
 | | before | after |
 | --- | --- | --- |
@@ -805,6 +980,103 @@ mean amplitude.
 Channels come from a pool rather than one per sound. `find_channel(True)` takes
 a free one or steals the oldest, which is simpler than hand-sized voice pools
 and stays correct now that tails are three times longer.
+
+#### What a boss sounds like
+
+Everything above is about single events — a shot, a hit, a pickup. A boss is
+the one thing in the game that gets a *sequence*, and it already had the
+clock for one: `World._tick_boss_intro` runs three beats of light over 3.1
+seconds, and `_tick_boss_death` takes another 2.8 to pull the thing apart.
+Both were nearly silent. The arrival played a generic roar; the death played
+`low`, which has never been in the bank at all — `SoundBank.play` looks a name
+up, finds nothing and returns, so the single biggest moment in a run made no
+sound. The Snuffer's signature attack, the one the whole floor-twelve fight is
+built around, asked for the same missing name.
+
+So each beat now fires its own one-shot as the countdown crosses it, off the
+same clock as the light:
+
+| beat | on screen | in the room |
+| --- | --- | --- |
+| the room answers | five rings running outward | five strikes on stone at closing intervals |
+| it gathers | motes falling *inward*, thickening | a riser put through the room **backwards**, so the reflections arrive ahead of it |
+| it opens its eye | white-out, hitstop, shake of 13 | a slam with 20 ms of silence in front of it, so it lands in a hole |
+
+The first beat had to be rewritten before it could be scored at all. It was
+`fxrng.chance(7.0 * dt)` — a random scatter of rings across a second and a
+half — and nothing can be synchronised to that, because there is nothing to
+synchronise *to*; the audio under it could only ever be a drone. It is now
+five tolls at fractions of `BOSS_INTRO_TIME`, so retiming the arrival retimes
+the sound with it and the two cannot drift:
+
+```python
+INTRO_TOLLS = (0.02, 0.14, 0.245, 0.33, 0.40)
+INTRO_GATHER = 0.45
+```
+
+which lands them at 0.06, 0.43, 0.76, 1.02 and 1.23 seconds — intervals of
+0.37, 0.33, 0.26, 0.21, an accelerando into the gathering. Each is a ring, a
+shake, a light and a toll, all four scaling together, with the toll picked by
+index so it rises as it closes. The motes in the second beat thicken from 24 a
+second to 120 across the beat rather than falling at a flat 50, so the riser
+under them has something to climb with.
+
+The lengths are load-bearing. `choir_wake` is 3.1 s of body — exactly
+`BOSS_INTRO_TIME` — so the bed is swallowed by the slam instead of still going
+afterwards. The gather is 1.10 s of riser behind 0.50 s of pre-verb: 1.60 s
+against the 1.705 s the beat lasts, so it climaxes a tenth of a second *before*
+the eye opens. It used to be 2.8 s fired at 1.395 s, which put its peak a full
+second past the thing it was supposed to be announcing. That hole is what makes
+the slam land.
+
+The two bosses share none of it. The Choir is a crowd of voices in a warm
+stone room; the Snuffer is one cold thing that eats light. `_cluster` builds
+both — several voices a few cents apart, sliding to a `glide` multiple of
+their pitch over the sound — because a crowd is what the Choir *is*, and two
+cold voices at a hollow fifth is the same function with different arguments.
+The Choir arrives as a chord swelling up and dies groaning with its voices
+sliding apart in opposite directions; the Snuffer arrives as glass falling and
+keeps ringing long after it should have stopped.
+
+The wind-up is the part that changes how the fight plays. Both bosses draw an
+expanding ring before every attack and both shorten it as they enrage, which
+is the fight's most important read and used to be available only by looking.
+`_tell` plays a struck body *reversed*, so it swells into the strike rather
+than decaying away from it — and picks its take by `rage`, which is what the
+otherwise-unused `pitch` argument on `play` turned out to be for. It selects
+among the variants already baked for variety instead of resampling anything,
+so it is free:
+
+```python
+audio.play_at(f'{boss.voice}_tell', boss.x, boss.y, 0.55,
+              pitch=-1.0 + 2.0 * boss.rage)
+```
+
+At full health that is the deepest and longest of seven takes, 0.575 s against
+a 0.70 s telegraph. In the last stand it is the tightest, 0.383 s against
+0.378 s. Same information as the ring, and it still arrives with your back
+turned.
+
+One effect breaks the rule the rest of the bank is built on. The Snuffer's
+`choke` puts your lantern out, so the sound of it is the vault being taken
+away: a bright wash swells with a full tail behind it, `_gate` cuts it dead at
+the instant the screen washes black, and what lands in the hole is a dry,
+airless thump with no room on it at all. It is the only moment in the game
+that sounds like it is happening nowhere.
+
+*A note on "cold".* The first pass at the Snuffer's half reached for cold and
+got there with high-pass noise. Measured, `snuff_sweep` sat at **7586 Hz with
+57% of its energy above 4 kHz**, against a bank mean of 438 Hz and 0.2% — it
+had walked straight back into the thin, hissing, machine-like sound the whole
+set had been dragged away from once already. Cold has to come from what is
+*ringing* — glass partials, hollow fifths, a short bright room — so every
+effect on that side now keeps a low-pass roof over it. After: 803 Hz and 0.4%,
+and a bank mean of 395 Hz.
+
+`tools/sound_report.py` also checks that every name a call site asks for is
+actually in the bank, and exits non-zero if one is not. A missing name is
+silence in exactly the place someone meant to put a sound, which is the one
+kind of audio bug that never announces itself.
 
 And a sound happens *somewhere*. `audio.set_listener` is told where the view is
 once a tick, so a call site only has to know its own position:

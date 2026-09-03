@@ -29,8 +29,41 @@ os.environ.setdefault('LUMEN_RENDERER', 'cpu')
 os.environ.setdefault('CI', '1')
 os.environ.setdefault('LUMEN_SAVE', '/tmp/lumen-stat-probe.json')
 
+from lumen import enemies as enemy_mod                # noqa: E402
+from lumen import floorplan as fp                     # noqa: E402
 from lumen import rng, upgrades                       # noqa: E402
 from lumen.world import World                         # noqa: E402
+
+
+def _staged_fight(world, depth, weight=1.8):
+    """Put the player in a room with a whole floor's worth of enemies in it.
+
+    A floor starts in an entrance room, which by design has nothing in it -
+    so a probe that entered a floor and started swinging was measuring an
+    empty room, and reported three quarters of the game's stats as dead.
+
+    The room is topped up well past the fraction a single room is due.
+    Partly because every threshold in this file was calibrated against the
+    era when a floor *was* one room and one wave - but mostly because total
+    damage is bounded by the enemies' health, so a fight the probe finishes
+    reports the same number whatever the stat was set to. A doubled crit
+    rate and an untouched one both read 152 against a room that dies. The
+    fight has to outlast the tick budget for the observable to mean
+    anything.
+    """
+    room = None
+    for candidate in world.plan.rooms.values():
+        if candidate.kind == fp.COMBAT:
+            room = candidate
+            break
+    if room is None:
+        return
+    world.enter_room(room)
+    spots = list(world.level.spawn_points)
+    have = len([e for e in world.enemies if e.alive])
+    want = enemy_mod.wave_for_depth(depth, world.rng, weight=weight)
+    for key in want[have:]:
+        world._spawn_at_spot(enemy_mod.SPECIES[key], spots)
 
 # Short by default: total damage dealt saturates once the floor is dead, and
 # a saturated observable cannot tell a doubled stat from an untouched one.
@@ -57,7 +90,8 @@ CASES = {
     'lifesteal':        dict(value=0.9,   obs='healed'),
     'bulwark':          dict(value=0.9,   obs='taken', still=True, ticks=1500),
     'taken_mult':       dict(value=4.0,   obs='taken', still=True, ticks=1500),
-    'revives':          dict(value=4,     obs='alive', hp=10.0, ticks=2600),
+    'revives':          dict(value=4,     obs='alive', hp=10.0, ticks=2600,
+                             fight=1.0),
     'shield_charges':   dict(value=6,     obs='taken', still=True, ticks=1500),
     'speed_mult':       dict(value=2.5,   obs='moved'),
     'lantern_mult':     dict(value=2.5,   obs='radius'),
@@ -68,7 +102,21 @@ CASES = {
     'light_damage':     dict(value=90.0,  obs='damage'),
     'slow_field':       dict(value=0.95,  obs='taken', still=True,
                              hold_fire=True, ticks=900),
-    'homing':           dict(value=1.0,   obs='damage'),
+    # Homing needs a long fight, and the reason is worth writing down.
+    #
+    # It went quiet when the bestiary grew a seven-hit-point swarm species:
+    # the probe's default fight now died inside the window either way, and
+    # `damage` is bounded by the wave's health, so both runs reported the
+    # wave's total to the cent. A saturated observable reads exactly like a
+    # dead stat.
+    #
+    # Lengthening it showed the real shape of the thing. In a dense crowd
+    # homing is worth nothing at all - measured, 551.0 damage either way over
+    # 600 ticks - because every shot already hits *something*. It only starts
+    # paying once the room thins out and a straight shot would miss: +6.6% by
+    # 1400 ticks. So the fight has to be big enough to outlast the crowd, and
+    # that is what this is.
+    'homing':           dict(value=1.0,   obs='damage', fight=3.2, ticks=1400),
     'explode_radius':   dict(value=140.0, obs='damage'),
     'chain':            dict(value=4,     obs='damage'),
     'bounces':          dict(value=4,     obs='damage'),
@@ -77,7 +125,7 @@ CASES = {
 
 def run(stat=None, value=None, still=False, dash=False, hp=None, fuel=None,
         pickup=None, crit=False, chase=False, hold_fire=False,
-        ticks=TICKS):
+        ticks=TICKS, fight=1.8):
     rng.world.reseed(4242)
     rng.fx.reseed(4243)
     stats = upgrades.Stats()
@@ -91,6 +139,7 @@ def run(stat=None, value=None, still=False, dash=False, hp=None, fuel=None,
         setattr(stats, stat, value)
     world = World(stats, rng.world, rng.fx, 1280, 720)
     world.enter_floor(3)
+    _staged_fight(world, 3, fight)
     p = world.player
     p.refresh_from_stats()
     p.hp = stats.max_hp

@@ -685,6 +685,212 @@ class UpgradeScreen:
             _sigil(cx, y, up, self.t * 0.25, False, radius=9.0)
 
 
+class ShopScreen:
+    """The Ferryman's shelf.
+
+    Deliberately the offering screen's sibling rather than its own thing:
+    three lit alcoves in the dark, chosen with the pointer. The player has
+    already learned to read that layout, and a shop is close enough in kind -
+    look at three things, take one - that inventing a second grammar for it
+    would only be a second thing to learn.
+
+    What it adds is the price, and one piece of information the offering
+    screen never has to give: whether you can afford it. An unaffordable slot
+    is drawn dark and its price in red, so the shelf can be read at a glance
+    instead of by arithmetic.
+    """
+
+    CARD_W = 286.0
+    CARD_H = 372.0
+    CARD_GAP = 40.0
+
+    def __init__(self, view_w, view_h):
+        self.w = view_w
+        self.h = view_h
+        self.slots = []
+        self.embers = 0
+        self.depth = 1
+        self.rerolls_taken = 0
+        self.reroll_cost = 0
+        self.index = 0
+        self.t = 0.0
+        self.hit_rects = []
+
+    def resize(self, view_w, view_h):
+        self.w = view_w
+        self.h = view_h
+
+    def open(self, slots, embers, depth, reroll_cost):
+        self.slots = slots
+        self.embers = embers
+        self.depth = depth
+        self.reroll_cost = reroll_cost
+        self.index = 0
+        self.t = 0.0
+
+    def update(self, dt):
+        self.t += dt
+
+    def hover(self, mx, my):
+        index = hit_test(self.hit_rects, mx, my)
+        if index is not None:
+            self.index = index
+
+    def card_scale(self):
+        total = 3 * self.CARD_W + 2 * self.CARD_GAP
+        room = self.w * 0.92
+        return room / total if total > room else 1.0
+
+    def draw(self, world):
+        w, h = self.w, self.h
+        appear = ease_out_cubic(clamp(self.t / 0.45, 0.0, 1.0))
+        drawPolygon(0, 0, w, 0, w, h, 0, h, fill=palette.VOID,
+                    opacity=int(88 * appear))
+        drawImage(art.grain(int(w), int(h), 0.05), 0, 0,
+                  opacity=int(52 * appear))
+
+        drawLabel('THE FERRYMAN', w * 0.5, h * 0.105, size=30, bold=True,
+                  fill=palette.UI_ACCENT, font=palette.FONT_DISPLAY,
+                  opacity=int(100 * appear))
+        # The one line that makes the decision legible. Embers are also what
+        # the Vigil takes, and a player who does not know that is not making
+        # the choice this shop exists to offer them.
+        drawLabel('what you spend here is what you do not bank',
+                  w * 0.5, h * 0.105 + 26, size=11, fill=palette.UI_DIM,
+                  font=palette.FONT_UI, opacity=int(74 * appear))
+
+        count = max(1, len(self.slots))
+        k = self.card_scale()
+        cw, ch, gap = self.CARD_W * k, self.CARD_H * k, self.CARD_GAP * k
+        total = count * cw + (count - 1) * gap
+        x0 = (w - total) * 0.5
+        y0 = h * 0.245
+
+        self.hit_rects = []
+        for i, slot in enumerate(self.slots):
+            selected = i == self.index
+            delay = clamp((self.t - 0.09 * i) / 0.42, 0.0, 1.0)
+            lift = 18.0 if selected else 0.0
+            cx = x0 + i * (cw + gap)
+            cy = y0 - lift + (1.0 - ease_out_back(delay)) * 46.0
+            self.hit_rects.append((cx, y0 - 24, cw, ch + 48, i))
+            self._draw_slot(slot, cx, cy, cw, ch, i, selected, delay, k)
+
+        self._draw_purse(w, h, appear)
+
+    def _draw_slot(self, slot, x, y, cw, ch, index, selected, delay, k):
+        can = slot.affordable(self.embers)
+        colour = slot.color if can else palette.UI_FAINT
+        alpha = int(100 * delay)
+        if alpha <= 0:
+            return
+        mid = x + cw * 0.5
+
+        if selected and can:
+            _glow(mid, y + ch * 0.60, int(cw * 2.0), colour,
+                  int(22 * delay), 2.4)
+        panel(x, y, cw, ch, (86 if selected else 58),
+              colour if selected else palette.UI_LINE,
+              (88 if selected else 34))
+        if selected:
+            corner_marks(x, y, cw, ch, colour, 92, 17 * k)
+
+        ay = y + 90.0 * k
+        _glow(mid, ay, int(232 * k), colour,
+              int((34 if selected and can else 10) * delay), 2.6)
+        if slot.upgrade is not None:
+            _sigil(mid, ay, slot.upgrade, self.t, selected and can,
+                   radius=(30.0 + (4.0 if selected else 0.0)) * k)
+        else:
+            _shop_mark(mid, ay, slot.kind, colour, self.t,
+                       28.0 * k, int(90 * delay))
+
+        drawLabel(slot.name, mid, y + 180 * k, size=17 * k, bold=True,
+                  fill=colour if selected else palette.UI_TEXT,
+                  font=palette.FONT_DISPLAY, opacity=alpha)
+        _rule(x + 52 * k, x + cw - 52 * k, y + 202 * k, colour,
+              int((60 if selected else 26) * delay))
+
+        for j, line in enumerate(wrap(slot.blurb, 28)[:4]):
+            drawLabel(line, mid, y + (228 + j * 20) * k, size=12 * k,
+                      fill=palette.UI_TEXT if selected else palette.UI_DIM,
+                      font=palette.FONT_UI,
+                      opacity=int((88 if selected else 66) * delay))
+
+        # The price, and whether it is a price you can pay.
+        py = y + ch - 44 * k
+        if slot.sold:
+            drawLabel('TAKEN', mid, py, size=15 * k, bold=True,
+                      fill=palette.UI_FAINT, font=palette.FONT_DISPLAY,
+                      opacity=int(70 * delay))
+            return
+        price_colour = palette.XP if can else palette.UI_DANGER
+        drawLabel(f'{slot.price}', mid + 9 * k, py, size=19 * k, bold=True,
+                  fill=price_colour, font=palette.FONT_DISPLAY,
+                  opacity=int(96 * delay))
+        r = 4.6 * k
+        drawPolygon(mid - 19 * k, py - r, mid - 19 * k + r, py,
+                    mid - 19 * k, py + r, mid - 19 * k - r, py,
+                    fill=price_colour, opacity=int(96 * delay))
+        if not can:
+            drawLabel('not enough', mid, py + 20 * k, size=9 * k,
+                      fill=palette.UI_DANGER, font=palette.FONT_UI,
+                      opacity=int(64 * delay))
+
+    def _draw_purse(self, w, h, appear):
+        y = h - 52
+        drawLabel(f'{self.embers}', w * 0.5 + 12, y, size=22, bold=True,
+                  fill=palette.XP, font=palette.FONT_DISPLAY,
+                  opacity=int(96 * appear))
+        r = 5.4
+        drawPolygon(w * 0.5 - 16, y - r, w * 0.5 - 16 + r, y,
+                    w * 0.5 - 16, y + r, w * 0.5 - 16 - r, y,
+                    fill=palette.XP, opacity=int(96 * appear))
+        drawLabel('EMBERS', w * 0.5, y - 24, size=9, fill=palette.UI_FAINT,
+                  font=palette.FONT_UI, opacity=int(56 * appear))
+
+        note = 'CLICK TO BUY        R  RESTOCK'
+        if self.reroll_cost:
+            note = f'CLICK TO BUY        R  RESTOCK ({self.reroll_cost})'
+        drawLabel(note + '        ESC  LEAVE', w * 0.5, y + 26, size=10,
+                  fill=palette.UI_DIM, font=palette.FONT_UI,
+                  opacity=int(64 * appear))
+
+
+def _shop_mark(cx, cy, kind, color, t, r, opacity):
+    """A sigil for the things on the shelf that are not offerings."""
+    if kind == 'weapon':
+        for i in range(3):
+            a = t * 0.7 + i * math.tau / 3
+            drawPolygon(cx + math.cos(a) * r, cy + math.sin(a) * r,
+                        cx + math.cos(a + 0.5) * r * 0.4,
+                        cy + math.sin(a + 0.5) * r * 0.4,
+                        cx + math.cos(a - 0.5) * r * 0.4,
+                        cy + math.sin(a - 0.5) * r * 0.4,
+                        fill=color, opacity=opacity)
+    elif kind == 'restore':
+        for i in range(2):
+            rr = r * (0.55 + i * 0.4)
+            pts = []
+            for j in range(8):
+                a = j * math.tau / 8 + t * (0.3 + i * 0.2)
+                pts.append(cx + math.cos(a) * rr)
+                pts.append(cy + math.sin(a) * rr)
+            drawPolygon(*pts, fill=color, opacity=int(opacity * (0.5 - i * 0.2)))
+        drawPolygon(cx, cy - r * 0.5, cx + r * 0.5, cy,
+                    cx, cy + r * 0.5, cx - r * 0.5, cy,
+                    fill=color, opacity=opacity)
+    else:
+        for i in range(2):
+            a = t * 0.9 + i * math.pi
+            drawPolygon(cx + math.cos(a) * r, cy + math.sin(a) * r,
+                        cx + math.cos(a + 2.0) * r * 0.5,
+                        cy + math.sin(a + 2.0) * r * 0.5,
+                        cx + math.cos(a + 1.2) * r * 0.8,
+                        cy + math.sin(a + 1.2) * r * 0.8,
+                        fill=color, opacity=opacity)
+
+
 class SettingsScreen:
     """Everything that changes how the game looks and sounds, in one place.
 

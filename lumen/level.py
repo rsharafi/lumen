@@ -21,6 +21,35 @@ FLOOR = 0
 
 ARCHETYPES = ('pillars', 'cross', 'rings', 'shards', 'gauntlet', 'spiral')
 
+# --------------------------------------------------------------------------
+# Doors
+# --------------------------------------------------------------------------
+# The border is two tiles thick, and a door is a gap in the *inner* ring
+# only. That is what makes a doorway safe as well as legible: the player
+# standing in the gap is still enclosed by the outer ring, so there is no
+# hole in the chamber for them to walk out of and no edge for the light to
+# spill past into nothing. It also just looks like a door - a recess in a
+# thick wall rather than a bite taken out of a thin one.
+BORDER = 2
+DOOR_WIDTH = 2                  # tiles across the opening
+DOOR_CLEAR = 3                  # tiles of floor guaranteed inside it
+
+#: Which way is "into the room" from each side's doorway.
+INWARD = {'n': (0, 1), 's': (0, -1), 'w': (1, 0), 'e': (-1, 0)}
+
+# Room footprints in tiles, border included. Most of a floor is now rooms
+# rather than one arena, so they are far smaller than the single chamber
+# was: a `small` room is a screenful with margin to spare and reads as a
+# place, where the old 28x18 read as a field. `large` is about one screen
+# exactly, which is as big as a fight wants to be when there are ten more
+# rooms behind it.
+ROOM_SIZES = {
+    'small': (15, 11),
+    'medium': (19, 13),
+    'large': (23, 15),
+    'boss': (28, 18),
+}
+
 
 class Rect:
     __slots__ = ('x', 'y', 'w', 'h', 'right', 'bottom', 'cx', 'cy')
@@ -92,6 +121,11 @@ class Level:
         self.braziers = []
         self.spawn_points = []
         self.player_start = (self.width * 0.5, self.height * 0.5)
+        #: side -> (col0, col1, row0, row1), the tiles of the opening.
+        self.doors = {}
+        #: The floorplan seed this chamber was baked under; `rebake` needs it
+        #: to reproduce the same stone after a render-scale change.
+        self.bake_room = 0
 
     # ------------------------------------------------------------ queries --
     def is_wall_tile(self, col, row):
@@ -186,6 +220,55 @@ class Level:
         for r in range(self.rows):
             self.grid[r][0] = WALL
             self.grid[r][self.cols - 1] = WALL
+
+    def _carve_thick_border(self):
+        """Two solid rings all the way round. Doors are cut afterwards."""
+        for r in range(self.rows):
+            for c in range(self.cols):
+                if (r < BORDER or c < BORDER
+                        or r >= self.rows - BORDER or c >= self.cols - BORDER):
+                    self.grid[r][c] = WALL
+
+    def _door_span(self, side):
+        """The tiles of the opening on `side`, centred on that wall."""
+        mc = self.cols // 2
+        mr = self.rows // 2
+        half = DOOR_WIDTH // 2
+        if side == 'n':
+            return (mc - half, mc - half + DOOR_WIDTH - 1, BORDER - 1, BORDER - 1)
+        if side == 's':
+            row = self.rows - BORDER
+            return (mc - half, mc - half + DOOR_WIDTH - 1, row, row)
+        if side == 'w':
+            return (BORDER - 1, BORDER - 1, mr - half, mr - half + DOOR_WIDTH - 1)
+        col = self.cols - BORDER
+        return (col, col, mr - half, mr - half + DOOR_WIDTH - 1)
+
+    def _carve_doors(self, sides):
+        """Open the inner ring on each side, and clear the way in.
+
+        The clearance is not decoration. A layout is free to put a pillar
+        wherever it likes, and several of them like putting one exactly where
+        a door wants to be - so the approach is carved *after* the layout
+        runs and overrides it. A door a chamber has walled off is a floor the
+        player cannot finish.
+        """
+        self.doors = {}
+        for side in sides:
+            c0, c1, r0, r1 = self._door_span(side)
+            for r in range(r0, r1 + 1):
+                for c in range(c0, c1 + 1):
+                    self.grid[r][c] = FLOOR
+            self.doors[side] = (c0, c1, r0, r1)
+
+            dc, dr = INWARD[side]
+            for step in range(1, DOOR_CLEAR + 1):
+                for r in range(r0, r1 + 1):
+                    for c in range(c0, c1 + 1):
+                        rr, cc = r + dr * step, c + dc * step
+                        if BORDER <= rr < self.rows - BORDER and \
+                                BORDER <= cc < self.cols - BORDER:
+                            self.grid[rr][cc] = FLOOR
 
     def _merge_rects(self):
         """Greedy maximal-rectangle cover of the solid tiles."""
@@ -313,6 +396,55 @@ class Level:
 
     def tile_center(self, col, row):
         return (col + 0.5) * TILE, (row + 0.5) * TILE
+
+    # -------------------------------------------------------------- doors --
+    def door_center(self, side):
+        """World centre of the opening on `side`."""
+        c0, c1, r0, r1 = self.doors[side]
+        return ((c0 + c1 + 1) * 0.5 * TILE, (r0 + r1 + 1) * 0.5 * TILE)
+
+    def door_entry(self, side, inset=1.6):
+        """Where a player arriving through `side` should be standing.
+
+        Far enough in that they are clear of the trigger they just came
+        through - re-entering the room you left the instant you arrive is the
+        one bug a door system is guaranteed to have if nobody thinks about it.
+        """
+        dc, dr = INWARD[side]
+        cx, cy = self.door_center(side)
+        return cx + dc * inset * TILE, cy + dr * inset * TILE
+
+    def door_zone(self, side):
+        """(x0, y0, x1, y1) the player must be inside to use this door."""
+        c0, c1, r0, r1 = self.doors[side]
+        return (c0 * TILE, r0 * TILE, (c1 + 1) * TILE, (r1 + 1) * TILE)
+
+    def door_at(self, x, y):
+        """The side whose opening contains (x, y), or None."""
+        for side in self.doors:
+            x0, y0, x1, y1 = self.door_zone(side)
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                return side
+        return None
+
+    def near_door(self, x, y, tiles=DOOR_CLEAR + 1):
+        """Is (x, y) inside the approach to any door?
+
+        Used to keep spawns and braziers off the mat: arriving through a door
+        into a spitter's face is not a fight, it is an ambush the player had
+        no way to see coming.
+        """
+        reach = tiles * TILE
+        for side in self.doors:
+            cx, cy = self.door_center(side)
+            dc, dr = INWARD[side]
+            # A box that runs inward from the opening, not a disc: the
+            # dangerous ground is the corridor in front of the door.
+            along = (x - cx) * dc + (y - cy) * dr
+            across = abs((x - cx) * dr - (y - cy) * dc)
+            if -TILE <= along <= reach and across <= TILE * 1.6:
+                return True
+        return False
 
 
 # --------------------------------------------------------------------------
@@ -789,39 +921,67 @@ def _bake_minimap(level, seed, size=148):
 def rebake(level):
     """Re-render a chamber's baked layers, e.g. after a render-scale change."""
     from . import rng as rng_mod
-    seed = _bake_seed(level.depth, level.cols, level.rows, level.archetype)
+    seed = _bake_seed(level.depth, level.cols, level.rows, level.archetype,
+                      level.bake_room)
     _bake_layers(level, rng_mod.Rng(seed), seed)
 
 
-def _bake_seed(depth, cols, rows, archetype):
-    """Deterministic seed for a chamber's cosmetic bake."""
-    seed = (depth * 7919 + cols * 131 + rows * 17) % 100000
+def _bake_seed(depth, cols, rows, archetype, room=0):
+    """Deterministic seed for a chamber's cosmetic bake.
+
+    `room` is the floorplan's own per-room seed. Without it every room of a
+    size on a floor shares a depth, a footprint and often an archetype, and
+    bakes to the identical stone - which reads, correctly, as the player
+    walking in a circle.
+    """
+    seed = (depth * 7919 + cols * 131 + rows * 17 + (room & 0xFFFF) * 2311) % 100000
     for i, ch in enumerate(archetype):
         seed = (seed * 31 + ord(ch) + i) % 100000
     return seed
 
 
-def generate(depth, rng, boss=False):
-    from .config import (CHAMBER_MAX_H, CHAMBER_MAX_W, CHAMBER_MIN_H,
-                         CHAMBER_MIN_W)
+def generate(depth, rng, boss=False, doors=(), size='medium', seed=0,
+             braziers=None, bake=True):
+    """One chamber.
 
+    `doors` is the sides that open onto neighbouring rooms; `size` names a
+    footprint in `ROOM_SIZES`; `seed` distinguishes rooms that would
+    otherwise bake identically - a floor now holds a dozen chambers of the
+    same depth, and without it half of them came out the same room twice.
+    """
     if boss:
-        cols, rows = CHAMBER_MAX_W, CHAMBER_MAX_H
+        size = 'boss'
         archetype = 'sanctum'
     else:
-        cols = rng.randint(CHAMBER_MIN_W, CHAMBER_MAX_W)
-        rows = rng.randint(CHAMBER_MIN_H, CHAMBER_MAX_H)
         archetype = rng.choice(ARCHETYPES)
 
+    base_cols, base_rows = ROOM_SIZES.get(size, ROOM_SIZES['medium'])
+    # A little jitter so two rooms of a size are not the same room. Kept
+    # even so the door, which sits on the middle of a wall, stays on a whole
+    # tile: an odd chamber and an even one put their centre in different
+    # places and the opening slides half a tile with it.
+    cols = base_cols + rng.randint(0, 2) * 2
+    rows = base_rows + rng.randint(0, 1) * 2
+
     level = Level(cols, rows, depth, archetype)
-    level._carve_border()
+    level._carve_thick_border()
     _LAYOUTS[archetype](level, rng)
+    # The layout is free to draw over the border and several of them do, so
+    # both rings go back down before the doors are cut through them.
+    level._carve_thick_border()
+    level._carve_doors(doors)
     _ensure_connected(level, rng)
+    # `_ensure_connected` punches holes toward the centre and can take the
+    # border with it. Re-assert, then re-open the doors it may have closed.
+    level._carve_thick_border()
+    level._carve_doors(doors)
     level._merge_rects()
     level._build_segments()
 
-    # Player starts on the most open tile near the centre.
-    open_cells = level.open_tiles(2)
+    # Player starts on the most open tile near the centre. Only the room a
+    # floor begins in actually uses this; every other room is entered
+    # through a door and places the player with `door_entry`.
+    open_cells = level.open_tiles(BORDER)
     if not open_cells:
         open_cells = level.open_tiles(1)
     mc, mr = cols / 2.0, rows / 2.0
@@ -829,31 +989,45 @@ def generate(depth, rng, boss=False):
     start_col, start_row = open_cells[0]
     level.player_start = level.tile_center(start_col, start_row)
 
-    # Spawn points: open tiles far from the player start.
-    px, py = level.player_start
+    # Spawn points: open tiles far from the middle of the room, and never on
+    # a doorway's approach.
+    cx, cy = level.width * 0.5, level.height * 0.5
     scored = []
     for c, r in open_cells:
         x, y = level.tile_center(c, r)
         if not level.is_open_at(x, y, TILE * 0.55):
             continue
-        scored.append((math.hypot(x - px, y - py), x, y))
+        if level.near_door(x, y):
+            continue
+        scored.append((math.hypot(x - cx, y - cy), x, y))
     scored.sort(reverse=True)
-    level.spawn_points = [(x, y) for _, x, y in scored[:max(8, len(scored) // 2)]]
+    if not scored:
+        # A room small enough that every open tile is somebody's doormat.
+        # Better a spawn on the mat than a room that cannot be populated.
+        for c, r in open_cells:
+            x, y = level.tile_center(c, r)
+            scored.append((math.hypot(x - cx, y - cy), x, y))
+        scored.sort(reverse=True)
+    level.spawn_points = [(x, y) for _, x, y in scored[:max(6, len(scored) // 2)]]
 
     # Braziers in roomy spots, spaced out from one another.
     candidates = [(x, y) for _, x, y in scored]
     placed = []
-    want = 3 if boss else rng.randint(2, 4)
+    if braziers is None:
+        braziers = 3 if boss else rng.randint(1, 2)
     for x, y in rng.shuffled(candidates):
-        if len(placed) >= want:
+        if len(placed) >= braziers:
             break
-        if all(math.hypot(x - bx, y - by) > TILE * 5 for bx, by in placed):
-            if math.hypot(x - px, y - py) > TILE * 3:
-                placed.append((x, y))
+        if all(math.hypot(x - bx, y - by) > TILE * 4 for bx, by in placed):
+            placed.append((x, y))
     level.braziers = [Brazier(x, y) for x, y in placed]
 
     # A stable seed: Python randomises string hashing per process, so
     # hash((depth, cols, rows, archetype)) gave a different floor texture on
     # every launch and made rendered frames impossible to reproduce.
-    _bake_layers(level, rng, _bake_seed(depth, cols, rows, archetype))
+    level.bake_room = seed
+    # The bake is ~100 ms and produces nothing the geometry depends on, so
+    # the checking tools skip it and generate thousands of rooms a second.
+    if bake:
+        _bake_layers(level, rng, _bake_seed(depth, cols, rows, archetype, seed))
     return level

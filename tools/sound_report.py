@@ -8,9 +8,16 @@ so the qualities that were wrong - thin, buzzy, dry - are measured instead.
              almost all odd harmonics, which is the chiptune signature.
   tail       seconds from the peak until the signal falls 40 dB below it.
              A dry sound stops; one in a stone room keeps ringing.
+
+It also checks that every name a call site asks for is actually in the bank.
+`SoundBank.play` looks a name up, finds nothing and returns, so a typo or a
+sound that was renamed is not an error - it is silence, in exactly the place
+someone meant to put a sound. Two call sites had been asking for `low` for
+some time: the moment a boss dies, and the Snuffer's signature attack.
 """
 
 import os
+import re
 import sys
 import wave
 
@@ -61,9 +68,32 @@ def describe(sig, rate=44100):
                 length=sig.size / rate)
 
 
+# `audio.play('x')`, `audio.play_at('x', ...)`, and the f-string form the
+# bosses use to pick their half of the bank: `audio.play(f'{b.voice}_eye')`.
+_CALL = re.compile(r"""audio\.play(?:_at)?\(\s*"""
+                   r"""(?:f?['"]([a-z_]+)['"]|f['"]\{[^}]*\}([a-z_]+)['"])""")
+_VOICES = ('choir', 'snuff', 'keep')
+
+
+def coverage(root, names):
+    """Every name played, and whether the bank has it."""
+    asked = {}
+    for here, _, files in os.walk(os.path.join(root, 'lumen')):
+        for fn in sorted(files):
+            if not fn.endswith('.py'):
+                continue
+            path = os.path.join(here, fn)
+            for i, line in enumerate(open(path), 1):
+                for literal, suffix in _CALL.findall(line):
+                    for name in ([literal] if literal else
+                                 [v + suffix for v in _VOICES]):
+                        asked.setdefault(name, f'{os.path.relpath(path, root)}:{i}')
+    return asked
+
+
 def main():
-    cache = os.path.join(os.path.dirname(os.path.dirname(
-        os.path.abspath(__file__))), '.sound_cache')
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    cache = os.path.join(root, '.sound_cache')
     names = sorted(f[:-4] for f in os.listdir(cache) if f.endswith('.wav'))
     print(f'{"effect":16s} {"len":>5s} {"centroid":>9s} {">4kHz":>6s} '
           f'{"odd/even":>9s} {"tail":>6s}')
@@ -82,6 +112,22 @@ def main():
               f'{np.mean([d["odd_even"] for d in agg]):9.2f} '
               f'{np.mean([d["tail"] for d in agg]):6.3f}')
 
+    asked = coverage(root, names)
+    missing = sorted((n, where) for n, where in asked.items() if n not in names)
+    print()
+    for name, where in missing:
+        print(f'SILENT  {where}  plays {name!r}, which is not in the bank')
+    # Names reached indirectly - `weapon.sound`, or a conditional expression -
+    # cannot be found by reading the source, so an unplayed name is a hint
+    # rather than a finding.
+    unplayed = sorted(set(names) - set(asked))
+    print(f'{len(names)} in the bank, {len(asked)} named by a call site, '
+          f'{len(missing)} silent')
+    if unplayed:
+        print(f'not named directly (may be played indirectly): '
+              f'{", ".join(unplayed)}')
+    return 1 if missing else 0
+
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main())
