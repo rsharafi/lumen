@@ -12,7 +12,9 @@ import os
 from . import draw, gpu
 from .draw import drawImage, drawLine, drawPolygon
 
+from . import acts as act_mod
 from . import doors as door_mod
+from . import hazards as hazard_mod
 from . import level as level_mod
 from . import rng as rng_mod
 from . import motes as motes_mod
@@ -162,6 +164,8 @@ class World:
         self.decals = []
         #: Standing rot: [x, y, radius, left, total, dps]. See `add_pool`.
         self.pools = []
+        #: What this act puts on the floor. See `lumen/hazards.py`.
+        self.hazards = hazard_mod.Field()
         self.hunt_timer = 0.0
         self.banner = ''
         self.banner_t = 0.0
@@ -314,6 +318,9 @@ class World:
         self.boss_ref = None
         self.door_lock = 0.55
         self.pending_door = None
+
+        self.hazards = hazard_mod.Field.build(self.level, self.depth,
+                                              self.rng)
 
         self.flow = flow_mod.FlowField(self.level)
         self.flow.rebuild(self.player.x, self.player.y)
@@ -1287,6 +1294,8 @@ class World:
         self._touch_fixture(sdt)
         if self.door_lock > 0.0:
             self.door_lock = max(0.0, self.door_lock - dt)
+        self.hazards.update(sdt, self)
+        player.ground_slow = self.hazards.slow_at(player.x, player.y)
         self._update_doors(dt)
         self._update_crossing(dt)
         self._check_doors()
@@ -1371,7 +1380,10 @@ class World:
 
     def _update_lighting(self):
         player = self.player
-        self.light_radius = player.lantern_radius
+        # Standing water reflects, so the lantern carries further over it -
+        # the reward half of a trade whose cost is that you cannot run.
+        self.light_radius = player.lantern_radius * self.hazards.reach_at(
+            player.x, player.y)
         self.light_fan = lighting.visibility_fan(
             self.level, player.x, player.y, self.light_radius)
         self.light_poly = self.light_fan.points
@@ -1452,11 +1464,12 @@ class World:
                 else:
                     e.wall_time = 0.0
 
-            e.slow = 0.0
+            # Water slows whatever is walking in it, and a flier is not.
+            e.slow = 0.0 if e.flies else self.hazards.slow_at(e.x, e.y)
             if slow:
                 d2 = (e.x - player.x) ** 2 + (e.y - player.y) ** 2
                 if d2 < 210.0 ** 2:
-                    e.slow = slow
+                    e.slow = max(e.slow, slow)
             if e is self.boss_ref and self.boss_intro > 0.0:
                 # Still assembling. It is drawn, and it is not yet a fight.
                 e.spawn_t = max(e.spawn_t, self.boss_intro)
@@ -1877,6 +1890,7 @@ class World:
         gpu.scene_coverage(True)
         self._draw_braziers(ox, oy)
         self._draw_fixture(ox, oy)
+        self.hazards.draw(self, ox, oy)
         self._draw_doors(ox, oy)
 
         for e in self.enemies:
@@ -2115,6 +2129,7 @@ class World:
         self._mark('braziers+wards')
         self._draw_braziers(ox, oy)
         self._draw_fixture(ox, oy)
+        self.hazards.draw(self, ox, oy)
         self._draw_doors(ox, oy)
         # Pools, and then keeners' tethers, both under the bodies: they are
         # things on the floor and things between things, and either drawn

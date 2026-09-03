@@ -19,7 +19,7 @@ import wave
 import numpy as np
 
 SAMPLE_RATE = 44100
-CACHE_VERSION = 14
+CACHE_VERSION = 15
 
 _bank = None
 
@@ -455,6 +455,18 @@ def _make_sounds():
     desc = _mix(_sweep(1.3, 330, 52, 'sine', 1.2) * _env(n, 0.05, 0.4, 0.35, 0.7),
                 _filter(_noise(n, rng), 450, 'low', 2.0) * _env(n, 0.1, 0.4, 0.2, 0.7) * 0.7)
     out['descend'] = _normalise(_room(_soft_clip(desc), 1.6, 2.8, 0.42, rng=rng), 0.6)
+
+    # ---- the vault's own fire ------------------------------------------
+    # A vent letting go. Gas catching rather than a bang: a soft rush that
+    # arrives late and a low body under it, because it has to be readable as
+    # a *place* from across a dark room and not as a hit.
+    n = int(1.4 * SAMPLE_RATE)
+    rush = _filter(_noise(n, rng), 2600, 'low', 1.2) * _env(n, 0.05, 0.4, 0.3, 0.5)
+    body = _struck(1.4, 62, (1.0, 1.9), (1.0, 1.6), bright=0.35) \
+        * _env(n, 0.01, 0.35, 0.15, 0.5)
+    out['vent'] = _normalise(
+        _room(_soft_clip(_mix(rush * 0.85, body * 0.7)), 1.6, 3.2, 0.4,
+              rng=rng), 0.5)
 
     # ---- the doors ----------------------------------------------------
     # A door is stone and metal moving in a stone frame, so all of this is

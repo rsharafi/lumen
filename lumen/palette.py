@@ -87,6 +87,16 @@ WALL_DOOR = _c(0x2E3346)
 WALL_DOOR_LIT = _c(0x7C87A6)
 WALL_DEEP = _c(0x0E121C)
 
+# What the acts put on the ground. Water is barely a colour - it is mostly
+# the rim that reads, because standing water in the dark is a shape you see
+# the edge of before you see the surface. The vent's warning is deliberately
+# the same amber as the lantern: it is the vault offering you light, and it
+# should be tempting before it is frightening.
+WATER = _c(0x2B5C74)
+WATER_RIM = _c(0x74C4DF)
+VENT_IRON = _c(0x23262E)
+VENT_TELL = _c(0xFFA23D)
+
 # -- the lantern ------------------------------------------------------------
 LIGHT_CORE = _c(0xFFE9BC)
 LIGHT_WARM = _c(0xFFC46B)

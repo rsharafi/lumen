@@ -11,7 +11,7 @@ import math
 import numpy as np
 from PIL import Image, ImageDraw, ImageFilter
 
-from . import art, noise
+from . import acts, art, noise
 from . import palette
 from .config import SHADOW_FLOOR_MIX, TILE
 from .mathx import clamp
@@ -695,6 +695,20 @@ WALL_FACE = 19.0
 WALL_FACE_NORMAL = (0.0, 0.90, 0.44)
 
 
+def _grade_rgba(image, act):
+    """Grade an RGBA layer without touching its alpha.
+
+    The wall layer carries the shape of the masonry in its alpha channel, and
+    running a colour grade over that would eat the edges of every block.
+    """
+    if image.mode != 'RGBA':
+        return acts.grade_image(image, act)
+    rgb, alpha = image.convert('RGB'), image.getchannel('A')
+    graded = acts.grade_image(rgb, act)
+    graded.putalpha(alpha)
+    return graded
+
+
 def _bake_layers(level, rng, seed):
     """Bake the chamber into two images: floor beneath the light, walls above.
 
@@ -789,6 +803,10 @@ def _bake_layers(level, rng, seed):
     floor = Image.fromarray(np.clip(px_arr, 0, 255).astype(np.uint8), 'RGBA')
 
     key_floor = ('level', 'floor', seed, level.cols, level.rows, level.archetype)
+    # The act's grade, applied once to the finished layer. Everything the
+    # bake drew is in here - tiles, grout, cracks, scorch - so all of it
+    # shifts together and none of it can be missed. See `lumen/acts.py`.
+    floor = acts.grade_image(floor, acts.of(level.depth))
     level.floor_key = key_floor
     level.floor_image = art.wrap(floor, key_floor)
     level.art_keys.append(key_floor)
@@ -911,6 +929,7 @@ def _bake_layers(level, rng, seed):
     walls.putalpha(mask)
 
     key_wall = ('level', 'wall', seed, level.cols, level.rows, level.archetype)
+    walls = _grade_rgba(walls, acts.of(level.depth))
     level.wall_key = key_wall
     level.wall_image = art.wrap(walls, key_wall)
     level.art_keys.append(key_wall)
@@ -1002,7 +1021,10 @@ def generate(depth, rng, boss=False, doors=(), size='medium', seed=0,
         size = 'boss'
         archetype = 'sanctum'
     else:
-        archetype = rng.choice(ARCHETYPES)
+        # Weighted by act rather than picked flat. The first act favours
+        # shapes you can read at a glance, the second opens out into long
+        # sightlines, and the last is short of anywhere to back into.
+        archetype = rng.weighted(list(acts.of(depth).archetypes))
 
     base_cols, base_rows = ROOM_SIZES.get(size, ROOM_SIZES['medium'])
     # A little jitter so two rooms of a size are not the same room. Kept
@@ -1064,7 +1086,10 @@ def generate(depth, rng, boss=False, doors=(), size='medium', seed=0,
     candidates = [(x, y) for _, x, y in scored]
     placed = []
     if braziers is None:
-        braziers = 3 if boss else rng.randint(1, 2)
+        # Fire gets scarcer the further down you are, which is the fuel
+        # budget stated as level design rather than as a number on a curve.
+        lo, hi = acts.of(depth).braziers
+        braziers = 3 if boss else rng.randint(lo, hi)
     for x, y in rng.shuffled(candidates):
         if len(placed) >= braziers:
             break

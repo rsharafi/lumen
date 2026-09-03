@@ -444,6 +444,16 @@ def jump_to_room(kind):
             world.enter_room(room)
             if ARGS.embers:
                 world.embers = ARGS.embers
+            if os.environ.get('LUMEN_AT_HAZARD'):
+                # Stand on this act's hazard, so it can be photographed. It
+                # is drawn into the scene buffer like everything else, so an
+                # unlit pool is correctly invisible and a screenshot taken
+                # from across the room shows nothing at all.
+                spots = ([(p.x, p.y) for p in world.hazards.pools]
+                         + [(v.x, v.y) for v in world.hazards.vents])
+                if spots:
+                    world.player.x, world.player.y = spots[0]
+                    world.camera.snap_to(*spots[0])
             # A shop room is worth nothing to look at with the Ferryman
             # still waiting to be walked into, so open the shelf too.
             if kind == 'shop':

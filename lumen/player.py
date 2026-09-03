@@ -52,6 +52,8 @@ class Player:
         self.moving = False
         # Seconds of lantern smothering left; see the Snuffer.
         self.choke = 0.0
+        #: How much of this frame's speed the ground is taking, 0 to 1.
+        self.ground_slow = 0.0
         self.muzzle_flash = 0.0
 
         self.kills = 0
@@ -146,7 +148,11 @@ class Player:
                     rng.uniform(0.18, 0.34), rng.uniform(3.5, 7.0),
                     palette.DASH_TRAIL, end_size=0.5, opacity=64, drag=3.0)
         else:
-            speed = PLAYER_SPEED * s.speed_mult
+            # `ground_slow` is standing water, set by the world each frame.
+            # The dash is above this branch and deliberately outside it: a
+            # dash is the way *out* of a pool, and taking that away would
+            # make a flooded room a trap rather than a decision.
+            speed = PLAYER_SPEED * s.speed_mult * (1.0 - self.ground_slow)
             target_vx = mx * speed
             target_vy = my * speed
             k = 1.0 - math.exp(-PLAYER_ACCEL * dt)
