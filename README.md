@@ -1,70 +1,44 @@
 # LUMEN — Descent into the Vault
 
-A top-down roguelite built on the CMU CS Academy graphics library
-(`cmu-graphics`). Twelve procedurally generated chambers across six layout
-archetypes, five enemy species with elite variants and two four-phase bosses,
-six weapons, fifty run modifiers, a persistent progression track, and
-real-time 2D shadowcasting — **you carry the only light**, and everything you
-cannot see is still there.
+A top-down roguelite where **you carry the only light**. Twenty floors, each
+a map of rooms you walk between; fifteen species that mostly want something to
+do with your lantern; three bosses; six weapons; fifty-eight run modifiers and
+a shop that spends the same embers your permanent progression does. Real-time
+2D shadowcasting, deferred float lighting, and everything you cannot see is
+still there.
 
 No asset files ship with the game. Every texture, sprite, glow and item icon,
-and all 50 sound effects, are generated at startup from numpy and PIL.
-
-It runs on three renderers behind one interface — cmu-graphics' own
-rasteriser, SDL's renderer, and OpenGL. On the last of those the lighting is
-deferred and runs in float: analytic lights, saturating shadow coverage,
-per-pixel volumetrics, surface relief taken from the art's own shading, dust
-in the air, and a filmic tone map. See [Deferred lighting](#deferred-lighting).
+and all 83 sound effects, are generated at startup from numpy and PIL.
 
 ![The vault, lit only by your lantern](docs/gameplay.png)
 
 <p align="center">
-  <img src="docs/boss.png" width="49%" alt="The Hollow Choir">
-  <img src="docs/draft.png" width="49%" alt="Choosing an offering">
+  <img src="docs/boss.png" width="49%" alt="The Keeper, on floor twenty">
+  <img src="docs/ferryman.png" width="49%" alt="The Ferryman's shelf">
 </p>
 
 ---
 
 ## Running it
 
+<p align="center"><img src="docs/title.png" width="60%" alt="The title screen"></p>
+
 ```bash
 ./run.sh
 ```
-
-There are two front ends and three renderers, and they compose:
-
-```bash
-python main.py                     # cmu-graphics host
-python native.py                   # host it directly on pygame
-LUMEN_RENDERER=cpu  python main.py    # cmu-graphics' own rasteriser
-LUMEN_RENDERER=gpu  python native.py  # SDL's renderer (default)
-LUMEN_RENDERER=gl   python native.py  # OpenGL, with shaders and HDR
-```
-
-`main.py` is the original and is unchanged. `native.py` owns the loop
-outright - see `lumen/host.py` for what that buys, and `lumen/gpu.py` for how
-the renderer is chosen.
 
 That creates a virtualenv on first launch, installs the dependencies, and
 starts the game. It picks the newest suitable Python on `PATH`; override with
 `PYTHON=/path/to/python ./run.sh`. To do it by hand:
 
 ```bash
-python3.12 -m venv .venv && .venv/bin/pip install -r requirements.txt && .venv/bin/python main.py
+python3.12 -m venv .venv && .venv/bin/pip install -r requirements.txt \
+    && .venv/bin/python native.py
 ```
 
-`pygame-ce` is pinned to 2.5.2 or newer even though `cmu-graphics` pulls it in
-anyway: the GPU renderer needs `pygame.Window`, its `allow_high_dpi` flag, and
-`Renderer.compose_custom_blend_mode`, all of which arrived in that release.
-Without them the game still runs, but falls back to `cmu-graphics`' own CPU
-rasteriser - which gives up native resolution and about two thirds of the
-frame rate.
-
-**Python 3.11–3.14 is required** — `cmu-graphics` 2.x does not support 3.10 or
-earlier, and the system Python on macOS is 3.9. Run it from a real terminal:
-`cmu-graphics` starts an interactive console thread on stdin and shuts the app
-down when that stdin reaches EOF, so launching from a non-interactive shell
-exits immediately.
+**Python 3.11+**, `pygame-ce` 2.5.2 or newer, and `moderngl`. There is one
+renderer and it is OpenGL 3.3 core — see [One renderer](#one-renderer) for
+what that replaced and why.
 
 ## Controls
 
@@ -92,8 +66,98 @@ page rather than on the title screen — including **WALL LIGHT**, which keeps
 the masonry lit whatever the lantern is doing, for players who would rather
 read the room than be surprised by it.
 
-Clear a chamber and a rift opens; stand in it to descend and take one of three
-offerings. Floors 6 and 12 belong to the Hollow Choir.
+The **floor map** sits in the corner and shows what you have seen: rooms you
+have walked into, labelled with what they were, and the ones they open onto
+as unmarked outlines. It is a record, not a floorplan handed to you at the
+door.
+
+---
+
+## A floor is a map, not a room
+
+A floor used to be one chamber with one wave in it. The bot cleared floor one
+in six seconds, which meant the lantern's fuel — the game's only clock — never
+had time to run down, and a run was twelve rooms in a row.
+
+A floor is now four to fourteen rooms on a graph: a critical path from the
+entrance to the way down, with branches hung off it that dead-end in
+something worth having. The rule that makes it a game is that **the descent
+opens the moment you reach it**. You never have to clear a floor. What you
+leave behind is the price of going down early, and that only reads as a
+choice if the way down is never withheld — so a floor is a budget of light
+and health, and every branch is a wager against it.
+
+| Room | What it is |
+| --- | --- |
+| ENTRANCE | Where you arrive. A lit brazier. Never hostile. |
+| COMBAT | The staple. Seals behind you. |
+| ELITE | One elite with an escort. Always drops. |
+| CACHE | Embers, or a choice of relics. |
+| SHOP | The Ferryman. |
+| SHRINE | A pact: pay something real, take something real. |
+| HEARTH | Full fuel, a little health, nothing in the room. Rare. |
+| GAUNTLET | Optional, marked as such, and hard. |
+| DESCENT | The rift. Open on arrival. |
+
+### Walking through the door
+
+<p align="center"><img src="docs/crossing.png" width="82%"
+  alt="Standing in a doorway, floor from both rooms lit at once"></p>
+
+A room change used to be a fade to black, a swap, and a fade back — three
+quarters of a second in which the game stopped being a place, happening more
+often than anything else in a run.
+
+The two rooms are put in the same space instead. The neighbour's matching
+doorway is aligned with the one being walked through, which makes the two
+border walls coincide — one wall, one opening, as adjacent rooms ought to be.
+From then until the player is through, both chambers are drawn, both are
+solid, and both occlude the lantern: the visibility sweep is handed the union
+of their edges, so light spills through the doorway into the room ahead.
+
+The swap still happens; it happens *underneath* you. Crossing the threshold
+shifts every coordinate in play — the player, the camera, its frame, loose
+pickups, live particles — by the offset the neighbour was being drawn at.
+Every number changes by a room's width and nothing moves on screen.
+
+`tools/crossing_check.py` is what holds that claim up. It measures the
+player's position *relative to the camera* frame by frame, and separately
+asserts the raw rebase really did happen. A cut would be a thousand-pixel
+step; the worst on-screen step is fifteen, and that is the camera panning as
+the framing widens from one room to two.
+
+Two things had to change underneath it. Doors are carved through the **whole**
+wall now rather than through its inner ring only — a doorway had been an
+alcove you could stand in and never pass through, which nobody noticed for as
+long as walking through one teleported you past it. And the camera frames a
+*region* rather than a size, easing between framings on a smoothstep: an
+exponential lerp is fastest on its first frame, which read as a shove
+followed by a drift.
+
+### Doors
+
+<p align="center"><img src="docs/doors.png" width="34%"
+  alt="A door sealed, flaring, parting, and open"></p>
+
+A doorway used to be a hole that was always open, always passable and always
+transparent to light. Being sealed in was said with translucent blue bars
+drawn across the hole — which read as neither state, and did nothing to the
+light, so a "sealed" room lit the corridor beyond it exactly as brightly as
+an open one.
+
+A door is an object now, and it is a real occluder. Two leaves meet in the
+middle and withdraw into the jambs; while they are out they collide **and**
+cast shadow, both from the same rectangles, so the two can never disagree.
+The lock is drawn *on* the leaves — a seam of cold light down the join, bars
+struck across the face — because light hanging in an empty doorway has
+nothing to be light on.
+
+Clearing the room flares the seam, breaks the bars outward and slides the
+leaves back over half a second, and because they are the occluders the room
+beyond genuinely opens up to the lantern as they go. A hostile room seals
+behind you on arrival, the door you came through included — which it could
+not do before, because until you were through, that door had to stay open
+for you.
 
 ## The lantern
 
@@ -108,7 +172,11 @@ Enemies outside the light draw as nothing but eye-glints.
 
 ## The run, and what outlasts it
 
-**The offering.** Three cards between floors, from a pool of fifty. Half of
+<p align="center"><img src="docs/draft.png" width="82%"
+  alt="Three offerings, lit in the dark"></p>
+
+**The offering.** Three cards between floors, from a pool of fifty-eight.
+Half of
 them raise a number, which is a foundation and not a design - three offerings
 of "damage x1.22" is not a decision, and a run built from them plays like any
 other. The other half either want a way of fighting or cost something:
@@ -128,7 +196,7 @@ other. The other half either want a way of fighting or cost something:
 
 Rarity tilts with depth, so the foundational things dominate early and the
 run-defining ones get likelier further down: measured, rarity-1 upgrades are
-26% of offers on floor one and 41% on floor twelve. Without that, a build is
+26% of offers on floor one and 41% at the bottom. Without that, a build is
 decided on floor one by whatever happened to come up.
 
 **Wardens** carry a shield with its own health, and it narrows as it takes
@@ -140,34 +208,91 @@ lance shots), flanking is a shortcut rather than the only door, and getting
 behind one still reaches the body while the shield is up. It needs no health
 bar, because the arc shrinking from 132° to 35° *is* the bar.
 
-**Two bosses, and they ask different questions.** The Hollow Choir is the one
-you meet first, on floor six: a slow mass that fills the room with bullets, so
-the answer to it is footwork. The Snuffer waits at the bottom, because a boss
-that takes your light away is only frightening once you have spent eleven
-floors relying on it — its aura eats fuel, its signature attack smothers the
-flame to a crawl, and its own light *shrinks* as it rages, so the fight gets
-darker the closer it is to dying.
+**Three bosses, and they ask different questions.** The Hollow Choir is met
+first, on floor six: a slow mass that fills the room with bullets, so the
+answer to it is footwork. The Snuffer waits on thirteen and is the opposite in
+every direction that matters — fast, small, and it comes for the one resource
+the whole game is built on. Its aura eats fuel, its signature attack smothers
+the flame to a crawl, and its own light *shrinks* as it rages, so the fight
+gets darker the closer it is to dying.
 
-Both **arrive** rather than simply being there. Three beats, all built out of
-light because that is the language the rest of the game speaks: the room
-answers first with rings running outward, then the thing gathers out of the
-dark with motes falling inward, then it opens its eye. The view swings across
-to watch and comes back as it finishes — an arrival you cannot see is not an
-arrival — and nothing takes control away from you while it happens.
+**The Keeper** is at the bottom, on floor twenty, and it has every lantern but
+yours.
 
-They **come apart** the same way. Two and a half seconds of the body cracking
-open in bursts, the light it carried guttering and flaring, the camera holding
-on it, and one last collapse that lights the whole chamber. The way down does
-not open until it is over.
+For nineteen floors light is the one safe thing in this game. That fight takes
+it away by turning it round: the Keeper attacks *with* light. It brands the
+floor with it, sweeps the room with it, carries a ring of stolen lanterns that
+shield it and fire outward, and at the end gathers every scrap in the chamber
+and throws the lot back at you. Its shadows are the only cover there is, which
+is why its sanctum has pillars in it. And where the Snuffer's own light
+shrinks as it rages, the Keeper's **grows** — the last phase of the last fight
+is played in a room that is almost entirely lit, with almost nowhere left to
+stand.
 
-The offering before a boss floor says so. The Hollow Choir waits at
-the bottom: a slow mass that fills the room with bullets, so the answer to it
-is footwork. The Snuffer is on floor six and is the opposite in every
-direction that matters — fast, small, and it comes for the one resource the
-whole game is built on. Its aura eats fuel, its signature attack smothers the
-flame down to a crawl for a few seconds, and it fights hardest in the dark it
-has just made. Its own light *shrinks* as it rages, so the fight gets darker
-the closer it is to dying.
+All three **arrive** rather than simply being there. Three beats, all built
+out of light because that is the language the rest of the game speaks: the
+room answers first with rings running outward, then the thing gathers out of
+the dark with motes falling inward, then it opens its eye. The view swings
+across to watch and comes back as it finishes — an arrival you cannot see is
+not an arrival — and nothing takes control away from you while it happens.
+They **come apart** the same way, and the way down does not open until it is
+over.
+
+
+### The bestiary
+
+Fifteen species, introduced roughly one a floor for sixteen floors — so the
+vault is still teaching you something new most of the way down. Floor one is
+pure crawler; floor twenty holds all fifteen and crawlers are still 12% of
+what spawns, because it should stay recognisably itself. A species' weight
+decays with how long it has been legal, which is what stops act three looking
+like act one with bigger numbers.
+
+Three of them could not exist in a game with room lighting, and they are the
+reason the roster was worth expanding at all:
+
+* the **lurker** moves only while it is *unlit*. Your light is how you see it
+  and also how you stop it, and you cannot point it everywhere — measured, it
+  covers 305 px/s in the dark and 2 px/s in the light;
+* the **pale** can only be hurt while it *is* lit, and takes 8% of a hit
+  otherwise. It is the mirror of the lurker, and the reason both exist: a room
+  holding the two cannot be solved by pointing the lantern one way and leaving
+  it there. The flare is its natural answer;
+* the **douser** takes fuel instead of health, and chokes the flame for
+  seconds. The only thing in the vault that attacks the resource rather than
+  the body.
+
+The rest are the honest shapes a roster needs to function: a **bolter** that
+telegraphs a charge across the room, a **keener** that mends whatever is
+nearest you and never comes close itself, a **splitter** that becomes two
+smaller ones, a **cinder** swarm that arrives as six, a **mirror** that sends
+your own shots back as hostile fire, a **delver** that travels under the floor
+and marks where it will surface, and a **carrion** that leaves a pool of
+standing rot — which makes *where* you kill it a decision nothing else asks.
+
+`tools/bestiary_check.py` holds each of them to the claim made for it: 29
+checks, and every one of them is the specific behaviour rather than "it did
+not crash".
+
+### The Ferryman
+
+Embers were a score that happened to be spendable *between* runs. They are
+spendable during one now, at a shop with its own room, and the point of it is
+a single decision made eight or nine times a descent: **spend it now, or bank
+it for the Vigil.** One currency does that; two would let you have both and
+decide nothing.
+
+Nothing on his shelf is priced in embers. `tools/economy_report.py` counts
+what a floor actually pays against the real spawn tables — 54 embers on floor
+one, about 700 on floor nineteen — so a flat price list would be a mortgage
+early and a rounding error late. Everything is priced as a share of the floor
+it is standing on.
+
+He stocks an offering always (it is the reason to stop), and rolls for a
+restorative, a redraw, and a weapon the run is not carrying. That last one is
+the interesting one: the Vigil unseals a weapon for good, and the Ferryman
+rents you one for the descent — which lets a run reach for something it has
+not earned yet and find out whether it wants to.
 
 **Elites.** From floor two on, a spawn can carry an affix — WARDED soaks most
 of what lands on it until the ward breaks, GORGED is four times the health and
@@ -231,9 +356,33 @@ arrange, and is reported as UNPROVEN rather than counted as a pass.
 
 ### Which boss is harder
 
-The Snuffer waits at the bottom of the vault and the Hollow Choir is met
-halfway down, so the Snuffer should be the harder fight. It was not, and the
-same kind of probe says why: a fixed kiting policy, a build drafted one
+This vault has shipped a final boss that was easier than the one halfway up,
+twice, and neither time was it visible by reading the code. `tools/boss_probe.py`
+exists so it is visible now: it fights all three with the same build and the
+same fixed kiting policy, and prints the one line that matters — whether the
+last boss is the hardest.
+
+| | fight | dmg/s | over the fight | hits/s |
+| --- | --- | --- | --- | --- |
+| The Hollow Choir, floor 6 | 53 s | 18.03 | 943 | 1.147 |
+| The Snuffer, floor 13 | 86 s | 34.05 | 2750 | 1.093 |
+| **The Keeper, floor 20** | **97 s** | **50.84** | **5680** | **1.043** |
+
+Eight seeds; standard error ±1.8, ±3.9 and ±7.1. The probe caught three
+faults in the Keeper on its first run, all of them invisible by inspection:
+
+* its `die` never called `super().die`, so it sat **alive at minus thirty per
+  cent health** and no fight ever ended;
+* its stolen lanterns each blocked a 0.42 rad arc, and seven of them covered
+  **94% of every angle the player could shoot from** — not a shield, an
+  invulnerability;
+* and they never expired, so they were back to ten strong by the minute mark.
+
+#### The first time this happened
+
+The Snuffer used to wait at the bottom with the Hollow Choir halfway down, so
+the Snuffer should have been the harder fight. It was not, and the same kind
+of probe said why: a fixed kiting policy, a build drafted one
 offering a floor from the real pool at the real depth, and the player made
 immortal so every fight runs to the end and the numbers are comparable.
 
@@ -310,10 +459,41 @@ its 41.8.
 
 ## How it is built
 
-The interesting problem here is that `cmu-graphics` is a teaching library, not
-a game engine. Everything below was measured on version 2.0.1 (whose renderer
-is a compiled Rust rasteriser, `wyvern`) rather than assumed — and several of
-the measurements were surprising enough to change the design.
+### One renderer
+
+The game shipped on three, behind one interface: cmu-graphics' own rasteriser,
+SDL's renderer, and OpenGL. Every draw call carried a branch to pick between
+them, and only the last one can do what this game actually is — deferred float
+lighting, per-pixel volumetrics, a filmic tone map. The other two are gone.
+
+> 27 files changed, 274 insertions(+), **2325 deletions(-)**
+
+`sdlx.py` and the cmu-graphics front end went whole. `draw.py` lost its
+branches and is four thin functions. `runtime.py` went from 1003 lines to
+about 500 — what is left opens the window and asks the display about itself,
+and what went was two measured workarounds for how cmu-graphics presented a
+frame, neither of which has anything to hook now that `lumen/host.py` owns the
+loop. `palette.py` grew its own `rgb`, because a dozen call sites read
+`.red`/`.green`/`.blue`.
+
+The three renderer-comparison tools went with the renderers they compared, and
+the GPU smoke test with them: it existed to reach branches the harness could
+not, and `tools/playtest.py` now hosts itself on `lumen/host.py` and runs on
+the real thing.
+
+That last change immediately found a bug worth having. The game derives its
+whole design scale from `app.width`/`app.height`, and those were only put in
+step with the framebuffer on a resize *event* — so the first frame drew a
+1280×720 game into the top-left quarter of a 2560×1440 buffer. It looked right
+in play only because going fullscreen happened to raise a resize on the way.
+
+### What the measurements were for
+
+Much of what follows was measured on `cmu-graphics` 2.0.1, whose renderer is a
+compiled Rust rasteriser. The library is gone; the numbers are kept because
+they are *why* the game is shaped the way it is — why the art is baked into
+sprites, why text is a texture, why the chamber is two big images rather than
+a thousand small shapes.
 
 **Measure the whole frame, not the callback.** `redrawAll` only *constructs*
 shapes; the framework rasterises the tree, converts the buffer and blits it
@@ -400,6 +580,11 @@ Enemy visibility uses the same machinery: one batched line-of-sight test for
 every enemy at once (`lighting.visible_points`), ~0.02 ms for two dozen.
 
 ### Resolution and scaling
+
+> Much of what follows compares three renderers, because it was written while
+> there were three. Only the OpenGL path survives; the comparisons are kept
+> because they are the argument for it.
+
 
 The window is resizable, `F` toggles fullscreen, and a **DISPLAY** setting on
 the title screen picks how sharp the game draws. Both are remembered between
@@ -566,8 +751,7 @@ nothing else in the game changed:
 
 The GPU is nowhere near its limit: a synthetic frame with 6000 sprites, 800
 light wedges and three chamber-sized layers — about forty times what the game
-actually draws — still held the vsync period. `LUMEN_RENDERER=cpu` selects the
-old path, which is what the DISPLAY dial is for.
+actually draws — still held the vsync period.
 
 Three details are load-bearing. **Sprites are premultiplied**, because that is
 how cmu-graphics composites, so textures use a blend mode composed to
@@ -723,9 +907,9 @@ resolution on the title screen killed the app. `tools/playtest.py` has
 
 ### Deferred lighting
 
-`LUMEN_RENDERER=gl` swaps SDL's fixed-function renderer for OpenGL with real
-shaders and float16 render targets, and the whole lighting model changes with
-it. Nothing is drawn lit. Everything solid goes into a **scene** buffer at its
+This is the pipeline, and the reason the other two renderers are gone: real
+shaders and float16 render targets, which nothing else on offer could do.
+Nothing is drawn lit. Everything solid goes into a **scene** buffer at its
 own unlit colour, every light goes into a **light** buffer, and the composite
 multiplies the two. That is what makes an enemy fade up as the lantern reaches
 it instead of popping on when a visibility test flips, and what lets masonry
@@ -904,16 +1088,15 @@ second, and a whole chamber resolves in **0.16 ms**, so it is far cheaper than
 per-agent path search. Dropped enemies pick their way around corners, and
 embers route around walls to reach you.
 
-### Two library quirks worth knowing
+### Two quirks worth knowing
 
 Both cost real debugging time and are documented in the code:
 
-1. **Images must be premultiplied.** `cmu-graphics` hands image bytes to its
-   renderer untouched, and that renderer composites premultiplied alpha.
-   Feeding it ordinary straight-alpha data makes every translucent pixel render
-   at full strength — a 5 %-alpha white grain overlay comes out as solid white
-   noise. `art.premultiply` handles it (and skips the work for opaque images,
-   which saves ~17 ms per chamber bake).
+1. **Images must be premultiplied.** The renderer composites premultiplied
+   alpha, and feeding it ordinary straight-alpha data makes every translucent
+   pixel render at full strength — a 5 %-alpha white grain overlay comes out
+   as solid white noise. `art.premultiply` handles it (and skips the work for
+   opaque images, which saves ~17 ms per chamber bake).
 2. **PIL only alpha-blends onto RGB.** `ImageDraw.Draw(img, 'RGBA')` blends when
    the target is RGB and *replaces* when the target is RGBA, so drawing
    translucent detail straight onto an RGBA canvas punches holes instead of
@@ -921,9 +1104,7 @@ Both cost real debugging time and are documented in the code:
    end.
 
 Also: `opacity` outside 0–100 raises rather than clamping, which is a hard
-crash mid-frame, so computed opacities go through `mathx.opacity`. And
-`from cmu_graphics import *` shadows `random`, `round`, `print` and — painfully
-— PIL's `Image`, so this codebase always imports the drawing functions by name.
+crash mid-frame, so computed opacities go through `mathx.opacity`.
 
 ### Procedural sound
 
@@ -1096,78 +1277,93 @@ does not dip.
 ## Layout
 
 ```
-main.py              entry point — binds cmu-graphics handlers to Game
-native.py            entry point — hosts the same Game directly on pygame
+native.py            entry point — builds the Game and hands it to host.run
 lumen/
-  app.py             top-level state machine (title, run, draft, endings)
-  world.py           one floor: simulation and world rendering
+  app.py             top-level state machine (title, run, draft, shop, endings)
+  world.py           the live room: simulation, crossings, world rendering
+  floorplan.py       the graph a floor is: rooms, doors, kinds, the map
+  rooms.py           building the chambers behind those rooms, and holding
+                     the right few — bake-ahead on a worker, LRU eviction
+  doors.py           leaves, jambs, the seal, and the occluders they cast
+  fixtures.py        the things you walk into: cache, hearth, shrine, Ferryman
+  shop.py            the Ferryman's shelf, and what he asks for it
   lighting.py        numpy shadowcasting — visibility fans and LOS tests
   flow.py            breadth-first distance field: enemy and pickup pathing
-  runtime.py         host-level tuning of the framework's present path
-  host.py            the native pygame loop: fixed timestep, no framework
-  gpu.py             picks a renderer at import; the rest of the game asks it
-  glx.py             OpenGL backend — shaders, float16 targets, the pipeline
-  sdlx.py            SDL backend — textured quads and fixed-function blending
+  host.py            the loop: fixed timestep, events, present
+  runtime.py         the window, the framebuffer, and what the display can do
+  gpu.py             the renderer, behind one name
+  glx.py             OpenGL — shaders, float16 targets, the whole pipeline
   motes.py           the dust field
   level.py           chamber generation, collision, baked floor/wall images
   art.py             procedural sprites, textures, and baked text
   noise.py           vectorised value noise / fbm
   player.py          movement, dash, aiming, the lantern
-  enemies.py         five species, their AI and their silhouettes
-  boss.py            the Hollow Choir
-  projectiles.py     pooled projectiles and the three weapons
+  enemies.py         fifteen species, their AI and their silhouettes
+  boss.py            the Hollow Choir, the Snuffer, and the Keeper
+  projectiles.py     pooled projectiles and the six weapons
   particles.py       pooled particle system
   fx.py              camera, shake, hit-stop, floating text, transient lights
   pickups.py         embers, oil, mercy
-  upgrades.py        the 50 run modifiers, and the Stats they mutate
+  upgrades.py        the 58 run modifiers, and the Stats they mutate
   vigil.py           what survives a run: banked embers and what they buy
-  hud.py             heads-up display and minimap
-  screens.py         title, help, draft, pause, endings
+  hud.py             heads-up display, room map, floor map
+  screens.py         title, help, draft, shop, pause, endings
   audio.py           numpy sound synthesis and the WAV cache
   save.py            persistent records
   config.py          all tuning constants
 tools/
-  playtest.py        headless driver: scripted input, autopilot, screenshots
-  gpu_smoke.py       drives the GPU path under the native host, on either
-                     backend — the branches playtest structurally cannot reach
+  playtest.py        drives the real game: scripted input, autopilot, shots
+  floor_report.py    every floor graph a run can produce, checked for sanity
+  room_check.py      every door reachable, every entry clear, every room
+                     populatable — across thousands of generated chambers
+  crossing_check.py  a room change is a walk and not a cut
+  bestiary_check.py  each species provably does the thing it exists for
+  boss_probe.py      all three bosses, same build, same policy, one table
   stat_probe.py      proves every upgrade stat changes something observable
-  shoot.py           generic harness for prototyping a scene in isolation
+  economy_report.py  what a floor pays, which is what every price is set from
+  sound_report.py    every effect in the bank, and whether anything plays it
 ```
 
 ## Development
 
-The game can be driven headlessly, with a fixed timestep and a pinned seed, so
-runs are reproducible:
+Every tool drives the real game, at a fixed timestep with pinned seeds, so
+runs are reproducible.
 
 ```bash
 # Screenshot the title screen
 .venv/bin/python tools/playtest.py --scenario title --out shots/title.png
 
-# Let the autopilot play, starting on the boss floor
-.venv/bin/python tools/playtest.py --scenario firstframe --auto --floor 6 \
-    --frames 1100 --seed 31 --out shots/boss.png
+# Let the autopilot play, dropped straight into a combat room deep down
+.venv/bin/python tools/playtest.py --scenario firstframe --room combat \
+    --auto --floor 14 --frames 220 --seed 5 --out shots/fight.png
 
-# Stop and capture as soon as the upgrade draft appears
-.venv/bin/python tools/playtest.py --scenario firstframe --auto \
-    --stop-at draft --settle 30 --out shots/draft.png
+# Explore a whole floor, walking between rooms
+.venv/bin/python tools/playtest.py --scenario firstframe --auto --explore \
+    --floor 6 --frames 2000
+
+# Stop and capture as soon as the offering appears
+.venv/bin/python tools/playtest.py --scenario firstframe --room descent \
+    --auto --stop-at draft --settle 45 --out shots/draft.png
 ```
 
-`playtest.py` hosts the game inside cmu-graphics, where the renderer takeover
-only ever reaches the SDL backend — so every branch behind `gpu.active()` on
-the OpenGL path goes undrawn by the suite. `tools/gpu_smoke.py` runs the same
-`Game` through `lumen/host.py` on a chosen backend and draws what the suite
-cannot: braziers lit and mid-ignition, seen close and from across the floor,
-across two resolution changes and both visual settings. It exits non-zero with
-a traceback rather than skipping a frame.
+The rest of `tools/` answers one question each, and each was written because
+something got past inspection:
 
 ```bash
-.venv/bin/python tools/gpu_smoke.py --renderer gl
-.venv/bin/python tools/gpu_smoke.py --renderer sdl
+.venv/bin/python tools/floor_report.py       # are the floor graphs sane
+.venv/bin/python tools/room_check.py         # is every door actually reachable
+.venv/bin/python tools/crossing_check.py     # is a room change a walk, not a cut
+.venv/bin/python tools/bestiary_check.py     # does each species do its thing
+.venv/bin/python tools/boss_probe.py         # is the last boss the hardest
+.venv/bin/python tools/stat_probe.py         # does every upgrade change anything
+.venv/bin/python tools/economy_report.py     # what does a floor actually pay
+.venv/bin/python tools/sound_report.py       # is anything in the bank silent
 ```
 
-That gap was not hypothetical: a lit brazier went on referencing two constants
-that had been deleted for weeks, and the first thing to notice was a player
-walking into one.
+`playtest.py` used to host the game inside cmu-graphics, which meant every
+branch behind the OpenGL path went undrawn by the suite and needed a separate
+smoke test to reach. There is one renderer now and the harness runs on it, so
+that gap and the tool that covered it are both gone.
 
 Each run reports frame timings, peak draw-call drivers, and the slowest frames.
 With a fixed timestep and a pinned seed, renders are **pixel-reproducible** -
@@ -1195,5 +1391,5 @@ headless harness:
 For example, to confirm the real window still holds 60 fps in combat:
 
 ```bash
-CI=1 LUMEN_SELFTEST=300 LUMEN_SELFTEST_PLAY=1 .venv/bin/python main.py
+LUMEN_SELFTEST=300 LUMEN_SELFTEST_PLAY=1 .venv/bin/python native.py
 ```
