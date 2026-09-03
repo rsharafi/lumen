@@ -23,8 +23,8 @@ import time
 
 from .draw import drawLabel, drawPolygon
 
-from . import (art, audio, draw, gpu, hud, palette, rng, runtime, save,
-               screens, shop, upgrades, vigil)
+from . import (art, audio, draw, floorplan, gpu, hud, music, palette,
+               rng, runtime, save, screens, shop, upgrades, vigil)
 from .config import (BOSS_FLOORS, DESIGN_HEIGHT, FPS, FLOORS_PER_RUN, HEIGHT,
                      MAX_FPS,
                      UPGRADE_CHOICES, WIDTH)
@@ -776,6 +776,7 @@ class Game:
             return
 
         self._poll_mouse()
+        self._tick_music(dt)
         # dt is the real interval between steps, which is the frame period the
         # player actually sees - see the note in runtime about why timing
         # inside redrawAll measures only a third of it. Only frames spent in a
@@ -1318,11 +1319,32 @@ class Game:
         save.save(self.save)
         audio.play('ui_select', 0.5)
 
+    def _tick_music(self, dt):
+        """Tell the score where it is, and let it get there.
+
+        Everywhere that is not a chamber gets the first act's bed at a low
+        intensity: the title, the Vigil and the offering are all the same
+        room as far as the score is concerned, and swapping stems for a menu
+        would make the menus louder than the game.
+        """
+        director = music.director()
+        world = self.world
+        if world is not None and self.state in (PLAYING, PAUSED, DRAFT, SHOP):
+            director.set_scene(
+                act=floorplan.act_of(world.depth),
+                boss=world.boss_ref is not None and world.boss_ref.alive,
+                intensity=0.0 if self.state != PLAYING
+                else world.music_intensity())
+        else:
+            director.set_scene(act=1, boss=False, intensity=0.0)
+        director.update(dt)
+
     def toggle_sound(self):
         self.sound_on = not self.sound_on
         self.save['sound'] = self.sound_on
         save.save(self.save)
         audio.bank().set_enabled(self.sound_on)
+        music.director().set_enabled(self.sound_on)
         if self.sound_on:
             audio.play('ui_select', 0.6)
 

@@ -552,6 +552,35 @@ class World:
         self.effects.add_light(fixture.x, fixture.y, 300, 0.9, palette.WARD)
         self.effects.add_shake(2.2)
 
+    def music_intensity(self):
+        """How worried the score should sound, 0 to 1.
+
+        Three things, and the reason it is not simply a body count is the
+        third: a room with two things left in it and the player on their last
+        health is the most frightening moment this game has, and a count
+        would score it as almost over.
+        """
+        if self.boss_ref is not None and self.boss_ref.alive:
+            return 1.0
+        live = 0.0
+        for enemy in self.enemies:
+            if not enemy.alive:
+                continue
+            # Weighted by what a thing is worth, so six cinders do not read
+            # as a bigger problem than two wardens.
+            live += 0.6 if enemy.radius < 9.0 else 1.0
+        threat = min(1.0, live / 7.0)
+
+        hurt = 1.0 - clamp(self.player.hp / max(self.stats.max_hp, 1e-6),
+                           0.0, 1.0)
+        dark = 1.0 - clamp(self.player.fuel / max(self.player.fuel_max, 1e-6),
+                           0.0, 1.0)
+        # Danger only counts while there is something in the room to be in
+        # danger *from* - a player exploring on low health should feel exposed,
+        # not scored as though a fight were happening.
+        peril = (hurt * 0.55 + dark * 0.3) * (0.35 + 0.65 * min(1.0, live))
+        return clamp(max(threat, threat * 0.55 + peril), 0.0, 1.0)
+
     def rearm_fixture(self):
         """Disarm the room's fixture until the player steps clear of it.
 

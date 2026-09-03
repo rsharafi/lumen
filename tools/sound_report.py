@@ -120,9 +120,14 @@ def main():
     # Names reached indirectly - `weapon.sound`, or a conditional expression -
     # cannot be found by reading the source, so an unplayed name is a hint
     # rather than a finding.
-    unplayed = sorted(set(names) - set(asked))
-    print(f'{len(names)} in the bank, {len(asked)} named by a call site, '
-          f'{len(missing)} silent')
+    # The score is reached by a name the director builds, so no call site
+    # spells any of it out. Counted separately rather than listed as
+    # suspicious: seven stems in the "might be dead" column is seven things
+    # to re-check by hand every time this runs.
+    stems = sorted(n for n in names if n.startswith('mus_'))
+    unplayed = sorted(set(names) - set(asked) - set(stems))
+    print(f'{len(names)} in the bank ({len(stems)} of them the score), '
+          f'{len(asked)} named by a call site, {len(missing)} silent')
     if unplayed:
         print(f'not named directly (may be played indirectly): '
               f'{", ".join(unplayed)}')

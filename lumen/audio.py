@@ -19,7 +19,7 @@ import wave
 import numpy as np
 
 SAMPLE_RATE = 44100
-CACHE_VERSION = 15
+CACHE_VERSION = 17
 
 _bank = None
 
@@ -1375,7 +1375,12 @@ class SoundBank:
     hand-sized voice pools this had before and correct when tails got longer.
     """
 
-    CHANNELS = 48
+    CHANNELS = 56
+    #: Channels held back for the score. Music loops forever, so a stem that
+    #: lost its channel to a burst of gunfire would simply stop and never come
+    #: back - reserving them means `Sound.play` for an effect can never take
+    #: one. See `lumen/music.py`.
+    MUSIC_CHANNELS = 8
 
     # (takes, pitch spread, how much colour varies). Sounds you hear over and
     # over get the most; a one-shot like the boss roar wants to be the same
@@ -1455,6 +1460,7 @@ class SoundBank:
         self._ready = False
         self._failed = False
         self._rng = np.random.default_rng(90210)
+        self._music_next = 0
 
     def build(self):
         """Generate any missing WAVs. Safe to call more than once."""
@@ -1463,6 +1469,12 @@ class SoundBank:
         if os.path.exists(stamp):
             return
         for name, signal in _make_sounds().items():
+            _write_wav(os.path.join(self.cache_dir, f'{name}.wav'), signal)
+        # The score. Separate from the effects because it is much slower to
+        # build - half-minute drones with long reverb tails - and because
+        # `music` imports from here, so the import has to go the other way.
+        from . import music
+        for name, signal in music.make_stems().items():
             _write_wav(os.path.join(self.cache_dir, f'{name}.wav'), signal)
         # Only ever one stamp, so a cache that has been through several
         # versions does not accumulate one marker per version it has seen.
@@ -1510,6 +1522,9 @@ class SoundBank:
                 pygame.mixer.pre_init(SAMPLE_RATE, -16, 2, 512)
                 pygame.mixer.init()
             pygame.mixer.set_num_channels(self.CHANNELS)
+            # The reserved block is at the bottom of the range, and
+            # `Sound.play()` with no channel never chooses from it.
+            pygame.mixer.set_reserved(self.MUSIC_CHANNELS)
         except Exception as exc:
             sys.stderr.write(f'[lumen] audio device unavailable: {exc}\n')
             self._failed = True
@@ -1570,6 +1585,33 @@ class SoundBank:
             angle = (pan + 1.0) * 0.25 * math.pi
             channel.set_volume(gain * math.cos(angle), gain * math.sin(angle))
             channel.play(sound)
+            return channel
+        except Exception:
+            return None
+
+    def ready(self):
+        return self._ready and self.enabled and not self._failed
+
+    def loop(self, name):
+        """Start `name` looping forever on a reserved channel.
+
+        Returns the channel so the caller can ride its volume, or None if
+        there is no sound by that name or no channel left to give it. Started
+        silent: the director fades it in, and a stem that arrived at full
+        level would be the one thing in the score anybody noticed.
+        """
+        if not self.ready():
+            return None
+        takes = self._takes.get(name)
+        if not takes:
+            return None
+        try:
+            import pygame
+            index = self._music_next % self.MUSIC_CHANNELS
+            self._music_next += 1
+            channel = pygame.mixer.Channel(index)
+            channel.set_volume(0.0)
+            channel.play(takes[0], loops=-1)
             return channel
         except Exception:
             return None
