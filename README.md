@@ -579,6 +579,42 @@ Rendering it took three non-obvious steps:
 Enemy visibility uses the same machinery: one batched line-of-sight test for
 every enemy at once (`lighting.visible_points`), ~0.02 ms for two dozen.
 
+### Light on stone, and why corners looked wrong
+
+The floor has always been shadowed correctly: it is drawn straight from the
+visibility polygon, so anything the sweep cannot see is dark. The **walls**
+were not. `lit_wall_segments` decided whether a piece of masonry was lit from
+two things only — how far it was, and which way it faced — and nothing in it
+asked whether anything stood *between* that stone and the flame.
+
+So a wall behind a pillar lit up as though the pillar were not there, and a
+wall around a corner lit up as though the corner were not there. Measured
+across one real chamber, sampling every third open tile:
+
+| | lit pieces | lit while invisible |
+| --- | --- | --- |
+| before | 15495 | **1384 (8.9%)** — worst at 0.56 brightness |
+| after | 11133 | 9 (0.1%) |
+
+That is the whole of it. Lit stone beside correctly-shadowed floor does not
+read as "a wall is too bright", it reads as **a shadow falling in the wrong
+place**, which is exactly what it looked like.
+
+The fix is the same batched line-of-sight the rest of the module already
+used, run once over every candidate piece; midpoints are lifted 1.5 units off
+the face first, because a point lying on its own wall is a degenerate ray.
+It is free — better than free. It costs 0.17 ms to compute and removes 44% of
+the edge pieces that were being drawn, so the 95th-percentile frame got
+*shorter*: 18.30 ms to 17.51 ms.
+
+`LIGHT_MAX_CORNERS` went from 96 to 256 at the same time, for a related
+reason. A dropped corner is a **missing shadow** — the sweep has no ray there,
+so the polygon runs straight past an edge it should have caught. At 96 that
+happened in about 1.5% of stances, and a crossing, which hands the sweep two
+rooms' worth of edges at once, went well past it. Best of three after warm-up,
+it costs 0.091 ms a sweep at 96 and 0.092 ms at 256: the cap is a backstop
+against a pathological room, not a budget.
+
 ### Resolution and scaling
 
 > Much of what follows compares three renderers, because it was written while

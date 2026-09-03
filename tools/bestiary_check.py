@@ -301,10 +301,42 @@ def case_bolter():
           f'wind-up seen {saw_wind}, charge seen {saw_charge}')
 
 
+def case_walls_are_shadowed():
+    """Lit stone must be stone the light can actually reach.
+
+    `lit_wall_segments` used to decide this from distance and facing alone,
+    with nothing asking whether anything stood between the wall and the flame
+    - so a wall behind a pillar lit up as though the pillar were not there.
+    Measured across a chamber, 8.9% of lit pieces were invisible ones, the
+    worst at 0.56 of full brightness, and it is why corners looked wrong: the
+    floor was shadowed correctly and the walls beside it were not.
+    """
+    from lumen import lighting
+    world = fresh(depth=9)
+    level = world.level
+    radius = 300.0
+    bad = total = 0
+    for col, row in level.open_tiles(2)[::3]:
+        x, y = level.tile_center(col, row)
+        pieces = lighting.lit_wall_segments(level, x, y, radius, height=22.0)
+        if not pieces:
+            continue
+        mids = [((p[0] + p[2]) * 0.5, (p[1] + p[3]) * 0.5) for p in pieces]
+        for piece, seen in zip(pieces,
+                               lighting.visible_points(level, x, y,
+                                                       radius * 1.2, mids)):
+            total += 1
+            if not seen and piece[4] > 0.12:
+                bad += 1
+    share = 100.0 * bad / max(total, 1)
+    check('lit walls are walls the light reaches', share < 1.0,
+          f'{bad} of {total} lit pieces invisible ({share:.1f}%)')
+
+
 def main():
     for case in (case_all_spawn, case_lurker, case_pale, case_douser,
                  case_splitter, case_carrion, case_mirror, case_delver,
-                 case_keener, case_bolter):
+                 case_keener, case_bolter, case_walls_are_shadowed):
         try:
             case()
         except Exception as exc:                  # noqa: BLE001

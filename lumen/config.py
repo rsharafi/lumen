@@ -88,8 +88,18 @@ LANTERN_FLARE_DAMAGE = 26.0
 LANTERN_FLARE_KNOCKBACK = 620.0
 
 # Shadowcasting resolution. Rays are cast at wall corners (plus a hair either
-# side); this caps how many corners we will consider in one frame.
-LIGHT_MAX_CORNERS = 96
+# side); this caps how many corners are considered in one frame.
+#
+# A dropped corner is a *missing shadow* - the sweep has no ray there, so the
+# visibility polygon runs straight past an edge it should have caught, and the
+# floor beyond it lights up. At 96 that happened in about 1.5% of stances in a
+# real chamber (the worst measured 116 corners in range), and a crossing, which
+# hands the sweep two rooms' worth of edges at once, went well past it.
+#
+# It costs nothing to raise. Measured over a chamber's worth of stances, best
+# of three after warm-up: 0.091 ms a sweep at 96, 0.092 ms at 256. The cap is
+# a backstop against a pathological room, not a budget.
+LIGHT_MAX_CORNERS = 256
 LIGHT_EPSILON = 0.0016         # radians nudged either side of each corner
 
 # ------------------------------------------------------------------- fx -----
