@@ -266,9 +266,19 @@ class Level:
         self.doors = {}
         for side in sides:
             c0, c1, r0, r1 = self._door_span(side)
-            for r in range(r0, r1 + 1):
-                for c in range(c0, c1 + 1):
-                    self.grid[r][c] = FLOOR
+            # Through the *whole* wall, not just its inner ring. The border is
+            # BORDER tiles thick, and carving only the innermost one left a
+            # doorway that was an alcove: you could stand in it and never pass
+            # through it. That went unnoticed for as long as walking through a
+            # door teleported you - the player was placed on the far side and
+            # never had to make the trip.
+            dc, dr = INWARD[side]
+            for step in range(0, BORDER):
+                for r in range(r0, r1 + 1):
+                    for c in range(c0, c1 + 1):
+                        rr, cc = r - dr * step, c - dc * step
+                        if 0 <= rr < self.rows and 0 <= cc < self.cols:
+                            self.grid[rr][cc] = FLOOR
             self.doors[side] = (c0, c1, r0, r1)
 
             dc, dr = INWARD[side]

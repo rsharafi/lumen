@@ -359,6 +359,24 @@ def _floor_goal(world):
     if world.warded:
         return None
 
+    # Mid-crossing the goal is straight on through, not the doorway - the
+    # doorway is where the bot is standing. A player walks through a door
+    # because they were already walking; a bot that aims at the middle of one
+    # arrives and stops, and the crossing never completes.
+    if world.crossing is not None:
+        from lumen.floorplan import OPPOSITE
+        c = world.crossing
+        step = 300.0
+        if c['from'] is None:
+            cx, cy = world.level.door_center(c['side'])
+            heading = c['side']
+        else:
+            cx, cy = world.level.door_center(OPPOSITE[c['side']])
+            heading = c['side']
+        push = {'n': (0.0, -step), 's': (0.0, step),
+                'w': (-step, 0.0), 'e': (step, 0.0)}[heading]
+        return (cx + push[0], cy + push[1])
+
     side = None
     if ARGS.explore:
         # Everything else first. Standing on the rift ends the floor, so a
@@ -574,6 +592,20 @@ def onStep(app):
         if not STATE['jumped']:
             sys.stderr.write(
                 f'[playtest] no {ARGS.room} room on this floor\n')
+    if os.environ.get('LUMEN_DBG'):
+        w = GAME.world
+        if w is not None and w.crossing is not None and n % 20 == 0:
+            sys.stderr.write(
+                f"[segs] n={n} merged={len(w.level.seg_ax)} "
+                f"base={len(w.level.base_segments[0])} "
+                f"lit_edges={w.last_edges} levels={len(w._crossing_levels())}\n")
+            c = w.crossing
+            zone = w.level.door_zone(c['side'] if c['from'] is None
+                                     else __import__('lumen.floorplan',
+                                                     fromlist=['x']).OPPOSITE[c['side']])
+            sys.stderr.write(
+                f"[dbg] n={n} crossing side={c['side']} from={c['from'] is not None} "
+                f"player=({w.player.x:.0f},{w.player.y:.0f}) zone={tuple(int(v) for v in zone)}\n")
     if ARGS.open_doors and n == ARGS.open_doors:
         world = GAME.world
         if world is not None and world.warded:

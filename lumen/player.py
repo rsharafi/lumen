@@ -162,8 +162,13 @@ class Player:
         nx = self.x + self.vx * dt
         ny = self.y + self.vy * dt
         nx, ny = level.collide_circle(nx, ny, self.radius)
-        nx = clamp(nx, self.radius, level.width - self.radius)
-        ny = clamp(ny, self.radius, level.height - self.radius)
+        # `level` is a chamber normally and a `world.Span` over two of them
+        # while a doorway is being crossed; both answer to these three names,
+        # which is what keeps the crossing out of the movement code.
+        lo_x = getattr(level, 'x0', 0.0)
+        lo_y = getattr(level, 'y0', 0.0)
+        nx = clamp(nx, lo_x + self.radius, level.width - self.radius)
+        ny = clamp(ny, lo_y + self.radius, level.height - self.radius)
         self.x, self.y = nx, ny
 
         moving = (mx or my) and self.dash_time <= 0.0

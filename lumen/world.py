@@ -40,6 +40,43 @@ NO_LANTERN = bool(os.environ.get('LUMEN_NO_LANTERN'))
 NO_WARDS = bool(os.environ.get('LUMEN_NO_WARDS'))
 
 
+class Span:
+    """Several chambers, offered to the player as one thing to bump into.
+
+    Only alive during a crossing. It presents the same three names the player
+    asks a level for - `collide_circle`, `width`, `height` - over the union
+    of every chamber currently on screen, so walking from one room into the
+    next is not a special case anywhere in the movement code.
+
+    The clamp is the interesting one. A level clamps the player inside its own
+    rectangle, which mid-crossing would pin them to the room they are trying
+    to leave; the union's rectangle covers both, and the walls do the rest.
+    """
+
+    __slots__ = ('parts', 'x0', 'y0', 'width', 'height')
+
+    def __init__(self, parts):
+        self.parts = parts
+        self.x0 = min(ox for _lv, ox, _oy in parts)
+        self.y0 = min(oy for _lv, _ox, oy in parts)
+        x1 = max(ox + lv.width for lv, ox, _oy in parts)
+        y1 = max(oy + lv.height for lv, _ox, oy in parts)
+        self.width = x1
+        self.height = y1
+
+    def collide_circle(self, x, y, radius):
+        for level, ox, oy in self.parts:
+            # Only the chamber whose rectangle actually contains the disc
+            # gets a say. Asking all of them would have each one eject the
+            # player out of the *other* room's floor, since a point outside a
+            # chamber is outside every rectangle it owns.
+            if (ox - radius <= x <= ox + level.width + radius
+                    and oy - radius <= y <= oy + level.height + radius):
+                nx, ny = level.collide_circle(x - ox, y - oy, radius)
+                x, y = nx + ox, ny + oy
+        return x, y
+
+
 class Rift:
     """The way down. Opens once the chamber is clear."""
 
@@ -100,6 +137,9 @@ class World:
         #: game reads it, plays the transition, and calls `enter_room`.
         self.pending_door = None
         self.rooms_entered = 0
+        #: Set while the player is walking out of one room and into the next.
+        #: See `begin_crossing` for what is in it and why it exists.
+        self.crossing = None
 
         self.score = 0
         self.embers = 0
@@ -279,11 +319,20 @@ class World:
         self.flow.rebuild(self.player.x, self.player.y)
 
         # Upgrades change the lantern's reach, so re-bake the sizes this
-        # room can use while the screen is still behind the fade.
+        # room can use while nothing is looking.
         self.prewarm_lantern_sizes()
         self.camera.set_bounds(self.level.width, self.level.height)
         self.camera.snap_to(self.player.x, self.player.y)
+        self._arrive(room, from_side)
 
+    def _arrive(self, room, from_side=None):
+        """The half of arriving in a room that is not about placing anyone.
+
+        Split out because a crossing does everything else itself - the player
+        walked in, so there is nobody to stand anywhere and no camera to snap -
+        and then needs exactly this: the room revealed, populated, sealed if
+        it is hostile, and announced.
+        """
         first_time = not room.visited
         self.plan.reveal_from(room)
         self.rooms_entered += 1
@@ -291,15 +340,19 @@ class World:
         self._populate_room(room, first_time)
         self.cleared = room.cleared or not room.hostile
         self.warded = room.hostile and not room.cleared
-        # The doors carry the state now. A room you are sealed into shows
-        # its leaves already shut - the seal is a fact about the room, not an
-        # event you watch happen after arriving - and one you are free to
-        # leave shows them already withdrawn.
+        # A hostile room seals itself behind the player. The door they came
+        # through is shut with the rest of them, which is the whole drama of
+        # walking into one - and it can only happen now, on arrival, because
+        # until they were through it that door had to stay open for them.
         for door in self.level.door_objects.values():
-            door.snap(not self.warded)
+            if self.warded:
+                door.shut()
+            else:
+                door.snap(True)
         self.level.refresh_occluders()
         if self.warded:
             audio.play('ward_seal', 0.7)
+            audio.play('door_shut', 0.5)
 
         self._place_fixture(room)
 
@@ -502,6 +555,225 @@ class World:
         if self.fixture is not None:
             self.fixture.armed = False
 
+    # ----------------------------------------------------------- crossing --
+    def begin_crossing(self, side):
+        """Start walking through the door on `side` into the next room.
+
+        A room change used to be a cut: fade to black, swap the chamber,
+        stand the player at the far door, fade back. That is three quarters
+        of a second in which the game stops being a place and becomes a menu,
+        and it happens more often than anything else in a run.
+
+        So the two rooms are simply put in the same space instead. The
+        neighbour's matching door is aligned with this one, which makes the
+        two border walls coincide - one wall, one opening, exactly as adjacent
+        rooms ought to be - and from then until the player is through, both
+        chambers are drawn, both are solid, and both occlude the lantern.
+
+        The swap still happens; it just happens *underneath* the player. When
+        they pass the threshold the neighbour becomes the live room and every
+        coordinate in play - the player's, the camera's - shifts by the same
+        offset. Nothing moves on screen. See `_finish_crossing`.
+        """
+        rid = self.room.doors.get(side)
+        if rid is None or self.crossing is not None:
+            return False
+        room = self.plan.room(rid)
+        if room.level is None:
+            room.level = self.builder.level_for(room)
+        far = plan_mod.OPPOSITE[side]
+        if far not in room.level.doors:
+            # Nothing to line up with. Fall back to the old cut rather than
+            # dropping the player into a wall.
+            return False
+
+        # Line the two doorways up on each other. The rooms then share their
+        # border wall, and its single opening is the one the player is
+        # standing in.
+        ax, ay = self.level.door_center(side)
+        bx, by = room.level.door_center(far)
+        self.crossing = {
+            'side': side,
+            'room': room,
+            'level': room.level,
+            'ox': ax - bx,
+            'oy': ay - by,
+            'trailing': None,
+            'from': None,
+        }
+        # Both doors have to be out of the way for the whole walk.
+        for door in (self.level.door_objects.get(side),
+                     room.level.door_objects.get(far)):
+            if door is not None:
+                door.snap(True)
+        self.level.refresh_occluders()
+        room.level.refresh_occluders()
+        self._frame_crossing()
+        self._merge_occluders()
+        audio.play('door_through', 0.5)
+        return True
+
+    def _other_levels(self):
+        """Live chambers that are not the one the player is standing in."""
+        if self.crossing is None:
+            return ()
+        return self._crossing_levels()[1:]
+
+    def solids(self):
+        """What the player collides against this frame.
+
+        The live chamber normally, and a `Span` over every live one while a
+        crossing is in progress - the player has to be able to walk out of
+        one room's geometry and into the next without the two ever letting go
+        of them.
+        """
+        if self.crossing is None:
+            return self.level
+        return Span(self._crossing_levels())
+
+    def _crossing_levels(self):
+        """Every chamber that is live right now, with its draw offset.
+
+        One entry normally. Three at most mid-crossing: the room being left,
+        the room being entered, and - just after the swap - the one now
+        behind the player, which is still on screen.
+        """
+        out = [(self.level, 0.0, 0.0)]
+        c = self.crossing
+        if c is None:
+            return out
+        # By identity, not by equality: after the swap `c['level']` *is* the
+        # live room, and listing it twice had the lighting concatenate the
+        # room's own edges onto itself - measured, 1374 edges in a sweep that
+        # wants about a hundred.
+        seen = {id(self.level)}
+        for level, ox, oy in ((c['level'], c['ox'], c['oy']),
+                              (c['trailing'], c.get('tox', 0.0),
+                               c.get('toy', 0.0))):
+            if level is None or id(level) in seen:
+                continue
+            seen.add(id(level))
+            out.append((level, ox, oy))
+        return out
+
+    def _frame_crossing(self):
+        """Widen the camera's frame to hold every live chamber."""
+        xs0 = ys0 = 1e18
+        xs1 = ys1 = -1e18
+        for level, ox, oy in self._crossing_levels():
+            xs0 = min(xs0, ox)
+            ys0 = min(ys0, oy)
+            xs1 = max(xs1, ox + level.width)
+            ys1 = max(ys1, oy + level.height)
+        self.camera.set_bounds(xs1 - xs0, ys1 - ys0, xs0, ys0, ease=True)
+
+    def _merge_occluders(self):
+        """Let the lantern see into the room it is walking towards.
+
+        The visibility sweep reads one set of arrays, so mid-crossing they
+        are the union of every live chamber's - the neighbour's translated by
+        its draw offset. Without this the light stops dead at a doorway it is
+        standing in, and the room beyond an open door is drawn but unlit,
+        which looks exactly like a bug.
+        """
+        c = self.crossing
+        if c is None:
+            self.level.refresh_occluders()
+            return
+        import numpy as np
+        base = self.level
+        base.refresh_occluders()
+        ax = [base.seg_ax]
+        ay = [base.seg_ay]
+        bx = [base.seg_bx]
+        by = [base.seg_by]
+        pts = [base.corners]
+        for level, ox, oy in self._crossing_levels()[1:]:
+            level.refresh_occluders()
+            ax.append(level.seg_ax + ox)
+            ay.append(level.seg_ay + oy)
+            bx.append(level.seg_bx + ox)
+            by.append(level.seg_by + oy)
+            if len(level.corners):
+                pts.append(level.corners + (ox, oy))
+        base.seg_ax = np.concatenate(ax)
+        base.seg_ay = np.concatenate(ay)
+        base.seg_bx = np.concatenate(bx)
+        base.seg_by = np.concatenate(by)
+        base.corners = np.concatenate(pts)
+
+    def _update_crossing(self, dt):
+        """Watch for the player passing the threshold, and for them landing."""
+        c = self.crossing
+        if c is None:
+            return
+        side = c['side']
+        px, py = self.player.x, self.player.y
+
+        if c['from'] is None:
+            # Still in the room being left. The threshold is the far face of
+            # the shared wall's opening - past it, the player is in the
+            # neighbour and everything rebases.
+            x0, y0, x1, y1 = self.level.door_zone(side)
+            through = {'n': py < y0, 's': py > y1,
+                       'w': px < x0, 'e': px > x1}[side]
+            if through:
+                self._finish_crossing()
+            return
+
+        # Rebased. The crossing ends once the player is clear of the shared
+        # wall and properly inside the new room, which is when the room they
+        # came from can stop being drawn.
+        far = plan_mod.OPPOSITE[side]
+        x0, y0, x1, y1 = self.level.door_zone(far)
+        clear = {'n': py > y1 + 24.0, 's': py < y0 - 24.0,
+                 'w': px > x1 + 24.0, 'e': px < x0 - 24.0}[far]
+        if clear:
+            self.crossing = None
+            self.camera.set_bounds(self.level.width, self.level.height,
+                                   ease=True)
+            self._arrive(c['room'], plan_mod.OPPOSITE[side])
+
+    def _finish_crossing(self):
+        """The player has crossed the threshold. Swap the world under them.
+
+        Everything shifts by the offset the neighbour was being drawn at, so
+        every number changes and the screen does not: the player, the camera
+        and its frame, and anything loose on the floor.
+        """
+        c = self.crossing
+        ox, oy = c['ox'], c['oy']
+        old_level = self.level
+
+        self.level = c['level']
+        self.room = c['room']
+        self.plan.current = self.room.id
+
+        self.player.x -= ox
+        self.player.y -= oy
+        self.camera.shift(-ox, -oy)
+        for item in self.pickups.items:
+            item.x -= ox
+            item.y -= oy
+        for p in self.particles.pool:
+            if p.life > 0.0:
+                p.x -= ox
+                p.y -= oy
+
+        # The room just left keeps being drawn until the player is clear of
+        # the doorway, at the mirror of the offset that was moving it.
+        c['from'] = old_level
+        c['trailing'] = old_level
+        c['tox'] = -ox
+        c['toy'] = -oy
+        c['level'] = self.level
+        c['ox'] = 0.0
+        c['oy'] = 0.0
+        self.flow = flow_mod.FlowField(self.level)
+        self.flow.rebuild(self.player.x, self.player.y)
+        self._frame_crossing()
+        self._merge_occluders()
+
     def use_door(self, side):
         """Walk through the door on `side`. Returns the room arrived in."""
         rid = self.room.doors.get(side)
@@ -514,7 +786,7 @@ class World:
 
     def _check_doors(self):
         """Has the player stepped into a doorway that will answer?"""
-        if self.door_lock > 0.0 or self.pending_door:
+        if self.door_lock > 0.0 or self.pending_door or self.crossing:
             return
         side = self.level.door_at(self.player.x, self.player.y)
         if side is None or side not in self.room.doors:
@@ -914,7 +1186,8 @@ class World:
         if abs(dx) + abs(dy) < 1e-6:
             dx, dy = from_angle(player.aim)
 
-        player.update(sdt, keys, dx, dy, self.level, self.particles, self.fxrng)
+        player.update(sdt, keys, dx, dy, self.solids(), self.particles,
+                      self.fxrng)
 
         # One BFS per tile the player crosses feeds every chaser and every
         # drifting ember for the rest of that tile.
@@ -1015,6 +1288,7 @@ class World:
         if self.door_lock > 0.0:
             self.door_lock = max(0.0, self.door_lock - dt)
         self._update_doors(dt)
+        self._update_crossing(dt)
         self._check_doors()
 
     # How far a chained arc will reach for its next target, and what share of
@@ -1569,6 +1843,11 @@ class World:
         scale = draw.SCALE
         has_normals = gpu.begin_normal() and lv.floor_normal is not None
         if has_normals:
+            for other, dx, dy in self._other_levels():
+                if other.floor_normal is not None:
+                    drawImage(other.floor_normal, dx - ox, dy - oy)
+                if other.wall_normal is not None:
+                    drawImage(other.wall_normal, dx - ox, dy - oy)
             drawImage(lv.floor_normal, -ox, -oy)
             # Burns are part of the surface, so they shape the light too.
             self._draw_decals(ox, oy, normals=True)
@@ -1578,6 +1857,13 @@ class World:
 
         # ---- what is there ------------------------------------------------
         gpu.begin_scene(palette.VOID_RGB)
+        # Any room being crossed into, first and whole - floor and walls
+        # together - so the live room lands on top of it and the shared wall
+        # between them is drawn once, by whichever owns it.
+        for other, dx, dy in self._other_levels():
+            drawImage(other.floor_image, dx - ox, dy - oy)
+            if other.wall_image is not None:
+                drawImage(other.wall_image, dx - ox, dy - oy)
         # The room itself. It takes the added light in full, because that
         # light is in the air above it and this is what it lands on.
         drawImage(lv.floor_image, -ox, -oy)
@@ -2446,26 +2732,28 @@ class World:
         """
         if self.level is None or NO_WARDS:
             return
-        for door in self.level.door_objects.values():
-            sx, sy = door.cx - ox, door.cy - oy
-            if (sx < -110 or sy < -110 or sx > self.view_w + 110
-                    or sy > self.view_h + 110):
-                continue
-            door_mod.draw_frame(door, ox, oy)
-            door_mod.draw_leaves(door, ox, oy, self.run_time,
-                                 self._door_lit(door))
+        for level, dx, dy in self._crossing_levels():
+            for door in level.door_objects.values():
+                sx = door.cx + dx - ox
+                sy = door.cy + dy - oy
+                if (sx < -110 or sy < -110 or sx > self.view_w + 110
+                        or sy > self.view_h + 110):
+                    continue
+                door_mod.draw_frame(door, ox - dx, oy - dy)
+                door_mod.draw_leaves(door, ox - dx, oy - dy, self.run_time,
+                                     self._door_lit(door, dx, dy))
 
-    def _door_lit(self, door):
+    def _door_lit(self, door, dx=0.0, dy=0.0):
         """Is the player's light reaching this doorway?
 
         Cheap, and deliberately generous: a door half in the light should
         draw as a lit door rather than flicker between two treatments as the
         player edges around it.
         """
-        dx = door.cx - self.player.x
-        dy = door.cy - self.player.y
+        ddx = door.cx + dx - self.player.x
+        ddy = door.cy + dy - self.player.y
         reach = self.light_radius + 60.0
-        return (dx * dx + dy * dy) <= reach * reach
+        return (ddx * ddx + ddy * ddy) <= reach * reach
 
     def _draw_fixture(self, ox, oy):
         if self.fixture is not None:

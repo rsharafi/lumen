@@ -26,6 +26,14 @@ class Camera:
         self.shake_y = 0.0
         self.bounds_w = view_w
         self.bounds_h = view_h
+        # Where the framed region starts. Zero for a single room, and set
+        # negative while the player is crossing into a room that sits above
+        # or to the left of the one they are leaving - see `World.crossing`.
+        self.bounds_x = 0.0
+        self.bounds_y = 0.0
+        self._want = (view_w, view_h, 0.0, 0.0)
+        self._from = self._want
+        self._ease_t = 1.0
         self._t = 0.0
 
     def snap_to(self, x, y):
@@ -33,22 +41,83 @@ class Camera:
         self.y = y - self.view_h * 0.5
         self._clamp()
 
-    def set_bounds(self, w, h):
-        self.bounds_w = w
-        self.bounds_h = h
+    def set_bounds(self, w, h, x=0.0, y=0.0, ease=False):
+        """Frame this region.
+
+        `ease` slides the framing there over the next fraction of a second
+        instead of snapping to it. That matters when a crossing widens the
+        frame from one room to two: a chamber narrower than the window is
+        centred in it, and switching that on in a single frame moved the view
+        by ninety pixels with the player standing still - the one visible
+        seam left in an otherwise continuous walk.
+        """
+        if not ease:
+            self._want = self._from = (w, h, x, y)
+            self._ease_t = 1.0
+            self.bounds_w, self.bounds_h = w, h
+            self.bounds_x, self.bounds_y = x, y
+            return
+        if self._want == (w, h, x, y):
+            return
+        self._from = (self.bounds_w, self.bounds_h,
+                      self.bounds_x, self.bounds_y)
+        self._want = (w, h, x, y)
+        self._ease_t = 0.0
+
+    #: How long the framing takes to slide from one room to two, in seconds.
+    FRAME_EASE = 0.62
+
+    def _ease_bounds(self, dt):
+        """Slide the framing toward what was last asked for.
+
+        Smoothstepped over a fixed duration rather than lerped toward the
+        target, because an exponential ease is fastest on its first frame -
+        measured, 22 px of pan in one frame at 120 Hz and decaying from
+        there, which reads as a shove followed by a drift. A pan should start
+        and finish gently and be quickest in the middle, which is what this
+        is.
+        """
+        if self._ease_t >= 1.0:
+            return
+        self._ease_t = min(1.0, self._ease_t + dt / self.FRAME_EASE)
+        t = self._ease_t
+        k = t * t * (3.0 - 2.0 * t)
+        fw, fh, fx, fy = self._from
+        w, h, x, y = self._want
+        self.bounds_w = fw + (w - fw) * k
+        self.bounds_h = fh + (h - fh) * k
+        self.bounds_x = fx + (x - fx) * k
+        self.bounds_y = fy + (y - fy) * k
+
+    def shift(self, dx, dy):
+        """Move the camera and its frame by the same amount.
+
+        Used when a crossing rebases the world under the player: the numbers
+        all change and nothing moves on screen, which is the entire trick.
+        """
+        self.x += dx
+        self.y += dy
+        self.bounds_x += dx
+        self.bounds_y += dy
+        w, h, bx, by = self._want
+        self._want = (w, h, bx + dx, by + dy)
+        fw, fh, fx, fy = self._from
+        self._from = (fw, fh, fx + dx, fy + dy)
 
     def _clamp(self):
-        max_x = max(0.0, self.bounds_w - self.view_w)
-        max_y = max(0.0, self.bounds_h - self.view_h)
-        self.x = clamp(self.x, 0.0, max_x)
-        self.y = clamp(self.y, 0.0, max_y)
+        lo_x, lo_y = self.bounds_x, self.bounds_y
+        max_x = lo_x + max(0.0, self.bounds_w - self.view_w)
+        max_y = lo_y + max(0.0, self.bounds_h - self.view_h)
+        self.x = clamp(self.x, lo_x, max_x)
+        self.y = clamp(self.y, lo_y, max_y)
         # Centre the chamber when it is smaller than the window.
         if self.bounds_w < self.view_w:
-            self.x = (self.bounds_w - self.view_w) * 0.5
+            self.x = lo_x + (self.bounds_w - self.view_w) * 0.5
         if self.bounds_h < self.view_h:
-            self.y = (self.bounds_h - self.view_h) * 0.5
+            self.y = lo_y + (self.bounds_h - self.view_h) * 0.5
 
     def follow(self, tx, ty, aim_x, aim_y, dt):
+        self._ease_bounds(dt)
         goal_x = tx + aim_x * CAMERA_LOOKAHEAD - self.view_w * 0.5
         goal_y = ty + aim_y * CAMERA_LOOKAHEAD - self.view_h * 0.5
         k = 1.0 - math.exp(-(CAMERA_LERP * 60.0) * dt)

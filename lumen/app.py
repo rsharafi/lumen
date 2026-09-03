@@ -881,7 +881,12 @@ class Game:
         if world.pending_door is not None and self.pending is None:
             side = world.pending_door
             world.pending_door = None
-            self.transition(lambda: world.use_door(side), speed=3.0)
+            # Walked through, not cut to. The world puts both chambers in one
+            # space and slides the camera across; only if it cannot line the
+            # two doorways up does this fall back to the fade it used to do
+            # every single time.
+            if not world.begin_crossing(side):
+                self.transition(lambda: world.use_door(side), speed=3.0)
 
     # -------------------------------------------------------------- input --
     def key_press(self, app, key):
