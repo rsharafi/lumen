@@ -1,8 +1,8 @@
 """Seeded randomness.
 
-`from cmu_graphics import *` shadows the stdlib `random` module with a bare
-function, so the whole game funnels through this module instead of importing
-`random` anywhere it could be clobbered.
+Everything seeded funnels through here rather than importing `random`
+directly, so a run can be reproduced from a single number - see
+`tools/playtest.py`, which pins these and replays whole floors.
 """
 
 import random as _random

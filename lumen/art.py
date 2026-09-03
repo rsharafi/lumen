@@ -1,6 +1,6 @@
 """Procedural art. No asset files - every pixel in LUMEN is generated here.
 
-Why images at all, in a vector-shape library? Because of how cmu-graphics
+Why images at all? Because of how the original renderer
 actually performs: a `drawImage` call costs about the same no matter how big
 the image is (~21us, essentially all of it Python-side shape construction),
 while a `drawCircle` costs ~36us for a handful of pixels. So anything that is
@@ -21,7 +21,6 @@ import threading
 
 import numpy as np
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
-from cmu_graphics import CMUImage, getImageSize
 
 from . import draw, gpu
 from .draw import drawImage
@@ -147,7 +146,7 @@ _insets = {}
 def premultiply(pil):
     """Multiply colour by alpha.
 
-    cmu-graphics hands image bytes to its renderer untouched, and that renderer
+    The renderer takes image bytes untouched, and it
     composites them as *premultiplied* alpha. Feeding it ordinary straight-alpha
     PNG data makes every translucent pixel render at full strength - a 5%-alpha
     white grain overlay comes out as solid white noise. Everything built here
@@ -187,30 +186,12 @@ def _store(key, pil, keep_source=True):
     bytes and uploads itself to a texture the first time it is drawn - sprites
     are baked while the game is still starting, before a renderer exists.
 
-    On the cmu-graphics backend it is a `CMUImage`, whose PIL -> renderer
-    conversion is forced here rather than deferred to the first `drawImage`,
-    to keep that cost out of the first frame. Once converted the wrapper's own
-    copies are dead weight - the renderer only ever reads the converted image
-    from its internal table - so they are released. A chamber layer is 8 MB a
-    copy, and this is the difference between holding it four times and twice.
+    That is a `gpu.Sprite`, which holds the premultiplied bytes and uploads
+    itself to a texture the first time it is drawn - sprites are baked while
+    the game is still starting, before a renderer exists.
     """
     started = time.perf_counter()
-    if gpu.wanted():
-        img = gpu.sprite_from_pil(premultiply(pil))
-    else:
-        img = CMUImage(premultiply(pil))
-        converted = False
-        try:
-            getImageSize(img)
-            converted = True
-        except Exception:
-            pass
-        if converted:
-            try:
-                img.image = None
-                img._imageParams = None
-            except Exception:
-                pass
+    img = gpu.sprite_from_pil(premultiply(pil))
     # Two things are being guarded here, and threading made both reachable:
     # the offering's sprites are baked on a worker while the floor is fought.
     #
@@ -239,7 +220,7 @@ def _store(key, pil, keep_source=True):
 
 
 def rgb_tuple(color):
-    """Accept either a plain (r, g, b) tuple or a cmu-graphics `rgb` object.
+    """Accept either a plain (r, g, b) tuple or a `palette.rgb`.
 
     The palette stores `rgb` objects because that is what the drawing calls
     want; the sprite generators need raw numbers. Normalising here means
@@ -1068,18 +1049,6 @@ def _release(sprite):
     """
     if isinstance(sprite, gpu.Sprite):
         sprite.release()
-        return
-    try:
-        from cmu_graphics import shape_logic
-        drawing = getattr(shape_logic, 'activeDrawing', None)
-        images = getattr(drawing, 'images', None)
-        uid = getattr(sprite, 'uuid', None)
-        if images is not None and uid is not None:
-            images.pop(uid, None)
-        sprite._imageParams = None
-        sprite.image = None
-    except Exception:
-        pass
 
 
 # Bumped every time the cache is emptied. Anything holding a baked sprite can

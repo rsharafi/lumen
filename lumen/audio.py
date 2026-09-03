@@ -1,6 +1,6 @@
 """Procedurally synthesised sound.
 
-cmu-graphics' `Sound` can only load a file, so every effect is synthesised with
+Nothing ships as an asset, so every effect is synthesised with
 numpy at first run and written to a small WAV cache next to the game. Nothing
 is shipped as an asset, and after the first launch startup just reads the
 cache.

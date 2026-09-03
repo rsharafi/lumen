@@ -1,13 +1,14 @@
 """Top-level state machine.
 
-`main.py` binds cmu-graphics' event handlers straight to the methods here, so
+`native.py` builds this and hands it to `lumen/host.py`, whose loop calls the
+methods here, so
 this module owns the whole lifecycle: title, help, a run, the draft between
 floors, and the endings.
 
 Two performance notes that shape the code:
 
 * MOUSEMOTION events are blocked at the pygame level and the cursor is polled
-  in `step` instead. cmu-graphics redraws once per event batch, so an
+  in `step` instead. The loop redraws once per iteration, so an
   unblocked mouse drags the frame rate down to however fast you can wiggle it.
 * `dt` comes from a real clock rather than assuming 1/60, so the simulation
   stays honest if a frame runs long.
@@ -299,7 +300,7 @@ class Game:
     def ensure_display(self, app):
         """One-time display setup, done once whichever host gets here first.
 
-        Under cmu-graphics this cannot run from `onAppStart`: there is no
+        This cannot run before the loop starts: there is no
         display surface until the framework's loop has started, so the first
         `step` triggers it. The native host owns its loop and calls this
         before entering it, which is also what lets it check that a renderer
@@ -313,11 +314,6 @@ class Game:
         # that is the one query that needs a window of its own.
         self._match_display_rate(app, verbose)
         self._take_over_window(app, verbose)
-        if not gpu.active():
-            # Both of these tune cmu-graphics' own present path, which the
-            # GPU backend replaces outright.
-            runtime.enable(verbose=verbose)
-            runtime.enable_adaptive_wait(verbose=verbose)
         try:
             import pygame
             pygame.mouse.set_visible(False)
@@ -325,22 +321,17 @@ class Game:
             pass
 
     def _take_over_window(self, app, verbose=False):
-        """Replace the framework's window with a high-DPI one.
+        """Open the high-DPI window the game actually draws into.
 
-        pygame's `set_mode` cannot ask SDL for a high-DPI framebuffer, so the
-        window cmu-graphics opens is sized in points and gets stretched over
-        the panel by the compositor. Swapping in an equivalent window with the
-        flag set is what makes the game draw at the display's real pixels.
+        pygame's `set_mode` cannot ask SDL for a high-DPI framebuffer, so a
+        window opened that way is sized in points and gets stretched over the
+        panel by the compositor. Creating one with the flag set is what makes
+        the game draw at the display's real pixels.
         """
         if os.environ.get('LUMEN_HEADLESS'):
             return          # dummy video driver: there is no real window
         if os.environ.get('LUMEN_FULLSCREEN'):
             self.fullscreen = True
-        if not getattr(app, 'is_native', False):
-            # Both of these exist to intercept cmu-graphics' own present and
-            # resize paths. The native host owns those outright.
-            runtime.install_resize_hook(app)
-            runtime.install_gpu_hooks(app)
         # Replacing the window resets SDL's event filters, so the block set up
         # in `start` is gone by now and has to go back on.
         self._block_mouse_motion()
@@ -633,9 +624,6 @@ class Game:
         if not warm:
             return
         screen = self.draft_screen
-        if not gpu.wanted():
-            screen.warm(warm)
-            return
 
         def go():
             try:
@@ -656,7 +644,7 @@ class Game:
 
         Nothing in there touches the GPU: sprites on this backend hold their
         bytes and upload on first draw, which happens here, later. On the
-        cmu-graphics renderer `_store` forces a conversion through the
+        renderer, `_store` forces the upload through the
         renderer itself, so that path stays synchronous - it is the
         compatibility backend and a hitch there is the lesser problem.
         """
@@ -673,9 +661,6 @@ class Game:
                 self._prepared, self._prep_result = self._prep_result, None
             return
         if self.draft_screen.t <= 0.35:
-            return
-        if not gpu.wanted():
-            self._prepared = self.world.prepare_floor(depth)
             return
 
         def build():
@@ -739,7 +724,7 @@ class Game:
 
         `dt` is supplied by the native host, which runs the simulation in
         fixed increments and draws whenever it can. Left out - which is what
-        the cmu-graphics host does - the interval is taken from the clock
+        the loop does - the interval is taken from the clock
         instead, so a slow frame is a longer tick.
         """
         now = time.perf_counter()
@@ -1144,11 +1129,11 @@ class Game:
 
         On the GPU renderer every rung holds the display's refresh rate, so
         there is nothing to buy by rendering below native - it would only be
-        softer. On cmu-graphics native costs 40 fps, and neither end of the
+        softer. Native resolution costs frames, and neither end of the
         dial is a good first impression, so it starts in the middle.
         """
         names = [name for name, _ in self.QUALITY_MODES]
-        return names.index('NATIVE' if gpu.wanted() else 'BALANCED')
+        return names.index('NATIVE')
 
     def quality(self):
         """The current dial position as a fraction of native density."""
@@ -1342,8 +1327,8 @@ class Game:
 
     # --------------------------------------------------------------- draw --
     def draw(self, app):
-        if gpu.wanted() and not gpu.active():
-            # cmu-graphics redraws once at the end of onAppStart, which is
+        if not gpu.active():
+            # The loop draws once before the first step, which is
             # before the loop starts and so before the renderer exists - and
             # `App.run` rebuilds its own window after onAppStart anyway, so
             # the takeover cannot be brought forward. Skip that one frame

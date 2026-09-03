@@ -25,7 +25,6 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-os.environ.setdefault('LUMEN_RENDERER', 'cpu')
 os.environ.setdefault('CI', '1')
 os.environ.setdefault('LUMEN_SAVE', '/tmp/lumen-stat-probe.json')
 

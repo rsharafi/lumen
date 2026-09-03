@@ -14,14 +14,12 @@ import statistics
 import sys
 import time
 
-os.environ.setdefault('SDL_VIDEODRIVER', 'dummy')
 os.environ.setdefault('SDL_AUDIODRIVER', 'dummy')
 os.environ.setdefault('CI', '1')
-os.environ.setdefault('LUMEN_HEADLESS', '1')
-# The GPU backend needs a real accelerated renderer, which the dummy video
-# driver cannot give it, so headless runs measure the cmu-graphics renderer.
-# A/B the two with real windows instead - see tools/compare_backends.py.
-os.environ.setdefault('LUMEN_RENDERER', 'cpu')
+# There is one renderer now, and it needs a real GL context - so this opens a
+# real window and measures the renderer the game actually ships on, rather
+# than a rasteriser nobody plays through. The window is small and short-lived
+# and every run is still deterministic: fixed timestep, pinned seeds.
 os.environ.setdefault('LUMEN_FIXED_DT', '1')
 os.environ.setdefault('LUMEN_NO_POINTER', '1')
 os.environ.setdefault(
@@ -61,10 +59,7 @@ parser.add_argument('--click-at', default='',
                     help='STATE:X:Y - click once at X,Y when STATE is reached')
 ARGS = parser.parse_args()
 
-import cmu_graphics.cmu_graphics as _cg  # noqa: E402
-from cmu_graphics import app, runApp  # noqa: E402,F401
-
-from lumen import rng  # noqa: E402
+from lumen import gpu, host, rng  # noqa: E402
 from lumen.app import Game  # noqa: E402
 from lumen.config import HEIGHT, WIDTH  # noqa: E402
 
@@ -645,7 +640,7 @@ def onStep(app):
     if STATE['n'] >= FRAMES:
         if ARGS.out:
             os.makedirs(os.path.dirname(os.path.abspath(ARGS.out)), exist_ok=True)
-            app._app.getScreenshot(ARGS.out)
+            app.getScreenshot(ARGS.out)
             sys.stderr.write(f'wrote {ARGS.out}\n')
         report(app)
         app.quit()
@@ -739,10 +734,8 @@ def onKeyPress(app, key):
 
 
 def redrawAll(app):
-    STATE['shapes_before'] = _cg.SHAPES_CREATED
     t0 = time.perf_counter()
-    # Full loop period: our shape construction plus the framework's own
-    # rasterise/convert/blit, which happens after this callback returns.
+    # Full loop period, present included: the frame the player would see.
     prev = STATE['last_loop']
     if prev is not None:
         STATE['loop_ms'].append((t0 - prev) * 1000.0)
@@ -751,8 +744,6 @@ def redrawAll(app):
         if os.environ.get('LUMEN_TRACE_ART'):
             sys.stderr.write(f'[frame] {STATE["n"]}\n')
         GAME.draw(app)
-        STATE.setdefault('shapes', []).append(
-            _cg.SHAPES_CREATED - STATE['shapes_before'])
         _w = GAME.world
         # LUMEN_TRACE_FRAMES=180-200 dumps per-frame counters for a range,
         # which is how the mid-frame rasterisation stalls were tracked down.
@@ -793,4 +784,41 @@ def _size():
     return WIDTH, HEIGHT
 
 
-runApp(*_size())
+def drive():
+    """The loop, in place of the framework's.
+
+    This used to be four callbacks handed to `runApp`. The framework that
+    called them is gone, so the harness owns its own loop - which is the same
+    arrangement `lumen/host.py` uses, minus the input pumping and the
+    wall-clock pacing. Frames advance one per iteration at a fixed step, so a
+    run of N frames is exactly N frames of simulation on any machine.
+    """
+    import pygame
+
+    pygame.init()
+    app = host.NativeApp(*_size(), title='LUMEN playtest')
+    onAppStart(app)
+    GAME.ensure_display(app)
+    if not gpu.active():
+        sys.stderr.write('[playtest] no GL context; cannot run\n')
+        return 3
+    if os.environ.get('LUMEN_DEBUG'):
+        from lumen import draw as _d
+        sys.stderr.write(f'[playtest] GAME.scale={GAME.scale} draw.SCALE={_d.SCALE} '
+                         f'design={GAME.width}x{GAME.height} '
+                         f'render={__import__("lumen.runtime", fromlist=["x"]).render_size()}\n')
+    # Keep the window from stealing focus for the whole run where the platform
+    # allows it; the harness never wants the pointer or the keyboard.
+    while app._running:
+        pygame.event.pump()
+        onStep(app)
+        if not app._running:
+            break
+        gpu.begin_frame(host._background_rgb(app))
+        redrawAll(app)
+        gpu.present()
+    pygame.quit()
+    return 0
+
+
+sys.exit(drive())

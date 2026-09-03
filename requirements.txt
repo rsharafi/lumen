@@ -1,15 +1,11 @@
-cmu-graphics>=2.0.1
 Pillow>=10.0
 numpy>=1.26
 
-# Pulled in by cmu-graphics anyway, but pinned here because the GPU renderer
-# needs three things that arrived in 2.5.2: `pygame.Window`, its
-# `allow_high_dpi` flag, and `Renderer.compose_custom_blend_mode`. Without
-# them lumen/gpu.py cannot start and the game falls back to cmu-graphics'
-# own CPU rasteriser - which works, but gives up native resolution and
-# roughly a third of the frame rate.
+# The window, the OpenGL context, and the event loop. 2.5.2 is the floor
+# because `pygame.Window` and its `allow_high_dpi` flag arrived there, and
+# without high-DPI the game draws at window points and gets stretched over
+# the panel by the compositor.
 pygame-ce>=2.5.2
 
-# Only needed for the OpenGL renderer (LUMEN_RENDERER=gl). The game runs
-# without it on either of the other two.
+# The renderer. There is exactly one, and this is it.
 moderngl>=5.8

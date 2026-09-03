@@ -21,7 +21,6 @@ os.environ.setdefault('LUMEN_RENDERER', 'cpu')
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
-import cmu_graphics.cmu_graphics as _cg      # noqa: E402,F401
 
 from lumen import level as L                 # noqa: E402
 from lumen import rng as rng_mod             # noqa: E402

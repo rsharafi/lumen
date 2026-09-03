@@ -347,20 +347,6 @@ void main() {
 # --------------------------------------------------------------------------
 # Lifecycle
 # --------------------------------------------------------------------------
-def wanted():
-    global _wanted
-    if _wanted is None:
-        choice = (os.environ.get('LUMEN_RENDERER') or 'gpu').strip().lower()
-        _wanted = choice not in ('cpu', 'cmu', 'wyvern', 'off', '0')
-    return _wanted
-
-
-def give_up():
-    global _wanted
-    _wanted = False
-    detach()
-
-
 def active():
     return _ctx is not None
 

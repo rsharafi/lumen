@@ -31,48 +31,27 @@ if [ ! -d .venv ]; then
     ./.venv/bin/pip install --quiet -r requirements.txt
 fi
 
-# Two independent choices: which loop hosts the game, and what draws it.
-# Defaults are unchanged - cmu-graphics hosting, SDL's renderer drawing.
-ENTRY=main.py
 PASS=""
 for arg in "$@"; do
     case "$arg" in
-        --native)  ENTRY=native.py ;;
-        --cmu)     ENTRY=main.py ;;
-        # OpenGL needs our own loop; cmu-graphics cannot host it. Set
-        # the renderer here and let the entry point follow below, so
-        # that `--gl --cmu` cannot end up asking for the one pairing
-        # that does not work.
-        --gl)      export LUMEN_RENDERER=gl ;;
-        --sdl)     export LUMEN_RENDERER=gpu ;;
-        --cpu)     ENTRY=main.py; export LUMEN_RENDERER=cpu ;;
+        --fullscreen) export LUMEN_FULLSCREEN=1 ;;
         --help|-h)
             cat <<'USAGE'
 LUMEN
 
-  ./run.sh                 cmu-graphics hosting it, SDL drawing  (default)
-  ./run.sh --native        our own loop, SDL drawing
-  ./run.sh --gl            our own loop, OpenGL drawing (shaders, HDR)
-  ./run.sh --cpu           cmu-graphics hosting *and* drawing (the original)
+  ./run.sh                 play it
+  ./run.sh --fullscreen    start covering the display
 
-  --cmu / --native pick the host, --cpu / --sdl / --gl pick the renderer.
-  Anything else is passed through. The same choices are available directly:
+  Anything else is passed straight through to the game.
 
-      LUMEN_RENDERER=gl python native.py
-
-  In game, the DISPLAY row on the title screen changes resolution and
-  VISUALS switches between the lit pipeline and the original look. Those
-  are settings; the host and renderer are chosen at launch, because the
-  renderer binds at import.
+  There used to be four combinations here - two hosts crossed with three
+  renderers. There is one of each now: our own loop, drawing through
+  OpenGL. In game, the DISPLAY row on the title screen changes resolution
+  and VISUALS switches between the lit pipeline and the original look.
 USAGE
             exit 0 ;;
         *) PASS="$PASS $arg" ;;
     esac
 done
 
-# The OpenGL renderer only runs under our own loop, whatever order the
-# switches came in.
-if [ "${LUMEN_RENDERER:-}" = "gl" ]; then ENTRY=native.py; fi
-
-echo "LUMEN: $ENTRY, renderer=${LUMEN_RENDERER:-gpu}" >&2
-exec ./.venv/bin/python "$ENTRY" $PASS
+exec ./.venv/bin/python native.py $PASS

@@ -23,16 +23,13 @@ import os
 import statistics
 import sys
 
-os.environ.setdefault('SDL_VIDEODRIVER', 'dummy')
 os.environ.setdefault('SDL_AUDIODRIVER', 'dummy')
 os.environ.setdefault('CI', '1')
 os.environ.setdefault('LUMEN_HEADLESS', '1')
-os.environ.setdefault('LUMEN_RENDERER', 'cpu')
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
-import cmu_graphics.cmu_graphics as _cg              # noqa: E402,F401
 
 from lumen import boss as boss_mod                   # noqa: E402
 from lumen import floorplan as fp                    # noqa: E402

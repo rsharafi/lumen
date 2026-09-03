@@ -1,14 +1,14 @@
-"""Running the game without cmu-graphics.
+"""The loop.
 
-The framework's own loop was fine while it also did the drawing. Once the
-rendering moved to `lumen/gpu.py` its remaining job was to dispatch events and
-decide when to repaint - and it decides that from `had_event`, which is not
-the same thing as "the frame was rebuilt". That mismatch is what put a black
-flash on screen every time the pointer moved, and it cost seven shims in
-`runtime.py` to work around the rest of it.
+The game used to be hosted by cmu-graphics, whose loop was fine while it also
+did the drawing. Once the rendering moved onto the GPU its remaining job was
+to dispatch events and decide when to repaint - and it decided that from
+`had_event`, which is not the same thing as "the frame was rebuilt". That
+mismatch put a black flash on screen every time the pointer moved, and it
+cost seven shims in `runtime.py` to work around the rest of it.
 
-So this is the same game, hosted directly on pygame: about a hundred lines
-that own the loop outright. What that buys, beyond deleting the shims:
+So the loop is here instead, about a hundred lines owning it outright. What
+that buys, beyond deleting the shims:
 
 * **A fixed simulation step.** The framework steps once per event batch and
   hands you whatever wall-clock time had passed, so a slow frame is a longer
@@ -19,12 +19,9 @@ that own the loop outright. What that buys, beyond deleting the shims:
 * **Errors that surface.** cmu-graphics wraps every callback so an exception
   stops the app and prints; more than once during this project that meant a
   silent exit with no output at all.
-* **No REPL thread.** The framework starts an interactive console on stdin and
-  calls `os._exit` when that reaches EOF, which is why every scripted run of
-  this game has had to set `CI=1`.
-
-`main.py` still runs the cmu-graphics version, unchanged. This is a second
-front end over the same `Game`, not a replacement for it.
+* **No REPL thread.** The framework started an interactive console on stdin
+  and called `os._exit` when that reached EOF, which is why every scripted
+  run of this game used to have to set `CI=1`.
 """
 
 import os
@@ -41,12 +38,12 @@ MAX_CATCHUP = 8
 
 
 class NativeApp:
-    """Stands in for cmu-graphics' `App`.
+    """The window and the frame, as one object.
 
-    `Game` and `runtime` both talk to an app object - width, height, title,
-    a screen to draw into, a way to quit. Presenting the same surface here
-    means neither of them has to know which host is running, and the
-    cmu-graphics front end keeps working untouched.
+    `Game` and `runtime` both talk to an app - width, height, title, a way to
+    quit. `width` and `height` are the framebuffer in *pixels*, which is what
+    the game derives its design scale from; `runtime._tell_app_size` keeps
+    them in step with the drawable.
     """
 
     is_native = True
@@ -142,14 +139,12 @@ def run(game, width, height, title='LUMEN'):
     game.ensure_display(app)
 
     if not gpu.active():
-        # `LUMEN_RENDERER=cpu` asks for cmu-graphics' own rasteriser, and that
-        # only exists inside cmu-graphics' own loop. Say so rather than
-        # presenting empty frames.
+        # There is no second renderer to fall back to, so say what is wrong
+        # rather than presenting empty frames.
         sys.stderr.write(
-            'LUMEN: the native host draws through lumen/gpu.py, and no GPU\n'
-            '  renderer could be started. LUMEN_RENDERER=cpu selects\n'
-            "  cmu-graphics' rasteriser, which only runs under main.py.\n"
-            '  Use `python main.py` for that, or drop LUMEN_RENDERER.\n')
+            'LUMEN: no OpenGL context could be created, and the game draws\n'
+            '  through OpenGL only. Check that `moderngl` is installed and\n'
+            '  that the display supports OpenGL 3.3 core.\n')
         pygame.quit()
         return
 
@@ -231,7 +226,7 @@ _KEYMAP = None
 
 
 def _key_name(pygame, event):
-    """cmu-graphics' key names, so the game's handlers are unchanged."""
+    """Key names the game's handlers speak."""
     global _KEYMAP
     if _KEYMAP is None:
         _KEYMAP = {

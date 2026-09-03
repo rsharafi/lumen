@@ -9,7 +9,41 @@ lantern, and a small number of saturated accents that only ever appear on
 things that matter (damage, pickups, threats).
 """
 
-from cmu_graphics import rgb
+class rgb:
+    """A colour, as the drawing calls want it.
+
+    This came from cmu-graphics, which is no longer a dependency. It is kept
+    as a type rather than replaced with a plain tuple because roughly a dozen
+    call sites read `.red`/`.green`/`.blue`, and because `art.rgb_tuple` uses
+    the distinction between this and a bare tuple to tell a palette colour
+    from an already-unpacked one.
+
+    Slotted and built once at import: the game draws hundreds of shapes a
+    frame and none of them should be allocating a colour.
+    """
+
+    __slots__ = ('red', 'green', 'blue')
+
+    def __init__(self, red, green, blue):
+        self.red = int(red)
+        self.green = int(green)
+        self.blue = int(blue)
+
+    def __iter__(self):
+        yield self.red
+        yield self.green
+        yield self.blue
+
+    def __eq__(self, other):
+        return (isinstance(other, rgb) and self.red == other.red
+                and self.green == other.green and self.blue == other.blue)
+
+    def __hash__(self):
+        return hash((self.red, self.green, self.blue))
+
+    def __repr__(self):
+        return f'rgb({self.red}, {self.green}, {self.blue})'
+
 
 
 def _c(h):

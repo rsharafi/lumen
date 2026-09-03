@@ -1547,7 +1547,7 @@ SPECIES = {
 
 
 def _rgb_of(color):
-    """cmu-graphics rgb object -> a plain tuple the art cache can key on."""
+    """A palette colour -> a plain tuple the art cache can key on."""
     return art.rgb_tuple(color)
 
 
