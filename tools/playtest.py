@@ -296,6 +296,7 @@ def click_row(app, which, index):
     """
     screen = {'title': GAME.title_screen,
               'draft': GAME.draft_screen,
+              'boon': GAME.draft_screen,
               'shop': GAME.shop_screen,
               'vigil': GAME.vigil_screen,
               'settings': GAME.settings_screen}.get(which)
@@ -476,6 +477,11 @@ def autopilot(app):
         if n % 24 == 0:
             GAME.key_press(app, 'enter')
             GAME.key_release(app, 'enter')
+        return
+    if state == app_mod.BOON:
+        if n % 16 == 0:
+            STATE['boons'] = STATE.get('boons', 0) + 1
+            click_row(app, 'draft', STATE['boons'] % 3)
         return
     if state == app_mod.SHOP:
         # Buy whatever is affordable, cheapest first, then leave. A bot that

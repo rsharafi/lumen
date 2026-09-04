@@ -70,6 +70,12 @@ class Stats:
         #: Which rules of the deeper dark are in force. A set of tier
         #: numbers; see `lumen/ascension.py`. Empty is the vault as built.
         self.rules = set()
+        #: Boons taken, and the mod each weapon is carrying. See
+        #: `lumen/boons.py` - these are what a boss is worth.
+        self.boons = []
+        self.weapon_mods = {}
+        #: Damage a second dealt at the rim of the lantern's reach. EDGE.
+        self.edge_damage = 0.0
 
     def describe(self):
         lines = []

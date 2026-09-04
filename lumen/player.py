@@ -65,12 +65,15 @@ class Player:
     # -------------------------------------------------------------- state --
     @property
     def weapon(self):
-        from .projectiles import WEAPONS, WEAPONS_BY_KEY
+        from . import boons as boon_mod
+        from .projectiles import WEAPONS
         # Indexed into what this run actually carries rather than into every
-        # weapon that exists, so a locked one cannot be cycled to.
+        # weapon that exists, so a locked one cannot be cycled to. `weapon_for`
+        # hands back the modded object when a boon has altered it, which is
+        # why nothing below here has to know that mods exist.
         carried = getattr(self.stats, 'weapons', None) or ['lance']
         key = carried[self.weapon_index % len(carried)]
-        return WEAPONS_BY_KEY.get(key, WEAPONS[0])
+        return boon_mod.weapon_for(self.stats, key) or WEAPONS[0]
 
     def refresh_from_stats(self):
         s = self.stats

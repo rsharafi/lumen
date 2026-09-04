@@ -134,6 +134,8 @@ class World:
         #: side -> Ward, rebuilt with the room. They hold a cast sweep each.
         #: The one interactable object in a reward room, or None.
         self.fixture = None
+        #: Set when a boss has finished coming apart and its boon is owed.
+        self.pending_boon = False
         #: Set for one frame when the player has walked into the Ferryman.
         #: Read by the game, which owns screens; the world owns rooms.
         self.pending_shop = False
@@ -1578,12 +1580,28 @@ class World:
                 continue
             e.update(dt, self)
 
-            if light_dps and e.lit and e.alive and not e.immune():
+            # EDGE burns what stands at the *rim* of your light, which is
+            # what makes it a different way to stand rather than a bigger
+            # number: it wants things held at the boundary, and the boundary
+            # is the one part of the lit region that moves when you do.
+            burn = light_dps
+            edge = self.stats.edge_damage
+            if edge and e.lit and e.alive:
+                dx = e.x - player.x
+                dy = e.y - player.y
+                d = math.hypot(dx, dy)
+                rim = self.light_radius
+                if d > rim * 0.62:
+                    burn += edge
+                    if self.fxrng.chance(5.0 * dt):
+                        self.particles.embers(e.x, e.y, 1,
+                                              palette.LIGHT_CORE, self.fxrng)
+            if burn and e.lit and e.alive and not e.immune():
                 # Through the same door as everything else, so it counts
                 # toward the run's damage and feeds lifesteal like any other
                 # hit. Subtracting hp directly skipped both.
                 before = e.hp
-                e.hp -= light_dps * dt
+                e.hp -= burn * dt
                 dealt = before - max(e.hp, 0.0)
                 if dealt > 0.0:
                     self.player.damage_dealt += dealt
@@ -2787,6 +2805,9 @@ class World:
             # and `upgrade` were sharing.
             audio.play('boss_gone', 1.0)
             self.boss_corpse = None
+            # The one moment in a run where the build gets to commit to
+            # something. The world only flags it; the game owns screens.
+            self.pending_boon = True
 
     def _draw_boss_corpse(self, ox, oy):
         """What is left of it, shrinking and guttering as it comes apart."""

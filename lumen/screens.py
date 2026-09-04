@@ -470,6 +470,7 @@ class UpgradeScreen:
         self.choices = []
         self.rerolls = 0
         self.before_boss = False
+        self.boon = False
         self.index = 0
         self.t = 0.0
         self.hit_rects = []
@@ -495,8 +496,10 @@ class UpgradeScreen:
         pairs = [(palette.UI_TEXT, palette.UI_DIM), (palette.UI_DIM,
                                                      palette.UI_TEXT)]
         for up in choices:
-            colour = self.TIER_COLOR.get(up.rarity, up.color)
-            entry = upgrades.TIERS.get(up.rarity)
+            rarity = getattr(up, 'rarity', None)
+            colour = up.color if rarity is None \
+                else self.TIER_COLOR.get(rarity, up.color)
+            entry = upgrades.TIERS.get(rarity)
             label = entry[0] if entry else 'COMMON'
             for name_col in (colour, palette.UI_TEXT):
                 art.label_sprite(up.name, 'display', int(18 * k),
@@ -516,7 +519,25 @@ class UpgradeScreen:
             art.glow(rgb, int(cw * 2.0), power=2.4)
             art.glow(rgb, int(232 * k), power=2.6)
 
+    def open_boons(self, choices):
+        """Three boons, on the same cards the offering uses.
+
+        Deliberately the same layout. A boon is a bigger thing than an
+        offering and the temptation is to give it its own screen, but the
+        player has already learned to read three lit alcoves - and what makes
+        a boon feel different is the header and what is written on the cards,
+        not a second grammar for the same act.
+        """
+        self.choices = list(choices)
+        self.depth = 0
+        self.rerolls = 0
+        self.before_boss = False
+        self.boon = True
+        self.index = 0
+        self.t = 0.0
+
     def open(self, choices, depth, rerolls=0, before_boss=False):
+        self.boon = False
         self.choices = choices
         self.rerolls = rerolls
         self.before_boss = before_boss
@@ -604,15 +625,20 @@ class UpgradeScreen:
     def _draw_header(self, w, h, appear):
         cx, cy = w * 0.5, h * 0.085
         size = 300
-        _glow(cx, cy + 4, size, palette.LIGHT_WARM, int(13 * appear), 2.7)
-        drawLabel('THE VAULT OFFERS', cx, cy, size=30, bold=True,
-                  fill=palette.UI_ACCENT, font=palette.FONT_DISPLAY,
-                  opacity=int(100 * appear))
+        boon = getattr(self, 'boon', False)
+        _glow(cx, cy + 4, size,
+              palette.LIGHT_CORE if boon else palette.LIGHT_WARM,
+              int((20 if boon else 13) * appear), 2.7)
+        drawLabel('SOMETHING IT WAS KEEPING' if boon else 'THE VAULT OFFERS',
+                  cx, cy, size=30, bold=True,
+                  fill=palette.LIGHT_CORE if boon else palette.UI_ACCENT,
+                  font=palette.FONT_DISPLAY, opacity=int(100 * appear))
         # A rule that draws itself outward from the centre as the screen
         # settles, so the eye starts in the middle and is handed downward.
         half = 168.0 * appear
         _rule(cx - half, cx + half, cy + 22, palette.UI_ACCENT, 34)
-        drawLabel(f'FLOOR {self.depth} CLEARED   -   CHOOSE ONE',
+        drawLabel('THE THING IS DEAD   -   TAKE ONE' if boon
+                  else f'FLOOR {self.depth} CLEARED   -   CHOOSE ONE',
                   cx, cy + 38, size=11, fill=palette.UI_FAINT,
                   font=palette.FONT_UI, opacity=int(74 * appear))
 
@@ -637,7 +663,11 @@ class UpgradeScreen:
         multiplied, because scaling the frame alone leaves the type where it
         was and the bottom-anchored rows climb into the blurb.
         """
-        colour = self.TIER_COLOR.get(up.rarity, up.color)
+        # A boon has no rarity - it is one of three things a boss was worth,
+        # and there is no scale for that - so it draws in its own colour and
+        # skips the tier row at the bottom of the card.
+        boon = getattr(up, 'rarity', None) is None
+        colour = up.color if boon else self.TIER_COLOR.get(up.rarity, up.color)
         alpha = int(100 * delay)
         if alpha <= 0:
             return
@@ -659,8 +689,13 @@ class UpgradeScreen:
         ay = y + 94.0 * k
         _glow(mid, ay, int(232 * k), colour,
               int((34 if selected else 12) * delay), 2.6)
-        _sigil(mid, ay, up, self.t, selected,
-               radius=(30.0 + (4.0 if selected else 0.0)) * k)
+        if boon:
+            _boon_mark(mid, ay, up, self.t, selected,
+                       (30.0 + (4.0 if selected else 0.0)) * k,
+                       int(94 * delay))
+        else:
+            _sigil(mid, ay, up, self.t, selected,
+                   radius=(30.0 + (4.0 if selected else 0.0)) * k)
 
         # ---- name, rule, blurb ------------------------------------------
         drawLabel(up.name, mid, y + 190 * k, size=18 * k, bold=True,
@@ -677,6 +712,22 @@ class UpgradeScreen:
                       opacity=int((88 if selected else 66) * delay))
 
         # ---- how often the vault offers this ----------------------------
+        blurb_bottom_ = y + (238 + max(0, len(lines) - 1) * 20) * k
+        if boon:
+            # What kind of boon, in place of a rarity. LANTERN, WEAPON and
+            # POWER are the only three, and which one it is matters more to
+            # the decision than any measure of how rare it is.
+            kinds = {'lantern': 'THE LANTERN', 'mod': 'A WEAPON',
+                     'power': 'YOURSELF'}
+            drawLabel(kinds.get(up.kind, 'A GIFT'), mid,
+                      max(y + ch - 62 * k, blurb_bottom_ + 32 * k) - 16 * k,
+                      size=9 * k, fill=colour if selected else palette.UI_FAINT,
+                      font=palette.FONT_UI,
+                      opacity=int((80 if selected else 50) * delay))
+            drawLabel(f'[{index + 1}]', mid, y + ch - 26 * k, size=11 * k,
+                      fill=colour if selected else palette.UI_FAINT,
+                      font=palette.FONT_UI, opacity=int(72 * delay))
+            return
         entry = upgrades.TIERS.get(up.rarity)
         label, pips = (entry[0], entry[1]) if entry else ('COMMON', 1)
         # Anchored to the bottom of the card, but never closer to the blurb
@@ -1176,6 +1227,52 @@ def _glow(cx, cy, size, color, opacity, power=2.4):
     drawImage(sprite, cx - size * 0.5, cy - size * 0.5, opacity=opacity)
     if additive:
         gpu.set_mode(gpu.NORMAL)
+
+
+def _boon_mark(cx, cy, boon, t, selected, r, opacity):
+    """A mark for one of the three kinds of boon.
+
+    Not `_sigil`: that hashes an upgrade's key into a shape, which is right
+    when there are fifty-eight of them and wrong when there are three kinds
+    and the kind is the whole point. A lantern boon should look like a
+    lantern boon before the label is read.
+    """
+    color = boon.color
+    kind = getattr(boon, 'kind', 'power')
+    if kind == 'lantern':
+        # Rings running outward: reach, made a shape.
+        for i in range(3):
+            rr = r * (0.35 + 0.32 * i) * (1.0 + 0.05 * math.sin(t * 1.6 + i))
+            pts = []
+            for j in range(14):
+                a = j * math.tau / 14
+                pts.append(cx + math.cos(a) * rr)
+                pts.append(cy + math.sin(a) * rr)
+            drawPolygon(*pts, fill=None, border=color, borderWidth=1.8,
+                        opacity=int(opacity * (0.8 - 0.2 * i)))
+        drawPolygon(cx, cy - r * 0.22, cx + r * 0.22, cy,
+                    cx, cy + r * 0.22, cx - r * 0.22, cy,
+                    fill=color, opacity=opacity)
+    elif kind == 'mod':
+        # A bolt with a collar on it.
+        drawPolygon(cx, cy - r, cx + r * 0.3, cy + r * 0.2,
+                    cx, cy + r, cx - r * 0.3, cy + r * 0.2,
+                    fill=color, opacity=opacity)
+        for side in (-1, 1):
+            drawPolygon(cx + side * r * 0.55, cy - r * 0.16,
+                        cx + side * r * 0.8, cy,
+                        cx + side * r * 0.55, cy + r * 0.16,
+                        fill=color, opacity=int(opacity * 0.7))
+    else:
+        # A solid, blunt thing: yourself.
+        pts = []
+        for j in range(6):
+            a = j * math.tau / 6 + t * 0.3
+            pts.append(cx + math.cos(a) * r * 0.7)
+            pts.append(cy + math.sin(a) * r * 0.7)
+        drawPolygon(*pts, fill=color, opacity=int(opacity * 0.9))
+        drawPolygon(*pts, fill=None, border=palette.UI_TEXT, borderWidth=1.4,
+                    opacity=int(opacity * 0.5))
 
 
 def _sigil(cx, cy, up, t, selected, radius=None):

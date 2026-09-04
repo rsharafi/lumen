@@ -23,8 +23,9 @@ import time
 
 from .draw import drawLabel, drawPolygon
 
-from . import (art, ascension, audio, draw, floorplan, gpu, hud, music,
-               palette, rng, runtime, save, screens, shop, upgrades, vigil)
+from . import (art, ascension, audio, boons, draw, floorplan, gpu, hud,
+               music, palette, rng, runtime, save, screens, shop, upgrades,
+               vigil)
 from .config import (BOSS_FLOORS, DESIGN_HEIGHT, FPS, FLOORS_PER_RUN, HEIGHT,
                      MAX_FPS,
                      UPGRADE_CHOICES, WIDTH)
@@ -37,6 +38,7 @@ PLAYING = 'playing'
 PAUSED = 'paused'
 DRAFT = 'draft'
 SHOP = 'shop'
+BOON = 'boon'
 ENDED = 'ended'
 VIGIL = 'vigil'
 SETTINGS = 'settings'
@@ -60,6 +62,7 @@ class Game:
         #: unlocked. Set from the title screen; see `lumen/ascension.py`.
         self.tier = None
         self.opened_tier = False
+        self._boons = []
         # A chamber built while the offering is on screen; see prepare_floor.
         self._prepared = None
         self._prep_thread = None
@@ -486,6 +489,26 @@ class Game:
         self.state = ENDED
         audio.play('upgrade' if won else 'game_over', 0.8)
 
+    # ------------------------------------------------------------- boon --
+    def open_boon(self):
+        """Three things a dead boss is worth."""
+        choices = boons.offer(self.stats, rng.world, 3)
+        if not choices:
+            return
+        self._boons = choices
+        self.draft_screen.open_boons(choices)
+        self.state = BOON
+        audio.play('upgrade', 0.7)
+
+    def take_boon(self, index):
+        if not (0 <= index < len(self._boons)):
+            return
+        boons.grant(self.stats, self._boons[index])
+        self.world.player.refresh_from_stats()
+        self._boons = []
+        self.state = PLAYING
+        audio.play('relic', 0.8)
+
     # ------------------------------------------------------------- shop --
     def open_shop(self):
         """Stand at the Ferryman's shelf."""
@@ -824,7 +847,7 @@ class Game:
         elif self.state == VIGIL:
             self.title_screen.update(dt)
             self.vigil_screen.update(dt)
-        elif self.state in (TITLE, PAUSED, DRAFT, SHOP):
+        elif self.state in (TITLE, PAUSED, DRAFT, SHOP, BOON):
             # Menus are calm enough to absorb the pause too, and a player who
             # never changes floor would otherwise never be re-measured.
             self._auto_settle(app)
@@ -848,9 +871,11 @@ class Game:
             self._hover(self.settings_screen)
         elif self.state == HELP:
             self.help_screen.update(dt)
-        elif self.state == SHOP:
-            self.shop_screen.update(dt)
-            self._hover(self.shop_screen)
+        elif self.state in (SHOP, BOON):
+            screen = self.shop_screen if self.state == SHOP \
+                else self.draft_screen
+            screen.update(dt)
+            self._hover(screen)
         elif self.state == DRAFT:
             self.draft_screen.update(dt)
             self._hover(self.draft_screen)
@@ -886,6 +911,12 @@ class Game:
                 self.transition(lambda: self.finish_run(won=True))
             else:
                 self.transition(self.open_draft)
+            return
+
+        # A boss has finished coming apart, and owes a boon.
+        if world.pending_boon and self.pending is None:
+            world.pending_boon = False
+            self.open_boon()
             return
 
         # The Ferryman, walked into. Same division of labour as the door
@@ -960,6 +991,9 @@ class Game:
         elif self.state == SHOP:
             if self._click(self.shop_screen):
                 self.buy(self.shop_screen.index)
+        elif self.state == BOON:
+            if self._click(self.draft_screen):
+                self.take_boon(self.draft_screen.index)
         elif self.state == DRAFT:
             if self._click(self.draft_screen):
                 self.take_upgrade(self.draft_screen.index)
@@ -1411,9 +1445,9 @@ class Game:
             self.help_screen.draw()
         elif self.state == ENDED:
             self.end_screen.draw()
-        elif self.state in (PLAYING, PAUSED, DRAFT, SHOP):
+        elif self.state in (PLAYING, PAUSED, DRAFT, SHOP, BOON):
             self.world.draw(app)
-            if self.state not in (DRAFT, SHOP):
+            if self.state not in (DRAFT, SHOP, BOON):
                 # The draft and the shelf take over the screen entirely;
                 # pause keeps the vitals but drops the callouts, which would
                 # otherwise bleed through the panel.
@@ -1425,10 +1459,12 @@ class Game:
                 self.draft_screen.draw(self.world)
             elif self.state == SHOP:
                 self.shop_screen.draw(self.world)
+            elif self.state == BOON:
+                self.draft_screen.draw(self.world)
             if self.state == PLAYING:
                 self._draw_cursor()
 
-        if self.state in (TITLE, HELP, ENDED, DRAFT, SHOP, PAUSED, VIGIL,
+        if self.state in (TITLE, HELP, ENDED, DRAFT, SHOP, BOON, PAUSED, VIGIL,
                           SETTINGS):
             self._draw_cursor(menu=True)
 
