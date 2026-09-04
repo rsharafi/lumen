@@ -19,7 +19,7 @@ recently - so backtracking is free and the floor as a whole is not resident.
 
 import threading
 
-from . import art
+from . import art, ascension
 from . import level as level_mod
 from . import rng as rng_mod
 from .floorplan import (BOSS, CACHE, COMBAT, DESCENT, ELITE, ENTRANCE,
@@ -66,9 +66,11 @@ KEEP_RECENT = 2
 class RoomBuilder:
     """Builds a floor's chambers, ahead of the player where it can."""
 
-    def __init__(self, plan, seed):
+    def __init__(self, plan, seed, rules=()):
         self.plan = plan
         self.seed = seed
+        #: Ascension rules in force, so FEWER FIRES can reach the generator.
+        self.rules = set(rules)
         self._built = {}                 # room id -> Level
         self._lock = threading.Lock()
         self._queue = []
@@ -91,7 +93,8 @@ class RoomBuilder:
             doors=tuple(room.doors.keys()),
             size=SIZE_FOR_KIND.get(room.kind, 'medium'),
             seed=room.seed,
-            braziers=BRAZIERS_FOR_KIND.get(room.kind, 1),
+            braziers=ascension.brazier_count(
+                self.rules, BRAZIERS_FOR_KIND.get(room.kind, 1)),
         )
 
     def level_for(self, room):

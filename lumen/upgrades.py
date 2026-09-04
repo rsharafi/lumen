@@ -67,6 +67,9 @@ class Stats:
         #: apart from `owned` because a relic is a thing with a name and a
         #: row in the HUD, not a mutation that has already happened.
         self.relics = []
+        #: Which rules of the deeper dark are in force. A set of tier
+        #: numbers; see `lumen/ascension.py`. Empty is the vault as built.
+        self.rules = set()
 
     def describe(self):
         lines = []

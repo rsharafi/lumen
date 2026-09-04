@@ -37,6 +37,11 @@ DEFAULT = {
     'vigil': {},
     'banked': 0,        # lifetime embers earned, for the records screen
     'deepest': 0,       # deepest floor reached, distinct from best_floor
+    # ---- the deeper dark ----------------------------------------------
+    # Highest ascension tier beaten (-1 for none), and the one selected for
+    # the next descent. See lumen/ascension.py.
+    'ascension_cleared': -1,
+    'ascension': 0,
 }
 
 

@@ -120,6 +120,13 @@ def _redraw_slot(depth):
                 palette.UI_ACCENT)
 
 
+def _scaled(price, stats):
+    """THE TOLL, applied at the one place every price passes through."""
+    from . import ascension
+    return _round_price(price * ascension.price_scale(
+        getattr(stats, 'rules', ())))
+
+
 def stock(depth, stats, rng, slots=3):
     """What the Ferryman has today.
 
@@ -160,6 +167,8 @@ def stock(depth, stats, rng, slots=3):
     # `shuffled` returns a new list rather than shuffling in place, so the
     # order was previously insertion order and the shelf read the same way
     # every single time.
+    for slot in out:
+        slot.price = _scaled(slot.price, stats)
     return rng.shuffled(out)[:slots]
 
 

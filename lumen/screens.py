@@ -155,8 +155,12 @@ class TitleScreen:
         self.h = view_h
         self.backdrop = Backdrop(view_w, view_h, rng, 64)
         self.save = save_data
-        self.menu = Menu(['DESCEND', 'THE VIGIL', 'SETTINGS', 'HOW TO PLAY',
-                          'QUIT'])
+        self.menu = Menu(['DESCEND', 'THE DEEPER DARK', 'THE VIGIL',
+                          'SETTINGS', 'HOW TO PLAY', 'QUIT'])
+        #: Which tier the next descent runs under. Lives on the screen rather
+        #: than the save so cycling it costs no writes; the game reads it when
+        #: a run starts.
+        self.tier = int(save_data.get('ascension', 0))
         self.t = 0.0
         # Rectangles from the last frame's layout, used for mouse hit-testing.
         self.hit_rects = []
@@ -223,6 +227,9 @@ class TitleScreen:
                 label = f'VISUALS  {visuals_label}'
             elif item == 'SHAFTS':
                 label = f'SHAFTS  {volumetric_label}'
+            elif item == 'THE DEEPER DARK':
+                label = ('THE DEEPER DARK  OFF' if self.tier <= 0
+                         else f'THE DEEPER DARK  {self.tier}')
             if selected:
                 glide = 8 + 3 * pulse(self.t, 1.6)
                 drawPolygon(w * 0.5 - 150 - glide, y - 2,
@@ -256,6 +263,37 @@ class TitleScreen:
 
 
 # --------------------------------------------------------------------------
+    def draw_tier_note(self, w, h, unlocked):
+        """What the chosen tier will do, spelled out under the menu.
+
+        A ladder of unnamed difficulty numbers is the thing this system
+        exists not to be, so the rules are on screen before the run rather
+        than discovered in it. Newest first: the one the player has just
+        turned on is the one they want to read.
+        """
+        from . import ascension
+        y = h * 0.50 + len(self.menu.items) * 34 + 16
+        if self.tier <= 0:
+            drawLabel('the vault as it was built', w * 0.5, y, size=11,
+                      fill=palette.UI_FAINT, font=palette.FONT_UI,
+                      opacity=54)
+            if unlocked > 0:
+                drawLabel(f'{unlocked} tier{"s" if unlocked > 1 else ""} open',
+                          w * 0.5, y + 17, size=10, fill=palette.UI_DIM,
+                          font=palette.FONT_UI, opacity=46)
+            return
+        rules = ascension.describe(self.tier)
+        for i, rule in enumerate(rules[:4]):
+            fade = 100 if i == 0 else max(30, 62 - i * 12)
+            drawLabel(f'{rule.name}   {rule.blurb}', w * 0.5, y + i * 16,
+                      size=10, fill=rule.color if i == 0 else palette.UI_DIM,
+                      font=palette.FONT_UI, opacity=int(fade * 0.8))
+        if len(rules) > 4:
+            drawLabel(f'and {len(rules) - 4} more', w * 0.5, y + 4 * 16,
+                      size=9, fill=palette.UI_FAINT, font=palette.FONT_UI,
+                      opacity=40)
+
+
 class HelpScreen:
     def resize(self, view_w, view_h):
         self.w = view_w

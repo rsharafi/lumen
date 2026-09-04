@@ -4,7 +4,7 @@ import math
 
 from .draw import drawImage, drawPolygon
 
-from . import art, audio, palette
+from . import art, ascension, audio, palette
 from .config import (DASH_COOLDOWN, DASH_IFRAMES, DASH_SPEED, DASH_TIME,
                      LANTERN_DRAIN, LANTERN_FLARE_COOLDOWN, LANTERN_FLARE_COST,
                      LANTERN_FUEL_MAX, LANTERN_RADIUS, LANTERN_RADIUS_MIN,
@@ -94,7 +94,7 @@ class Player:
     def lantern_radius(self):
         s = self.stats
         base = LANTERN_RADIUS * s.lantern_mult
-        low = LANTERN_RADIUS_MIN * s.lantern_mult
+        low = ascension.lantern_floor(s.rules, LANTERN_RADIUS_MIN) * s.lantern_mult
         frac = clamp(self.fuel / max(self.fuel_max, 1e-6), 0.0, 1.0)
         # Fuel does not scale the light linearly; it holds up, then collapses.
         shaped = frac ** 0.45
@@ -205,7 +205,8 @@ class Player:
 
         # --- lantern fuel ---
         if self.lantern_on:
-            self.fuel = max(0.0, self.fuel - LANTERN_DRAIN * s.lantern_efficiency * dt)
+            drain = ascension.lantern_drain(s.rules, LANTERN_DRAIN)
+            self.fuel = max(0.0, self.fuel - drain * s.lantern_efficiency * dt)
 
     # ------------------------------------------------------------ actions --
     def try_dash(self, keys, particles, rng):

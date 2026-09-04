@@ -13,6 +13,7 @@ from . import draw, gpu
 from .draw import drawImage, drawLine, drawPolygon
 
 from . import acts as act_mod
+from . import ascension
 from . import relics as relic_mod
 from . import doors as door_mod
 from . import hazards as hazard_mod
@@ -241,7 +242,8 @@ class World:
         # main thread without two streams interleaving.
         gen = rng_mod.Rng(self.rng.randint(0, 2 ** 31 - 1))
         plan = plan_mod.generate(depth, gen)
-        builder = rooms_mod.RoomBuilder(plan, gen.randint(0, 2 ** 31 - 1))
+        builder = rooms_mod.RoomBuilder(plan, gen.randint(0, 2 ** 31 - 1),
+                                        rules=self.stats.rules)
         first = plan.room(plan.entrance)
         first.level = builder.level_for(first)
         return (depth, depth in BOSS_FLOORS, plan, builder)
@@ -260,13 +262,15 @@ class World:
             gen = rng_mod.Rng(self.rng.randint(0, 2 ** 31 - 1))
             self.plan = plan_mod.generate(depth, gen)
             self.builder = rooms_mod.RoomBuilder(
-                self.plan, gen.randint(0, 2 ** 31 - 1))
+                self.plan, gen.randint(0, 2 ** 31 - 1),
+                rules=self.stats.rules)
 
         # Per-floor, as opposed to per-room: the things that should not reset
         # every time the player walks through a door.
         self.player.on_floor_start()
         self.player.refresh_from_stats()
-        self.player.add_fuel(FLOOR_ENTRY_FUEL)
+        self.player.add_fuel(
+            ascension.floor_entry_fuel(self.stats.rules, FLOOR_ENTRY_FUEL))
         self.floor_time = 0.0
         self.rooms_entered = 0
 
@@ -342,6 +346,13 @@ class World:
         and then needs exactly this: the room revealed, populated, sealed if
         it is hostile, and announced.
         """
+        # THE VAULT REMEMBERS. A room you have already cleared normally
+        # stays cleared; under this rule it fills again, so there is no such
+        # thing as safe ground behind you.
+        if (ascension.reseals(self.stats.rules) and room.cleared
+                and room.hostile and room.visited):
+            room.cleared = False
+
         first_time = not room.visited
         self.plan.reveal_from(room)
         self.rooms_entered += 1
@@ -973,12 +984,17 @@ class World:
     def _roster_for(self, room):
         """(species, is_elite) pairs for one room's fight."""
         weight = self.ROOM_WEIGHT.get(room.kind, 0.46)
-        keys = enemy_mod.wave_for_depth(self.depth, self.rng, weight=weight)
+        # DEEPER STILL spawns a floor as though it were five lower, which
+        # reaches both the roster and the budget - the species that are legal
+        # and how many of them there are.
+        spawn_depth = ascension.spawn_depth(self.stats.rules, self.depth)
+        keys = enemy_mod.wave_for_depth(spawn_depth, self.rng, weight=weight)
 
         out = [(k, False) for k in keys]
         if not out:
             return out
-        chance = enemy_mod.elite_chance(self.depth)
+        chance = ascension.elite_chance(
+            self.stats.rules, enemy_mod.elite_chance(spawn_depth), spawn_depth)
         if room.kind == plan_mod.ELITE:
             # The room is named for it: one is guaranteed, and the rest of
             # the room rolls as usual.

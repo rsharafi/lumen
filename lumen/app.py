@@ -23,8 +23,8 @@ import time
 
 from .draw import drawLabel, drawPolygon
 
-from . import (art, audio, draw, floorplan, gpu, hud, music, palette,
-               rng, runtime, save, screens, shop, upgrades, vigil)
+from . import (art, ascension, audio, draw, floorplan, gpu, hud, music,
+               palette, rng, runtime, save, screens, shop, upgrades, vigil)
 from .config import (BOSS_FLOORS, DESIGN_HEIGHT, FPS, FLOORS_PER_RUN, HEIGHT,
                      MAX_FPS,
                      UPGRADE_CHOICES, WIDTH)
@@ -56,6 +56,10 @@ class Game:
     def __init__(self):
         self.state = TITLE
         self.banked = 0
+        #: The ascension tier this run is under, or None to take the highest
+        #: unlocked. Set from the title screen; see `lumen/ascension.py`.
+        self.tier = None
+        self.opened_tier = False
         # A chamber built while the offering is on screen; see prepare_floor.
         self._prepared = None
         self._prep_thread = None
@@ -425,6 +429,13 @@ class Game:
         # Everything the Vigil has bought, folded in before the first floor.
         vigil.apply_to(self.stats, self.save)
         self.stats.weapons = vigil.unlocked_weapons(self.save)
+        # The deeper dark, chosen before descending and fixed for the run.
+        # Read once here rather than consulted from the save at every site,
+        # so changing the tier mid-run is not a thing that can happen.
+        if self.tier is None:
+            self.tier = int(self.save.get('ascension', 0))
+        self.tier = max(0, min(self.tier, ascension.unlocked(self.save)))
+        self.stats.rules = ascension.rules_for(self.tier)
         self.world = World(self.stats, rng.world, rng.fx, self.width, self.height)
         self._sync_visuals()
         self.world.enter_floor(max(1, min(FLOORS_PER_RUN, self.start_floor)))
@@ -463,6 +474,14 @@ class Game:
         self.banked = world.embers
         self.save = save.record_run(self.save, world.score, world.depth,
                                     world.kills, won, embers=world.embers)
+        # Beating a tier is what opens the next one, so this is the only
+        # place the ladder ever moves.
+        self.opened_tier = bool(won) and ascension.record_win(self.save,
+                                                              self.tier or 0)
+        if self.opened_tier:
+            self.save['ascension'] = min(ascension.MAX_TIER,
+                                         (self.tier or 0) + 1)
+            save.save(self.save)
         self.end_screen.open(world, won, self.save, record)
         self.state = ENDED
         audio.play('upgrade' if won else 'game_over', 0.8)
@@ -993,7 +1012,17 @@ class Game:
         choice = self.title_screen.menu.current
         if choice == 'DESCEND':
             audio.play('ui_select', 0.6)
+            # Whatever the title screen is showing is what the run is under.
+            self.tier = self.title_screen.tier
             self.transition(self.new_run)
+        elif choice == 'THE DEEPER DARK':
+            # Cycles rather than opening a screen: there is one number to
+            # choose and a page for it would be a page with one row on it.
+            top = ascension.unlocked(self.save)
+            self.title_screen.tier = (self.title_screen.tier + 1) % (top + 1)
+            self.save['ascension'] = self.title_screen.tier
+            save.save(self.save)
+            audio.play('ui_move', 0.5)
         elif choice == 'THE VIGIL':
             audio.play('ui_select', 0.5)
             self.vigil_screen.open()
@@ -1368,6 +1397,8 @@ class Game:
                                    self.visuals_label(),
                                    self.volumetric_label(),
                                    self.renderer_label())
+            self.title_screen.draw_tier_note(self.width, self.height,
+                                             ascension.unlocked(self.save))
         elif self.state == VIGIL:
             # The title's drifting motes, but not its menu: a ledger read over
             # the top of another menu is two menus.
