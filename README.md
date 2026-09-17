@@ -10,6 +10,18 @@ still there.
 No asset files ship with the game. Every texture, sprite, glow and item icon,
 and all 83 sound effects, are generated at startup from numpy and PIL.
 
+## Download
+
+| | |
+| --- | --- |
+| **macOS** — Apple silicon | **[LUMEN-macOS.zip](https://github.com/rsharafi/lumen/releases/latest/download/LUMEN-macOS.zip)** — unzip, double-click. Signed and notarised, so it opens with no warning. |
+| **Windows** — 64-bit | **[LUMEN-Windows.exe](https://github.com/rsharafi/lumen/releases/latest/download/LUMEN-Windows.exe)** — one file, nothing to install. Windows will say *Windows protected your PC* the first time: **More info → Run anyway**. |
+
+Both carry their own Python, so there is nothing else to install and nothing
+to set up. They are the same game, built from this repository — see
+[Sending it to someone](#sending-it-to-someone) for how, and
+[Running it](#running-it) for playing it from source instead.
+
 ![The vault, lit only by your lantern](docs/gameplay.png)
 
 <p align="center">
