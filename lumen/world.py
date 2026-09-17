@@ -134,8 +134,13 @@ class World:
         #: side -> Ward, rebuilt with the room. They hold a cast sweep each.
         #: The one interactable object in a reward room, or None.
         self.fixture = None
-        #: Set when a boss has finished coming apart and its boon is owed.
-        self.pending_boon = False
+        #: The aim direction the camera last leaned into, kept so a frame
+        #: with no simulation in it does not throw the lookahead away.
+        self._aim_n = (0.0, 0.0)
+        #: Rooms already sent to the head of the build queue from this room,
+        #: so walking back and forth past a door does not re-queue it every
+        #: frame. Cleared on arrival - see `_warm_next_room`.
+        self._warmed = set()
         #: Set for one frame when the player has walked into the Ferryman.
         #: Read by the game, which owns screens; the world owns rooms.
         self.pending_shop = False
@@ -187,6 +192,13 @@ class World:
         self.boss_intro = 0.0
         self.boss_death = 0.0
         self.boss_corpse = None
+        #: Counts down through the beat after the collapse, before the way
+        #: down opens. See `_tick_boss_after`.
+        self.boss_gone = 0.0
+        #: Set once this floor's boss is dead, and read by the game when the
+        #: player takes the rift: a boss owes a boon, and the boon is paid on
+        #: the way down rather than over the top of its own death.
+        self.boss_beaten = False
         self.prewarm_lantern_sizes()
 
     def resize(self, view_w, view_h):
@@ -205,6 +217,20 @@ class World:
         # every lantern size has to be baked again here. Leaving it to the
         # first frame that needs one costs a 4-7 ms rasterisation mid-frame.
         self.prewarm_lantern_sizes()
+
+    def refresh_art(self):
+        """Re-rasterise every chamber a render-scale change left behind.
+
+        The ones on screen are done here and now, behind whatever the resize
+        is already costing; the rest of the floor goes back on the builder's
+        worker, so a room built before the resize is not an empty room when
+        the player walks into it.
+        """
+        for level, _ox, _oy in self._crossing_levels():
+            if level is not None and level_mod.needs_bake(level):
+                level_mod.rebake(level)
+        if self.builder is not None:
+            self.builder.refresh()
 
     def prewarm_lantern_sizes(self):
         """Bake every lantern size this run can reach, so none is built mid-frame."""
@@ -275,6 +301,8 @@ class World:
             ascension.floor_entry_fuel(self.stats.rules, FLOOR_ENTRY_FUEL))
         self.floor_time = 0.0
         self.rooms_entered = 0
+        # A boon is owed for a boss, and paid on the way down off its floor.
+        self.boss_beaten = False
 
         # The floor announces itself; the *boss* announces itself when you
         # open its door. Naming it on arrival gave the thing away in a
@@ -300,7 +328,7 @@ class World:
         """
         self.room = room
         self.plan.current = room.id
-        if room.level is None:
+        if room.level is None or level_mod.needs_bake(room.level):
             room.level = self.builder.level_for(room)
         self.level = room.level
 
@@ -326,9 +354,6 @@ class World:
         self.boss_ref = None
         self.door_lock = 0.55
         self.pending_door = None
-
-        self.hazards = hazard_mod.Field.build(self.level, self.depth,
-                                              self.rng)
 
         self.flow = flow_mod.FlowField(self.level)
         self.flow.rebuild(self.player.x, self.player.y)
@@ -356,8 +381,19 @@ class World:
             room.cleared = False
 
         first_time = not room.visited
+        self._warmed = set()
         self.plan.reveal_from(room)
         self.rooms_entered += 1
+
+        # What this act puts on the floor, scattered over *this* chamber.
+        # This used to live in `enter_room`, which is only half the ways into
+        # a room: walking through a door goes through `_finish_crossing` and
+        # then straight here, so a crossing carried the last chamber's
+        # hazards into the new one - vents and pools sitting wherever the
+        # previous room's open floor happened to be, which in a room of a
+        # different size is inside the walls.
+        self.hazards = hazard_mod.Field.build(self.level, self.depth,
+                                              self.rng)
 
         self._populate_room(room, first_time)
         self.cleared = room.cleared or not room.hostile
@@ -393,7 +429,14 @@ class World:
         # not a checklist: what the player leaves behind is the price of
         # going down early, and that only reads as a choice if the way down
         # is never withheld.
-        if room.kind == plan_mod.DESCENT:
+        #
+        # A boss chamber is its floor's descent room too - see
+        # `_tick_boss_after` - but only once the thing in it is dead, and on
+        # the first clear the rift is opened by the death rather than by the
+        # arrival. This is what puts it back for a player who walked out of a
+        # beaten boss room and came back.
+        if room.kind == plan_mod.DESCENT or (room.kind == plan_mod.BOSS
+                                             and room.cleared):
             self._open_rift()
 
         # Last, so anything a relic does to a room happens to the room as it
@@ -416,11 +459,28 @@ class World:
         self.boss_intro = self.BOSS_INTRO_TIME if self.boss_ref else 0.0
         self.boss_death = 0.0
         self.boss_corpse = None
+        self.boss_gone = 0.0
         if self.boss_ref is not None:
             # The first beat of the arrival, before anything is visible: the
             # room answering. The other two hang off `boss_intro` in
             # `_tick_boss_intro`, and this is where that clock starts.
             audio.play(f'{self.boss_ref.voice}_wake', 0.85)
+
+    def _fixture_room(self, spot):
+        """How well a spot suits a fixture: headroom first, then openness.
+
+        A tuple so `max` breaks ties on the second term. Headroom is what
+        decides where the caption goes, and the caption is most of what a
+        cache or a shrine says from across the room.
+        """
+        from . import fixtures as fixture_mod
+        x, y = spot
+        lv = self.level
+        top = y - fixture_mod.Fixture.LABEL_RISE - fixture_mod.Fixture.LABEL_GAP
+        half = fixture_mod.Fixture.LABEL_HALF_W
+        clear = all(lv.is_open_at(x + dx, top, 6.0)
+                    for dx in (-half, 0.0, half))
+        return (1 if clear else 0, 1 if lv.is_open_at(x, y, 30.0) else 0)
 
     def _place_fixture(self, room):
         """Stand the room's offer in the middle of it, if it has one.
@@ -438,9 +498,13 @@ class World:
             return
         cx, cy = self.level.width * 0.5, self.level.height * 0.5
         if not self.level.is_open_at(cx, cy, 30.0):
+            # The middle is blocked, so it stands somewhere else roomy. Of
+            # the spots the generator liked, prefer one with floor overhead:
+            # the fixture writes its name above itself, and a fixture backed
+            # against masonry has to write it somewhere worse.
             spots = self.level.spawn_points
             if spots:
-                cx, cy = spots[len(spots) // 2]
+                cx, cy = max(spots, key=self._fixture_room)
 
         if room.payload is None:
             # Decided on first entry rather than at plan time, so a shrine
@@ -678,13 +742,31 @@ class World:
         they pass the threshold the neighbour becomes the live room and every
         coordinate in play - the player's, the camera's - shifts by the same
         offset. Nothing moves on screen. See `_finish_crossing`.
+
+        Three answers, not two:
+
+        * **True** - both rooms are in one space and the walk is on.
+        * **None** - the room behind that door is not baked yet. Nothing has
+          happened; ask again next frame. This never used to be an answer:
+          the chamber was built here, on the frame the player stepped into
+          the doorway, and at the display's own pixel density that is between
+          half a second and a second and a half of PIL with the game stopped
+          dead in the middle of a walk. Whatever else a room change is, it is
+          not allowed to be that.
+        * **False** - the two doorways cannot be lined up at all, so this has
+          to be the fade it used to be every time.
         """
         rid = self.room.doors.get(side)
         if rid is None or self.crossing is not None:
             return False
         room = self.plan.room(rid)
-        if room.level is None:
-            room.level = self.builder.level_for(room)
+        if room.level is None or level_mod.needs_bake(room.level):
+            room.level = self.builder.ready(room)
+            if room.level is None:
+                # Not up yet. Put it at the head of the queue and wait for
+                # the worker rather than doing its work on this frame.
+                self.builder.hurry(room)
+                return None
         far = plan_mod.OPPOSITE[side]
         if far not in room.level.doors:
             # Nothing to line up with. Fall back to the old cut rather than
@@ -888,9 +970,89 @@ class World:
         audio.play('door_through', 0.5)
         return self.room
 
+    #: How close to a doorway the player has to be for the room behind it to
+    #: be moved to the head of the build queue. Five tiles is a second and a
+    #: quarter at a walk, and they are usually approaching from much further
+    #: out than that.
+    WARM_DOOR_RANGE = 320.0
+
+    def _warm_next_room(self):
+        """Start the chamber behind a door the player is walking toward.
+
+        The builder queues a room's neighbours the moment it is entered,
+        which is normally a whole fight's worth of warning. Normally is not
+        always: a corridor room crossed in three seconds, or a player who
+        turns straight back the way they came, can reach a doorway before
+        the worker has got round to what is behind it. Walking up to a door
+        is the last and best warning there is, so it takes that room to the
+        head of the queue - and a room already built costs nothing to ask
+        about twice.
+        """
+        if self.crossing is not None or self.plan is None:
+            return
+        px, py = self.player.x, self.player.y
+        reach = self.WARM_DOOR_RANGE * self.WARM_DOOR_RANGE
+        for side, rid in self.room.doors.items():
+            if rid in self._warmed or side not in self.level.doors:
+                continue
+            cx, cy = self.level.door_center(side)
+            if (px - cx) ** 2 + (py - cy) ** 2 > reach:
+                continue
+            self._warmed.add(rid)
+            room = self.plan.room(rid)
+            if room.level is None:
+                self.builder.hurry(room)
+
+    def _keep_inside(self, player):
+        """Do not let the player walk out of the chamber through a doorway.
+
+        A doorway is carved through the whole thickness of the border, right
+        out to the chamber's edge, and there is no wall left in it to stop
+        anyone - which never mattered while a crossing began on the very
+        frame the player stepped into the opening, because from then on the
+        next chamber was standing there to be walked into.
+
+        It can matter now: if the room behind the door is still baking the
+        crossing waits, and without this the player would walk out of the
+        floor. So while a doorway is waiting on its chamber they are held at
+        the near face of the shared wall - one step short of a threshold with
+        nothing behind it yet - and otherwise simply inside the chamber. Both
+        are off while a crossing is live, since walking out of this rectangle
+        and into the next one is the whole point of a crossing.
+        """
+        if self.crossing is not None or self.level is None:
+            return
+        r = player.radius
+        player.x = clamp(player.x, r, self.level.width - r)
+        player.y = clamp(player.y, r, self.level.height - r)
+        side = self.pending_door
+        if side is None or side not in self.level.doors:
+            return
+        x0, y0, x1, y1 = self.level.door_zone(side)
+        if side == 'n':
+            player.y = max(player.y, y0 + r)
+        elif side == 's':
+            player.y = min(player.y, y1 - r)
+        elif side == 'w':
+            player.x = max(player.x, x0 + r)
+        else:
+            player.x = min(player.x, x1 - r)
+
     def _check_doors(self):
         """Has the player stepped into a doorway that will answer?"""
-        if self.door_lock > 0.0 or self.pending_door or self.crossing:
+        if self.crossing:
+            return
+        if self.pending_door is not None:
+            # Flagged, and the game has not been able to act on it yet -
+            # which now happens whenever the chamber behind the door is still
+            # baking. If they have stepped back out of the opening in the
+            # meantime they have changed their mind, and the flag goes with
+            # them.
+            if self.level.door_at(self.player.x,
+                                  self.player.y) != self.pending_door:
+                self.pending_door = None
+            return
+        if self.door_lock > 0.0:
             return
         side = self.level.door_at(self.player.x, self.player.y)
         if side is None or side not in self.room.doors:
@@ -1269,6 +1431,8 @@ class World:
             self._tick_boss_intro(dt)
         if self.boss_death > 0.0:
             self._tick_boss_death(dt)
+        elif self.boss_gone > 0.0:
+            self._tick_boss_after(dt)
         self.floor_time += dt
         self.banner_t = max(0.0, self.banner_t - dt)
 
@@ -1281,7 +1445,14 @@ class World:
                            self.view_w, self.view_h)
 
         if sdt <= 0.0:
-            self.camera.follow(self.player.x, self.player.y, 0.0, 0.0, dt)
+            # Hitstop. The world is held still and the camera is not, so it
+            # keeps the lookahead it had: dropping it for the length of a
+            # freeze and picking it up again afterwards moved the view by the
+            # whole of `CAMERA_LOOKAHEAD` in two steps, which is a visible
+            # kick on the frame a hit lands - measured at 6 units, from a
+            # camera that is otherwise dead still while the player walks.
+            self.camera.follow(self.player.x, self.player.y,
+                               self._aim_n[0], self._aim_n[1], dt)
             return
 
         if self.streak_timer > 0.0:
@@ -1298,6 +1469,7 @@ class World:
 
         player.update(sdt, keys, dx, dy, self.solids(), self.particles,
                       self.fxrng)
+        self._keep_inside(player)
 
         # One BFS per tile the player crosses feeds every chaser and every
         # drifting ember for the rest of that tile.
@@ -1365,6 +1537,9 @@ class World:
         d = math.hypot(dx, dy)
         if d > 1e-6:
             aim_nx, aim_ny = dx / d, dy / d
+        # Remembered for the frames the simulation is stopped - see the
+        # hitstop branch at the top of this method.
+        self._aim_n = (aim_nx, aim_ny)
         # An arrival you cannot see is not an arrival. The view swings across
         # to whatever is assembling and comes back as it finishes, and it
         # stays on the corpse while that comes apart - the two moments the
@@ -1394,6 +1569,7 @@ class World:
                 and not any(e.alive for e in self.enemies)):
             self.break_wards()
 
+        self._warm_next_room()
         self._touch_fixture(sdt)
         if self.door_lock > 0.0:
             self.door_lock = max(0.0, self.door_lock - dt)
@@ -1920,6 +2096,12 @@ class World:
     # How long a boss takes to arrive, and to come apart.
     BOSS_INTRO_TIME = 3.1
     BOSS_DEATH_TIME = 2.8
+    #: And how long the chamber is left to itself afterwards. The collapse
+    #: throws a ripple that takes a second to cross the room and embers with
+    #: a second and a half of life in them; this is long enough for all of it
+    #: to land, and for the room to read as empty, before the way down opens
+    #: into the quiet.
+    BOSS_AFTER_TIME = 1.9
 
     # The arrival, written as a score instead of as a run of probabilities.
     #
@@ -1976,16 +2158,25 @@ class World:
         scale = draw.SCALE
         has_normals = gpu.begin_normal() and lv.floor_normal is not None
         if has_normals:
+            # Sized explicitly, in design units. A chamber's normal layers
+            # are kept at half the resolution of the stone they describe -
+            # see `art.normal_map` - so their own pixel count would draw them
+            # at a quarter of the chamber.
             for other, dx, dy in self._other_levels():
+                ow, oh = other.width, other.height
                 if other.floor_normal is not None:
-                    drawImage(other.floor_normal, dx - ox, dy - oy)
+                    drawImage(other.floor_normal, dx - ox, dy - oy,
+                              width=ow, height=oh)
                 if other.wall_normal is not None:
-                    drawImage(other.wall_normal, dx - ox, dy - oy)
-            drawImage(lv.floor_normal, -ox, -oy)
+                    drawImage(other.wall_normal, dx - ox, dy - oy,
+                              width=ow, height=oh)
+            drawImage(lv.floor_normal, -ox, -oy,
+                      width=lv.width, height=lv.height)
             # Burns are part of the surface, so they shape the light too.
             self._draw_decals(ox, oy, normals=True)
             if lv.wall_normal is not None:
-                drawImage(lv.wall_normal, -ox, -oy)
+                drawImage(lv.wall_normal, -ox, -oy,
+                          width=lv.width, height=lv.height)
             self._draw_entity_normals(ox, oy)
 
         # ---- what is there ------------------------------------------------
@@ -2004,6 +2195,9 @@ class World:
         self._draw_rift(ox, oy)
         self.pickups.draw(ox, oy, self.view_w, self.view_h)
         drawImage(lv.wall_image, -ox, -oy)
+        # The doorways' stonework, over the masonry it is let into and still
+        # part of the ground. It has to be on this side of the line below.
+        self._draw_door_frames(ox, oy)
         # Everything from here on is a thing standing in the room rather than
         # the room, and is marked as such so the added light does not wash it
         # out. See `gpu.scene_coverage`.
@@ -2082,6 +2276,7 @@ class World:
                 if -90 < sx < self.view_w + 90 and -90 < sy < self.view_h + 90:
                     e.draw_glint(sx, sy)
         drawImage(self.overlay, 0, 0)
+        self._draw_fixture_terms(ox, oy)
         self.effects.draw_texts(ox, oy)
         self.effects.draw_flash(self.view_w, self.view_h)
 
@@ -2244,6 +2439,7 @@ class World:
         self.pickups.draw(ox, oy, self.view_w, self.view_h)
         self._mark('wall_blit')
         drawImage(lv.wall_image, -ox, -oy)
+        self._draw_door_frames(ox, oy)
         self._mark('wall_light')
         self._draw_wall_light(ox, oy, self.lantern_flicker())
         self._mark('braziers+wards')
@@ -2280,6 +2476,7 @@ class World:
         self.effects.draw_lights(ox, oy, self.view_w, self.view_h)
         self._mark('overlay')
         drawImage(self.overlay, 0, 0)
+        self._draw_fixture_terms(ox, oy)
         self.effects.draw_texts(ox, oy)
         self.effects.draw_flash(self.view_w, self.view_h)
         self._mark(None)
@@ -2800,14 +2997,44 @@ class World:
                                  speed=(260, 900), life=(0.5, 1.4),
                                  size=(2.6, 7.0))
             self.particles.ripple(x, y, palette.LIGHT_CORE, 1300, 1.0, 100)
-            # The chamber goes white and the way down opens. The only effect
-            # in the game that resolves upward, and it does the work `boom`
-            # and `upgrade` were sharing.
+            # The chamber goes white. The only effect in the game that
+            # resolves upward, and it does the work `boom` and `upgrade`
+            # were sharing.
             audio.play('boss_gone', 1.0)
             self.boss_corpse = None
-            # The one moment in a run where the build gets to commit to
-            # something. The world only flags it; the game owns screens.
-            self.pending_boon = True
+            # And then it is allowed to land. The collapse throws a
+            # thirteen-hundred-unit ripple, a screen wash and a hundred and
+            # twenty embers with a second and a half of life in them, and
+            # this used to be the exact frame the game covered all of it with
+            # the boon screen - so the payoff for the hardest thing in the
+            # run was a menu wiping the moment it happened. Nothing is asked
+            # of the player until it has played out.
+            self.boss_gone = self.BOSS_AFTER_TIME
+            self.boss_beaten = True
+
+    def _tick_boss_after(self, dt):
+        """The quiet after the collapse, and then the way down.
+
+        A boss chamber *is* the floor's descent room - `floorplan.generate`
+        makes the boss room the one it points `plan.descent` at - but it is
+        marked BOSS rather than DESCENT, so the rule that opens a rift on
+        arrival never fired in it and there was no way out of a beaten boss
+        room at all. The rift belongs here anyway rather than on arrival: it
+        is what killing the thing was for, and it should open because you
+        killed it.
+        """
+        was = self.boss_gone
+        self.boss_gone = max(0.0, self.boss_gone - dt)
+        if was <= 0.0 or self.boss_gone > 0.0 or self.rift is not None:
+            return
+        # Marked here and not left to `break_wards`, which only fires once
+        # every last thing in the room has stopped moving. The boss is what
+        # sealed this chamber; a straggler it brought with it is not worth
+        # holding the way down shut for, and a room whose rift is open and
+        # whose `cleared` is not would lose that rift on re-entry.
+        self.room.cleared = True
+        self._open_rift()
+        self.set_banner('THE WAY DOWN OPENS', 2.4)
 
     def _draw_boss_corpse(self, ox, oy):
         """What is left of it, shrinking and guttering as it comes apart."""
@@ -2862,22 +3089,53 @@ class World:
     WARD_REACH = 190.0
     WARD_HEIGHT = 26.0
 
+    def _doors_on_screen(self, ox, oy, level, dx, dy):
+        """The doors of one live chamber that are worth drawing this frame."""
+        for door in level.door_objects.values():
+            sx = door.cx + dx - ox
+            sy = door.cy + dy - oy
+            if (sx < -110 or sy < -110 or sx > self.view_w + 110
+                    or sy > self.view_h + 110):
+                continue
+            yield door
+
+    def _draw_door_frames(self, ox, oy):
+        """Every doorway's stonework, drawn as part of the ground.
+
+        Before `scene_coverage`, so a sill and its jambs take the room's
+        light like the floor they are laid in - see `doors.draw_frame`.
+
+        Mid-crossing the two chambers share a doorway, and each of them owns
+        a `Door` object for it standing in the same place. Dressing it twice
+        laid two sills and four jambs on one opening, which is exactly the
+        band of floor the player is walking across. Deduplicated by where a
+        door actually is rather than by which room claims it, so it holds
+        before the swap, after it, and while a third chamber is still on
+        screen behind the player.
+        """
+        if self.level is None or NO_WARDS:
+            return
+        drawn = []
+        for level, dx, dy in self._crossing_levels():
+            for door in self._doors_on_screen(ox, oy, level, dx, dy):
+                cx, cy = door.cx + dx, door.cy + dy
+                if any(abs(cx - px) < TILE and abs(cy - py) < TILE
+                       for px, py in drawn):
+                    continue
+                drawn.append((cx, cy))
+                door_mod.draw_frame(door, ox - dx, oy - dy)
+
     def _draw_doors(self, ox, oy):
-        """Every doorway in the room: frame, leaves, and the seal on them.
+        """The moving parts of every doorway, and the seal across them.
 
         Drawn after the walls and before the bodies, so a leaf occludes the
-        floor and the threshold but never the player standing in it.
+        floor and the threshold but never the player standing in it. The
+        stonework the leaves slide into went down with the floor.
         """
         if self.level is None or NO_WARDS:
             return
         for level, dx, dy in self._crossing_levels():
-            for door in level.door_objects.values():
-                sx = door.cx + dx - ox
-                sy = door.cy + dy - oy
-                if (sx < -110 or sy < -110 or sx > self.view_w + 110
-                        or sy > self.view_h + 110):
-                    continue
-                door_mod.draw_frame(door, ox - dx, oy - dy)
+            for door in self._doors_on_screen(ox, oy, level, dx, dy):
                 door_mod.draw_leaves(door, ox - dx, oy - dy, self.run_time,
                                      self._door_lit(door, dx, dy))
 
@@ -2896,7 +3154,20 @@ class World:
     def _draw_fixture(self, ox, oy):
         if self.fixture is not None:
             self.fixture.draw(ox, oy, self.run_time)
-            self.fixture.draw_terms(ox, oy, self.player.x, self.player.y)
+
+    def _draw_fixture_terms(self, ox, oy):
+        """The fixture's name and terms, over the finished frame.
+
+        Not with the fixture itself. What it is and what it costs is the game
+        talking to the player, and drawing it into the albedo put it through
+        the light buffer with everything else - so a name that happened to
+        land on unlit stone was multiplied down until it could not be read,
+        which is precisely where a caption is worth having.
+        """
+        if self.fixture is not None:
+            self.fixture.draw_terms(ox, oy, self.player.x, self.player.y,
+                                    level=self.level,
+                                    view=(self.view_w, self.view_h))
 
     def _draw_fixture_light(self, ox, oy):
         """What the room's offer throws on the stone around it.

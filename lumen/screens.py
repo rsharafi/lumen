@@ -45,6 +45,70 @@ def wrap(text_value, width):
     return lines
 
 
+#: What a card keeps clear either side of its title, in card-space units.
+TITLE_MARGIN = 18.0
+#: How far the title may be shrunk to fit. The blurb under it is set at 12,
+#: and a title smaller than its own body text does not read as a title.
+TITLE_MIN = 13.0
+#: The gap between two lines of title, in card-space units.
+TITLE_LEADING = 21.0
+
+_TITLE_FIT = {}
+
+
+def _role_of(font_name):
+    """`art`'s role name for one of the two faces the game sets type in."""
+    return 'display' if font_name == palette.FONT_DISPLAY else 'ui'
+
+
+def fit_title(name, max_w, size, role=palette.FONT_DISPLAY, bold=True):
+    """A card's title, broken and sized so that it stays on the card.
+
+    A weapon-mod boon is named for the weapon *and* the mod - SCATTERLIGHT -
+    THROUGH AND THROUGH - and set at the offering's own size the longest of
+    those measures 412 design units against a 286-unit card. Thirty of the
+    forty-eight possible names ran off both edges of the card they were
+    drawn on.
+
+    Broken at the dash first, because a name like that is genuinely two
+    things and the dash is where it comes apart. Only if a line still will
+    not fit does the type shrink, and only as far as `TITLE_MIN`: a title set
+    smaller than the blurb beneath it reads as a mistake rather than as a
+    title, and clipping is not the only way to get a card wrong.
+
+    Returns `(lines, size)`.
+    """
+    key = (name, round(max_w, 1), round(size, 2), role, bold, art.SCALE)
+    hit = _TITLE_FIT.get(key)
+    if hit is not None:
+        return hit
+
+    def widest(lines, at):
+        return max(art.label_width(line, _role_of(role), at, bold=bold)
+                   for line in lines)
+
+    lines = [name]
+    if widest(lines, size) > max_w:
+        for sep in (' - ', ' — ', '-'):
+            if sep in name:
+                head, _, tail = name.partition(sep)
+                lines = [head.strip(), tail.strip()]
+                break
+        else:
+            words = name.split()
+            if len(words) > 1:
+                half = len(words) // 2
+                lines = [' '.join(words[:half]), ' '.join(words[half:])]
+    at = size
+    for _ in range(6):
+        over = widest(lines, at)
+        if over <= max_w or at <= TITLE_MIN + 1e-6:
+            break
+        at = max(TITLE_MIN, at * max_w / over)
+    hit = _TITLE_FIT[key] = (lines, at)
+    return hit
+
+
 def panel(x, y, w, h, opacity=76, border=palette.UI_LINE, border_opacity=68):
     drawPolygon(x, y, x + w, y, x + w, y + h, x, y + h,
                 fill=palette.UI_PANEL, opacity=opacity)
@@ -166,14 +230,34 @@ class TitleScreen:
         self.hit_rects = []
         self._bake_logo()
 
+    #: How tall the wordmark's capitals are drawn, in design units: what
+    #: Copperplate at 104 gives, which is what the title was laid out to. A
+    #: face whose capitals are a different share of its point size - the
+    #: bundled stand-in's are much more - is set at whatever size puts its
+    #: ink at the same height, so the title reads the same everywhere.
+    LOGO_INK = 59.0
+    #: And they start this far down the sprite - again, Copperplate's number.
+    INK_TOP = 67.0
+
+    def _logo_points(self):
+        ink = art.text_ink_height('LUMEN', 'display', 104)
+        return int(clamp(round(104.0 * self.LOGO_INK / ink), 80, 120))
+
     def _bake_logo(self):
-        self.logo = art.text_sprite('LUMEN', 'display', 104, (255, 236, 208),
-                                    tracking=18, glow_color=(255, 168, 64),
-                                    glow_radius=18)
+        points = self._logo_points()
+        self.logo = art.text_sprite('LUMEN', 'display', points,
+                                    (255, 236, 208), tracking=18,
+                                    glow_color=(255, 168, 64), glow_radius=18)
+        self.logo_points = points
         self.logo_w, self.logo_h = self.logo_size()
+        #: Where the wordmark's glyphs start inside its sprite, so the sprite
+        #: can be hung from its ink rather than from its line box. See
+        #: `art.text_ink_top`.
+        self.logo_ink_top = art.text_ink_top('LUMEN', 'display', points,
+                                             glow_radius=18)
 
     def logo_size(self):
-        w, h = art.text_size('LUMEN', 'display', 104, tracking=18)
+        w, h = art.text_size('LUMEN', 'display', self.logo_points, tracking=18)
         return w + 44, h + 44
 
     def update(self, dt):
@@ -187,13 +271,19 @@ class TitleScreen:
 
         rise = ease_out_cubic(clamp(self.t / 1.1, 0.0, 1.0))
         ly = h * 0.24 - 30 + (1.0 - rise) * 26
-        drawImage(self.logo, w * 0.5 - self.logo_w * 0.5, ly,
+        # Hung by its ink: the wordmark's capitals start `INK_TOP` below `ly`
+        # whatever the face's own line box does.
+        drawImage(self.logo, w * 0.5 - self.logo_w * 0.5,
+                  ly + self.INK_TOP - self.logo_ink_top,
                   opacity=int(100 * rise))
 
-        drawLabel('DESCENT INTO THE VAULT', w * 0.5, ly + self.logo_h + 4,
+        # The same gap under the wordmark's last row of pixels whichever face
+        # drew it.
+        under = ly + self.INK_TOP + self.LOGO_INK + 28.0
+        drawLabel('DESCENT INTO THE VAULT', w * 0.5, under,
                   size=15, fill=palette.UI_ACCENT, font=palette.FONT_DISPLAY,
                   bold=True, opacity=int(88 * rise))
-        drawLabel('you carry the only light', w * 0.5, ly + self.logo_h + 26,
+        drawLabel('you carry the only light', w * 0.5, under + 22,
                   size=12, fill=palette.UI_DIM, font=palette.FONT_UI,
                   opacity=int(70 * rise))
 
@@ -501,9 +591,12 @@ class UpgradeScreen:
                 else self.TIER_COLOR.get(rarity, up.color)
             entry = upgrades.TIERS.get(rarity)
             label = entry[0] if entry else 'COMMON'
+            titles, tsize = fit_title(up.name, self.CARD_W - 2 * TITLE_MARGIN,
+                                      18)
             for name_col in (colour, palette.UI_TEXT):
-                art.label_sprite(up.name, 'display', int(18 * k),
-                                 art.rgb_tuple(name_col), bold=True)
+                for line in titles:
+                    art.label_sprite(line, 'display', int(tsize * k),
+                                     art.rgb_tuple(name_col), bold=True)
             for line in wrap(up.blurb, 28)[:4]:
                 for col, _ in pairs:
                     art.label_sprite(line, 'ui', int(12 * k),
@@ -698,21 +791,30 @@ class UpgradeScreen:
                    radius=(30.0 + (4.0 if selected else 0.0)) * k)
 
         # ---- name, rule, blurb ------------------------------------------
-        drawLabel(up.name, mid, y + 190 * k, size=18 * k, bold=True,
-                  fill=colour if selected else palette.UI_TEXT,
-                  font=palette.FONT_DISPLAY, opacity=alpha)
-        _rule(x + 52 * k, x + cw - 52 * k, y + 212 * k, colour,
+        # The title decides where everything under it sits: a name that needs
+        # two lines pushes the rule and the blurb down and starts a little
+        # higher, so the block stays where it was rather than growing into
+        # the tier row at the bottom of the card.
+        titles, tsize = fit_title(up.name, self.CARD_W - 2 * TITLE_MARGIN, 18)
+        top = y + (190 - (len(titles) - 1) * TITLE_LEADING * 0.5) * k
+        for j, line in enumerate(titles):
+            drawLabel(line, mid, top + j * TITLE_LEADING * k, size=tsize * k,
+                      bold=True, fill=colour if selected else palette.UI_TEXT,
+                      font=palette.FONT_DISPLAY, opacity=alpha)
+        rule_y = top + ((len(titles) - 1) * TITLE_LEADING + 22.0) * k
+        _rule(x + 52 * k, x + cw - 52 * k, rule_y, colour,
               int((60 if selected else 26) * delay))
 
         lines = wrap(up.blurb, 28)[:4]
+        blurb_top = rule_y + 26 * k
         for j, line in enumerate(lines):
-            drawLabel(line, mid, y + (238 + j * 20) * k, size=12 * k,
+            drawLabel(line, mid, blurb_top + j * 20 * k, size=12 * k,
                       fill=palette.UI_TEXT if selected else palette.UI_DIM,
                       font=palette.FONT_UI,
                       opacity=int((88 if selected else 66) * delay))
 
         # ---- how often the vault offers this ----------------------------
-        blurb_bottom_ = y + (238 + max(0, len(lines) - 1) * 20) * k
+        blurb_bottom_ = blurb_top + max(0, len(lines) - 1) * 20 * k
         if boon:
             # What kind of boon, in place of a rarity. LANTERN, WEAPON and
             # POWER are the only three, and which one it is matters more to
@@ -733,8 +835,7 @@ class UpgradeScreen:
         # Anchored to the bottom of the card, but never closer to the blurb
         # than one clear line - a fixed offset only works while every blurb is
         # the same number of lines, and they are not.
-        blurb_bottom = y + (238 + max(0, len(lines) - 1) * 20) * k
-        py = max(y + ch - 62 * k, blurb_bottom + 32 * k)
+        py = max(y + ch - 62 * k, blurb_bottom_ + 32 * k)
         drawLabel(label, mid, py - 16 * k, size=9 * k,
                   fill=colour if selected else palette.UI_FAINT,
                   font=palette.FONT_UI,
@@ -894,14 +995,20 @@ class ShopScreen:
             _shop_mark(mid, ay, slot.kind, colour, self.t,
                        28.0 * k, int(90 * delay))
 
-        drawLabel(slot.name, mid, y + 180 * k, size=17 * k, bold=True,
-                  fill=colour if selected else palette.UI_TEXT,
-                  font=palette.FONT_DISPLAY, opacity=alpha)
-        _rule(x + 52 * k, x + cw - 52 * k, y + 202 * k, colour,
+        # Same fitting as the offering's cards - the shelf sells the same
+        # weapons the boons mod, and their names are just as long.
+        titles, tsize = fit_title(slot.name, self.CARD_W - 2 * TITLE_MARGIN, 17)
+        top = y + (180 - (len(titles) - 1) * TITLE_LEADING * 0.5) * k
+        for j, line in enumerate(titles):
+            drawLabel(line, mid, top + j * TITLE_LEADING * k, size=tsize * k,
+                      bold=True, fill=colour if selected else palette.UI_TEXT,
+                      font=palette.FONT_DISPLAY, opacity=alpha)
+        rule_y = top + ((len(titles) - 1) * TITLE_LEADING + 22.0) * k
+        _rule(x + 52 * k, x + cw - 52 * k, rule_y, colour,
               int((60 if selected else 26) * delay))
 
         for j, line in enumerate(wrap(slot.blurb, 28)[:4]):
-            drawLabel(line, mid, y + (228 + j * 20) * k, size=12 * k,
+            drawLabel(line, mid, rule_y + (26 + j * 20) * k, size=12 * k,
                       fill=palette.UI_TEXT if selected else palette.UI_DIM,
                       font=palette.FONT_UI,
                       opacity=int((88 if selected else 66) * delay))

@@ -8,3 +8,7 @@ shots/
 .DS_Store
 tools/.compare_save.json
 tools/.blend/
+tools/.display_save.json
+build/
+dist/
+packaging/__pycache__/

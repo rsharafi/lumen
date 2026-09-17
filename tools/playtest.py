@@ -22,6 +22,9 @@ os.environ.setdefault('CI', '1')
 # and every run is still deterministic: fixed timestep, pinned seeds.
 os.environ.setdefault('LUMEN_FIXED_DT', '1')
 os.environ.setdefault('LUMEN_NO_POINTER', '1')
+# The same window every run, rather than one sized to whatever display the
+# harness happens to open on - or wherever the last run's window was left.
+os.environ.setdefault('LUMEN_WINDOW', '1280x720')
 os.environ.setdefault(
     'LUMEN_SAVE',
     os.path.join(os.path.dirname(os.path.abspath(__file__)), '.playtest_save.json'))
@@ -166,24 +169,24 @@ SCENARIOS = {
     # sprite has to rebuild it, or the next frame draws a released husk.
     'resize-title': ([(6, cycle()), (14, cycle()), (22, cycle()),
                       (30, cycle())], 40),
-    'resize-help': (flatten(park(), [(6, menu(3))],
+    'resize-help': (flatten(park(), [(6, menu(4))],
                             [(18, cycle()), (26, cycle()), (34, cycle())]),
                     44),
     'resize-play': (flatten(start_run(4), wander(24, 120),
                             [(40, cycle()), (70, cycle()), (100, cycle())]),
                     130),
-    'help': (flatten(park(), [(6, menu(3))]), 40),
+    'help': (flatten(park(), [(6, menu(4))]), 40),
     # The Vigil: open it, walk the ledger, try to buy the top line.
-    'vigil': (flatten(park(), [(6, menu(1)), (20, row('vigil', 2)),
+    'vigil': (flatten(park(), [(6, menu(2)), (20, row('vigil', 2)),
                                (30, row('vigil', 7))]), 60),
-    'vigil-buy': (flatten(park(), [(6, menu(1)), (20, row('vigil', 0)),
+    'vigil-buy': (flatten(park(), [(6, menu(2)), (20, row('vigil', 0)),
                                    (30, row('vigil', 0))],
                           tap('escape', 46)), 60),
-    'settings': (flatten(park(), [(6, menu(2)), (18, row('settings', 3)),
-                                  (26, row('settings', 3)),
-                                  (34, row('settings', 2))]), 52),
-    'help2': (flatten(park(), [(6, menu(3))], tap('right', 22)), 46),
-    'help3': (flatten(park(), [(6, menu(3))], tap('right', 22),
+    'settings': (flatten(park(), [(6, menu(3)), (18, row('settings', 4)),
+                                  (26, row('settings', 4)),
+                                  (34, row('settings', 3))]), 52),
+    'help2': (flatten(park(), [(6, menu(4))], tap('right', 22)), 46),
+    'help3': (flatten(park(), [(6, menu(4))], tap('right', 22),
                       tap('right', 34)), 58),
     'firstframe': (start_run(4), 30),
     'combat': (flatten(
@@ -305,11 +308,10 @@ def click_row(app, which, index):
         return False
     x, y, rw, rh, _i = rects[index]
     dx, dy = x + rw * 0.5, y + rh * 0.5
-    from lumen import runtime as _rt
-    k = _rt.pointer_scale() / GAME.scale
+    px, py = GAME._from_design(dx, dy)
     GAME.mouse = (dx, dy)
-    GAME.mouse_press(app, dx / k, dy / k, 0)
-    GAME.mouse_release(app, dx / k, dy / k, 0)
+    GAME.mouse_press(app, px, py, 0)
+    GAME.mouse_release(app, px, py, 0)
     return True
 
 

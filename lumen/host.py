@@ -28,7 +28,7 @@ import os
 import sys
 import time
 
-from . import gpu, palette, runtime
+from . import audio, gpu, palette, runtime
 
 # The simulation advances in steps of this size regardless of frame rate.
 # Small enough that a dash or a bullet never tunnels, large enough that a slow
@@ -41,9 +41,9 @@ class NativeApp:
     """The window and the frame, as one object.
 
     `Game` and `runtime` both talk to an app - width, height, title, a way to
-    quit. `width` and `height` are the framebuffer in *pixels*, which is what
-    the game derives its design scale from; `runtime._tell_app_size` keeps
-    them in step with the drawable.
+    quit. `width` and `height` are the render buffer in *pixels*, which is
+    what the game derives its design scale from; `runtime._tell_app_size`
+    keeps them in step with it.
     """
 
     is_native = True
@@ -172,11 +172,17 @@ def run(game, width, height, title='LUMEN'):
                 game.mouse_press(app, *event.pos, event.button - 1)
             elif event.type == pygame.MOUSEBUTTONUP and event.button <= 3:
                 game.mouse_release(app, *event.pos, event.button - 1)
-            elif event.type == pygame.WINDOWSIZECHANGED:
-                if runtime.adopt_resize(app):
-                    game.resize(app)
+            elif event.type == pygame.WINDOWMINIMIZED:
+                game.set_minimized(True)
+            elif event.type in (pygame.WINDOWRESTORED, pygame.WINDOWSHOWN,
+                                pygame.WINDOWMAXIMIZED):
+                game.set_minimized(False)
+            # Sizes are not handled per event: `sync_display` below asks the
+            # window what it is now, once a frame, and a drag that delivered
+            # forty size events is one change.
 
         now = time.perf_counter()
+        game.sync_display(app, now)
         elapsed = min(now - clock_last, 0.25)
         clock_last = now
         accumulator += elapsed
@@ -193,9 +199,21 @@ def run(game, width, height, title='LUMEN'):
         if not app._running:
             break
 
+        if game.minimized:
+            # Nothing on screen to draw into. Presenting anyway spins the GPU
+            # at thousands of frames a second for a window nobody can see.
+            time.sleep(0.05)
+            continue
+
         gpu.begin_frame(_background_rgb(app))
         game.draw(app)
         gpu.present()
+
+        cap = game.frame_cap()
+        if cap:
+            spare = 1.0 / cap - (time.perf_counter() - now)
+            if spare > 0.0:
+                time.sleep(spare)
 
         # The frame period the player actually sees, which is what the
         # quality dial's AUTO mode needs - not the fixed simulation step.
@@ -219,6 +237,7 @@ def run(game, width, height, title='LUMEN'):
                 f'p95={ordered[int(len(ordered) * 0.95)]:.2f}ms\n')
             break
 
+    audio.bank().shutdown()
     pygame.quit()
 
 

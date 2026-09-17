@@ -14,12 +14,15 @@ import math
 import os
 import struct
 import sys
+import threading
 import wave
 
 import numpy as np
 
+from . import paths
+
 SAMPLE_RATE = 44100
-CACHE_VERSION = 18
+CACHE_VERSION = 19
 
 _bank = None
 
@@ -1475,21 +1478,49 @@ class SoundBank:
         self._failed = False
         self._rng = np.random.default_rng(90210)
         self._music_next = 0
+        self._worker = None
+        self._stop = False
+        self._progress = 0.0
+
+    # How much of a launch each part of making the bank is, measured on the
+    # machine this was written on: the effects are 0.6 s of synthesis, the
+    # score 2.0 s, and decoding the takes about as long again. Only for the
+    # launch screen's dial, which would rather move steadily than truthfully
+    # to the millisecond - it just must never move backwards or finish early.
+    _COLD_WEIGHTS = (0.11, 0.36, 0.50)      # effects, score, takes
+
+    def _stamp(self):
+        return os.path.join(self.cache_dir, f'.v{CACHE_VERSION}')
 
     def build(self):
         """Generate any missing WAVs. Safe to call more than once."""
-        stamp = os.path.join(self.cache_dir, f'.v{CACHE_VERSION}')
+        stamp = self._stamp()
         os.makedirs(self.cache_dir, exist_ok=True)
         if os.path.exists(stamp):
             return
-        for name, signal in _make_sounds().items():
-            _write_wav(os.path.join(self.cache_dir, f'{name}.wav'), signal)
+        fx_w, score_w, take_w = self._COLD_WEIGHTS
+        span = self._build_span
+        effects = _make_sounds()
+        self._advance(span * fx_w)
         # The score. Separate from the effects because it is much slower to
         # build - half-minute drones with long reverb tails - and because
         # `music` imports from here, so the import has to go the other way.
         from . import music
-        for name, signal in music.make_stems().items():
-            _write_wav(os.path.join(self.cache_dir, f'{name}.wav'), signal)
+        stems = music.make_stems(
+            progress=lambda part: self._advance(span * score_w * part))
+        # Every take, not every sound. Making the takes - a resample and a
+        # filter each - was two and a half seconds of *every* launch, for
+        # something that is the same every time; written out here, a launch
+        # after this one is a read and a decode, which is a twentieth of a
+        # second. It costs about 15 MB more on disk.
+        everything = list(effects.items()) + list(stems.items())
+        for i, (name, signal) in enumerate(everything):
+            stem = name.startswith('mus_')
+            for index, take in enumerate(self._variants(name, signal,
+                                                        first_only=stem)):
+                _write_wav(os.path.join(self.cache_dir,
+                                        f'{name}.{index}.wav'), take)
+            self._advance(span * take_w / len(everything))
         # Only ever one stamp, so a cache that has been through several
         # versions does not accumulate one marker per version it has seen.
         # The WAVs themselves are left alone: names do not collide, and a
@@ -1503,13 +1534,74 @@ class SoundBank:
         with open(stamp, 'w') as f:
             f.write('ok')
 
-    def _variants(self, name, signal):
+    _build_span = 0.0
+
+    def _advance(self, amount):
+        self._progress = min(1.0, self._progress + max(0.0, amount))
+
+    def progress(self):
+        """How far `prepare_async` has got, 0 to 1."""
+        if self._ready or self._failed:
+            return 1.0
+        if not self.loading() and self._worker is not None:
+            return 1.0
+        return self._progress
+
+    def first_run(self):
+        """True while the cache is being made for the first time."""
+        return self._cold
+
+    _cold = False
+
+    def prepare_async(self, load=True):
+        """Build the cache and decode the bank on a worker thread.
+
+        Both used to happen before the window opened: four seconds of nothing
+        on screen on every launch, and seven on the first one, which is long
+        enough for a player to decide the game has not started and open it
+        again. The launch screen is what is on screen instead, and it waits
+        for this - see `lumen/launch.py`. Its own few sounds are made up front
+        and are there from the first frame; see `add_early`.
+        """
+        if self.loading() or self._ready or self._failed:
+            return
+        self._cold = not os.path.exists(self._stamp())
+        self._progress = 0.0
+        # The weights are shares of the whole launch; with nothing to decode
+        # after it, the build is the whole launch.
+        self._build_span = (0.0 if not self._cold else
+                            1.0 if load else 1.0 / sum(self._COLD_WEIGHTS))
+
+        def work():
+            try:
+                self.build()
+                if load and not self._stop:
+                    self.load(span=1.0 - self._progress)
+            except Exception as exc:  # pragma: no cover - disk or device
+                sys.stderr.write(f'[lumen] sound unavailable: {exc}\n')
+                self._failed = True
+
+        self._worker = threading.Thread(target=work, name='lumen-sound',
+                                        daemon=True)
+        self._worker.start()
+
+    def loading(self):
+        return self._worker is not None and self._worker.is_alive()
+
+    def shutdown(self):
+        """Stop a worker that is still going, before the mixer goes away."""
+        self._stop = True
+        worker = self._worker
+        if worker is not None and worker.is_alive():
+            worker.join(timeout=5.0)
+
+    def _variants(self, name, signal, first_only=False):
         takes, spread, colour = self.VARIATION.get(name,
                                                    self.DEFAULT_VARIATION)
         if takes <= 1:
             return [signal]
         out = []
-        for i in range(takes):
+        for i in range(1 if first_only else takes):
             # Spread evenly rather than at random, so the set actually covers
             # its range instead of clustering wherever the seed happened to
             # land.
@@ -1525,9 +1617,12 @@ class SoundBank:
             out.append(_normalise(take, 0.9))
         return out
 
-    def load(self):
-        if self._ready or self._failed:
-            return
+    _mixer_open = False
+
+    def _open_mixer(self):
+        """Start the mixer once, however many things want it first."""
+        if self._mixer_open:
+            return True
         try:
             import pygame
             if not pygame.mixer.get_init():
@@ -1542,26 +1637,107 @@ class SoundBank:
         except Exception as exc:
             sys.stderr.write(f'[lumen] audio device unavailable: {exc}\n')
             self._failed = True
+            return False
+        self._mixer_open = True
+        return True
+
+    @staticmethod
+    def _to_sound(signal):
+        import pygame
+        pcm = np.clip(signal, -1.0, 1.0)
+        stereo = np.repeat((pcm * 32767.0).astype('<i2')[:, None], 2, axis=1)
+        return pygame.sndarray.make_sound(np.ascontiguousarray(stereo))
+
+    def load(self, span=1.0):
+        if self._ready or self._failed:
+            return
+        if not self._open_mixer():
             return
         try:
-            import pygame
-            for entry in sorted(os.listdir(self.cache_dir)):
-                if not entry.endswith('.wav'):
-                    continue
-                name = entry[:-4]
+            # One file per take: `<name>.<index>.wav`, in order.
+            entries = [e for e in sorted(os.listdir(self.cache_dir))
+                       if e.endswith('.wav') and '.' in e[:-4]]
+            weights = []
+            for entry in entries:
+                try:
+                    weights.append(os.path.getsize(
+                        os.path.join(self.cache_dir, entry)))
+                except OSError:
+                    weights.append(1)
+            total = float(sum(weights)) or 1.0
+            takes = {}
+            for entry, weight in zip(entries, weights):
+                if self._stop:
+                    return
+                name, _dot, index = entry[:-4].rpartition('.')
                 signal = _read_wav(os.path.join(self.cache_dir, entry))
-                takes = []
-                for variant in self._variants(name, signal):
-                    pcm = np.clip(variant, -1.0, 1.0)
-                    stereo = np.repeat((pcm * 32767.0).astype('<i2')[:, None],
-                                       2, axis=1)
-                    takes.append(pygame.sndarray.make_sound(
-                        np.ascontiguousarray(stereo)))
-                self._takes[name] = takes
+                takes.setdefault(name, []).append((int(index),
+                                                   self._to_sound(signal)))
+                self._advance(span * weight / total)
+            for name, made in takes.items():
+                made.sort()
+                self._takes[name] = [sound for _index, sound in made]
             self._ready = True
         except Exception as exc:  # pragma: no cover - audio device problems
             sys.stderr.write(f'[lumen] audio unavailable: {exc}\n')
             self._failed = True
+
+    # -- the launch screen's own ------------------------------------------
+    def add_early(self, sounds):
+        """Sounds that exist before the bank does.
+
+        The launch screen plays while the bank is still being made, so it
+        brings its own: a handful of short things synthesised in a few tens of
+        milliseconds before the first frame, which is what lets the very first
+        thing on screen already make a noise.
+        """
+        self._early = {}
+        if not self._open_mixer():
+            return
+        try:
+            for name, signal in sounds.items():
+                self._early[name] = self._to_sound(signal)
+        except Exception as exc:  # pragma: no cover - audio device problems
+            sys.stderr.write(f'[lumen] launch sound unavailable: {exc}\n')
+
+    _early = {}
+
+    def play_early(self, name, volume=1.0, pan=0.0):
+        if not self.enabled or self._failed:
+            return None
+        sound = self._early.get(name)
+        if sound is None:
+            return None
+        try:
+            import pygame
+            channel = pygame.mixer.find_channel(True)
+            if channel is None:
+                return None
+            gain = max(0.0, min(1.0, volume * self.volume))
+            angle = (max(-1.0, min(1.0, pan)) + 1.0) * 0.25 * math.pi
+            channel.set_volume(gain * math.cos(angle), gain * math.sin(angle))
+            channel.play(sound)
+            return channel
+        except Exception:
+            return None
+
+    def loop_early(self, name):
+        """Loop one of the launch screen's sounds, silent until turned up."""
+        if not self.enabled or self._failed:
+            return None
+        sound = self._early.get(name)
+        if sound is None:
+            return None
+        try:
+            import pygame
+            channel = pygame.mixer.find_channel(False)
+            if channel is None:
+                return None
+            channel.set_volume(0.0)
+            channel.play(sound, loops=-1)
+            return channel
+        except Exception:
+            return None
 
     def play(self, name, volume=1.0, pan=0.0, pitch=None):
         """`pan` is -1 hard left to +1 hard right.
@@ -1576,6 +1752,8 @@ class SoundBank:
         if not self.enabled or self._failed:
             return None
         if not self._ready:
+            if self.loading():
+                return None
             self.load()
             if not self._ready:
                 return None
@@ -1643,8 +1821,7 @@ class SoundBank:
 def bank():
     global _bank
     if _bank is None:
-        here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        _bank = SoundBank(os.path.join(here, '.sound_cache'),
+        _bank = SoundBank(paths.sound_cache(),
                           enabled=not os.environ.get('LUMEN_HEADLESS'))
     return _bank
 

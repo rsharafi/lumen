@@ -24,14 +24,15 @@ import time
 from .draw import drawLabel, drawPolygon
 
 from . import (art, ascension, audio, boons, draw, floorplan, gpu, hud,
-               music, palette, rng, runtime, save, screens, shop, upgrades,
-               vigil)
+               launch, music, palette, rng, runtime, save, screens, shop,
+               upgrades, vigil)
 from .config import (BOSS_FLOORS, DESIGN_HEIGHT, FPS, FLOORS_PER_RUN, HEIGHT,
                      MAX_FPS,
                      UPGRADE_CHOICES, WIDTH)
 from .mathx import clamp
 from .world import World
 
+LAUNCH = 'launch'
 TITLE = 'title'
 HELP = 'help'
 PLAYING = 'playing'
@@ -43,10 +44,8 @@ ENDED = 'ended'
 VIGIL = 'vigil'
 SETTINGS = 'settings'
 
-# Sharpness-dial sentinels. AUTO picks a rung by measurement; PER_POINT means
-# one framebuffer pixel per point, i.e. high-DPI off.
+# Sharpness-dial sentinel: AUTO picks a rung by measurement.
 AUTO = 'auto'
-PER_POINT = 'per-point'
 
 MOVE_KEYS = {'w', 'a', 's', 'd', 'up', 'down', 'left', 'right'}
 FIRE_KEYS = {'j'}
@@ -88,6 +87,9 @@ class Game:
         self.end_screen = None
         self.vigil_screen = None
         self.settings_screen = None
+        #: The launch screen, from the first frame until its afterglow has
+        #: faded over the title. See `lumen/launch.py`.
+        self.launch = None
         self.help_return = TITLE
 
         self.fade = 1.0
@@ -105,6 +107,10 @@ class Game:
         self.volumetric = True
         self.wall_glow = 0
         self.windowed_size = (WIDTH, HEIGHT)
+        # A resize that has been seen but not yet drawn at: (output, since).
+        # See `sync_display`.
+        self._display_pending = None
+        self.minimized = False
         self.display_index = 0
         self._app_ref = None
         self.frame_ms = 0.0
@@ -150,7 +156,7 @@ class Game:
 
         self._app_ref = app
         self._adopt_size(app)
-        self.windowed_size = (self.pixel_w, self.pixel_h)
+        self.windowed_size = self._stored_window_size(app)
         stored = int(self.save.get('display', -1))
         self.display_index = (stored % len(self.QUALITY_MODES) if stored >= 0
                               else self.default_quality_index())
@@ -174,18 +180,14 @@ class Game:
 
         bank = audio.bank()
         bank.set_enabled(self.sound_on and not os.environ.get('LUMEN_HEADLESS'))
-        bank.build()
-        # Decode them here too, not on the first `play`. `load` bakes every
-        # take of every effect into a mixer sound - 163 of them, about half a
-        # second - and it used to happen lazily, which put all of it on
-        # whichever frame first made a noise. That is the same mistake as
-        # rasterising a sprite mid-frame, and it got worse when the bosses
-        # got their own half of the bank. Only when sound is actually on:
-        # headless runs and a player who starts muted should not pay to
-        # decode a bank nothing is going to play. Turning it back on later
-        # falls through to the lazy path in `play`, as it always did.
-        if bank.enabled:
-            bank.load()
+        # Decoded up front, not on the first `play`: `load` bakes every take
+        # of every effect into a mixer sound, and doing that lazily put all
+        # of it on whichever frame first made a noise. Up front no longer
+        # means before the window, though - on a worker, so the title is on
+        # screen while the bank is still being built. Only decoded when sound
+        # is on: a player who starts muted should not pay for a bank nothing
+        # is going to play.
+        bank.prepare_async(load=bank.enabled)
 
         rng.fx.reseed(self.forced_seed if self.forced_seed is not None
                       else int(time.time() * 1000) % 2 ** 31)
@@ -198,7 +200,13 @@ class Game:
         self.vigil_screen = screens.VigilScreen(self.width, self.height)
         self.settings_screen = screens.SettingsScreen(self.width, self.height)
 
-        self._warm_cache()
+        if self._launch_wanted():
+            self.launch = launch.LaunchScreen(self.width, self.height, bank,
+                                              rng.fx)
+            self.state = LAUNCH
+            # The launch screen is its own darkness; the title's fade-in from
+            # black is for a game that starts on the title.
+            self.fade = 0.0
 
         # The long-lived caches (baked chambers, every sprite) are moved to a
         # permanent generation so the collector stops re-scanning them. Note
@@ -211,6 +219,26 @@ class Game:
 
         if self.selftest_play:
             self.new_run()
+
+    @staticmethod
+    def _launch_wanted():
+        """Everything but the harnesses, which want the title on frame one."""
+        env = os.environ
+        if env.get('LUMEN_LAUNCH'):
+            return True
+        return not (env.get('LUMEN_FIXED_DT') or env.get('LUMEN_HEADLESS')
+                    or env.get('LUMEN_SKIP_LAUNCH') or env.get('LUMEN_SELFTEST')
+                    or env.get('LUMEN_SELFTEST_PLAY'))
+
+    def frame_cap(self):
+        """A frame rate to hold the loop to, or None to draw flat out.
+
+        While the launch screen is up the sound bank is being built on a
+        worker thread, and a loop drawing a few hundred frames a second of a
+        mostly dark screen takes the interpreter lock off it for no reason
+        anyone can see.
+        """
+        return min(60, self.target_fps) if self.state == LAUNCH else None
 
     def _hover(self, screen):
         """Let the pointer drive the selection on a menu-style screen."""
@@ -242,8 +270,9 @@ class Game:
         design_h = float(os.environ.get('LUMEN_DESIGN_HEIGHT') or DESIGN_HEIGHT)
         self.scale = pixel_h / design_h
         # Design units stay integral: sprite sizes and layout maths downstream
-        # all expect whole pixels.
-        self.width = max(320, int(round(pixel_w / self.scale)))
+        # all expect whole pixels. Rounded up, so a full-screen draw always
+        # reaches the buffer's last column rather than stopping a pixel short.
+        self.width = max(320, int(math.ceil(pixel_w / self.scale - 1e-6)))
         self.height = int(design_h)
         draw.set_scale(self.scale)
         art.set_scale(self.scale)
@@ -252,22 +281,6 @@ class Game:
         # should run right to the edge. What must not is the HUD's top row.
         self.safe_top = runtime.safe_top_fraction() * self.height
         hud.set_safe_top(self.safe_top)
-
-    def _warm_cache(self):
-        """Bake every screen-sized sprite up front, so none is built mid-frame.
-
-        The flash vignettes matter most: generating one on the frame you get
-        hit is a ~20 ms hitch exactly when the game needs to feel responsive.
-        Runs again after any resize, because a render-scale change empties the
-        cache and every one of these is scale-dependent.
-        """
-        art.screen_overlay(self.width, self.height, 0.94, 0.6, 0.05, 0.1, 4)
-        art.vignette(self.width, self.height, 0.95, 0.45)
-        art.grain(self.width, self.height, 0.045)
-        for color in (palette.UI_DANGER, palette.SHIELD, palette.FLARE,
-                      palette.BOSS_EYE, palette.LIGHT_CORE, palette.UI_GOOD):
-            art.vignette(self.width, self.height, 1.0, 0.26,
-                         art.rgb_tuple(color))
 
     def resize(self, app):
         """Window changed size: re-derive the view and rebuild what depends on it.
@@ -287,93 +300,174 @@ class Game:
         rescaled = (abs(previous - self.scale) > 1e-6
                     or previous_art != art.GENERATION)
         if rescaled and self.world is not None and self.world.level is not None:
-            # Every sprite was discarded with the old scale; the chamber's
-            # baked layers have to be re-rendered at the new one.
-            from . import level as level_mod
-            level_mod.rebake(self.world.level)
+            # Every sprite was discarded with the old scale; the chambers'
+            # baked layers have to be re-rendered at the new one - the ones on
+            # screen now, the rest of the floor on the builder's worker.
+            self.world.refresh_art()
         for screen in (self.title_screen, self.help_screen, self.draft_screen,
                        self.end_screen, self.vigil_screen,
-                       self.settings_screen, self.shop_screen):
+                       self.settings_screen, self.shop_screen, self.launch):
             if screen is not None:
                 screen.resize(self.width, self.height)
         if self.world is not None:
             self.world.resize(self.width, self.height)
-        self._warm_cache()
-        # Remember the window's own size in points, so leaving fullscreen goes
-        # back to whatever the player last dragged it to.
-        if not self.fullscreen and runtime.own_window() is not None:
-            self.windowed_size = tuple(runtime.own_window().size)
 
     def ensure_display(self, app):
-        """One-time display setup, done once whichever host gets here first.
+        """Open the window and start drawing into it. Once.
 
-        This cannot run before the loop starts: there is no
-        display surface until the framework's loop has started, so the first
-        `step` triggers it. The native host owns its loop and calls this
-        before entering it, which is also what lets it check that a renderer
-        actually came up.
+        The native host calls this before entering its loop, so that it can
+        check a renderer actually came up.
         """
         if self._blit_checked:
             return
         self._blit_checked = True
         verbose = bool(os.environ.get('LUMEN_DEBUG'))
-        # Ask before the takeover: the framework's window is still up, and
-        # that is the one query that needs a window of its own.
+        self._open_window(app, verbose)
+        # After the window, not before: the refresh rate that matters is the
+        # one of the display the window opened on.
         self._match_display_rate(app, verbose)
-        self._take_over_window(app, verbose)
         try:
             import pygame
             pygame.mouse.set_visible(False)
         except Exception:
             pass
 
-    def _take_over_window(self, app, verbose=False):
-        """Open the high-DPI window the game actually draws into.
-
-        pygame's `set_mode` cannot ask SDL for a high-DPI framebuffer, so a
-        window opened that way is sized in points and gets stretched over the
-        panel by the compositor. Creating one with the flag set is what makes
-        the game draw at the display's real pixels.
-        """
+    def _open_window(self, app, verbose=False):
         if os.environ.get('LUMEN_HEADLESS'):
             return          # dummy video driver: there is no real window
         if os.environ.get('LUMEN_FULLSCREEN'):
             self.fullscreen = True
-        # Replacing the window resets SDL's event filters, so the block set up
+        if not runtime.open_window(app, self.windowed_size, self.fullscreen):
+            return
+        # Opening the window resets SDL's event filters, so the block set up
         # in `start` is gone by now and has to go back on.
         self._block_mouse_motion()
-        if not self.apply_video(app):
-            sys.stderr.write('[lumen] high-DPI window unavailable; '
-                             'running at window resolution\n')
-            return
-        self.resize(app)
+        self._commit_display(app)
         if verbose:
             w, h = runtime.render_size()
             sys.stderr.write(f'[lumen] rendering {w}x{h}\n')
 
-    def apply_video(self, app):
-        """Put the window into the current fullscreen/quality configuration."""
-        if app is None:
-            return False
-        return runtime.set_video_mode(app, self.window_points(),
-                                      self.fullscreen, self.quality())
+    def _stored_window_size(self, app):
+        """The windowed size to open at: the player's last, or one that suits
+        the display."""
+        forced = os.environ.get('LUMEN_WINDOW')
+        if forced:
+            try:
+                w, h = forced.lower().split('x')
+                return (int(w), int(h))
+            except ValueError:
+                pass
+        stored = self.save.get('window')
+        if (isinstance(stored, (list, tuple)) and len(stored) == 2
+                and all(isinstance(v, (int, float)) and v > 0 for v in stored)):
+            return (int(stored[0]), int(stored[1]))
+        try:
+            import pygame
+            if pygame.display.get_init():
+                return runtime.default_window_size()
+        except Exception:
+            pass
+        return (int(app.width), int(app.height))
 
-    def window_points(self):
-        """The window's size in points - the desktop's when fullscreen."""
-        return runtime.desktop_size() if self.fullscreen else self.windowed_size
+    # A resize is not drawn at until the window has held its new size this
+    # long. Dragging an edge, a maximise animation or a fullscreen transition
+    # can hand over a dozen sizes in a quarter of a second, and each one drawn
+    # at would be a re-bake of every sprite - so until the size settles, the
+    # last frame is shown fitted into the window instead. See
+    # `runtime.show_interim`.
+    DISPLAY_SETTLE = 0.12
+
+    def sync_display(self, app, now=None):
+        """Notice the window's size, shape or pixel density changing.
+
+        Called once a frame by the host, whatever the events said: SDL does
+        not always send one - a window dragged to a display with a different
+        backing scale changes its drawable without changing its size - and
+        asking is a few microseconds.
+        """
+        if runtime.own_window() is None or runtime.committed() is None:
+            return
+        if now is None:
+            now = time.perf_counter()
+        drawable = runtime.drawable_size()
+        if drawable[0] <= 0 or drawable[1] <= 0 or runtime.is_minimized():
+            return          # nothing to draw into; keep what we had
+        live = runtime.is_fullscreen()
+        if live != self.fullscreen:
+            # Changed from outside the game - the OS's own control for it.
+            self.fullscreen = live
+            self.save['fullscreen'] = live
+            save.save(self.save)
+        target = runtime.plan(self.quality(), drawable)
+        if target == runtime.committed():
+            if self._display_pending is not None:
+                # Went back to where it was before it settled.
+                self._display_pending = None
+                runtime.commit(app, target)
+            return
+        pending = self._display_pending
+        if pending is None or pending[0] != target:
+            self._display_pending = (target, now)
+            runtime.show_interim(drawable)
+            return
+        if now - pending[1] >= self.DISPLAY_SETTLE:
+            self._commit_display(app, target)
+
+    def _commit_display(self, app, target=None):
+        """Draw at the window's current size and the dial's current setting."""
+        if runtime.own_window() is None:
+            return False
+        if target is None:
+            drawable = runtime.drawable_size()
+            if drawable[0] <= 0 or drawable[1] <= 0:
+                return False
+            target = runtime.plan(self.quality(), drawable)
+        self._display_pending = None
+        changed = target != runtime.committed()
+        runtime.commit(app, target)
+        if changed:
+            self.resize(app)
+        self._remember_window()
+        return True
+
+    def _remember_window(self):
+        """Keep the windowed size, so the next launch opens where this left off."""
+        win = runtime.own_window()
+        if win is None or self.fullscreen or runtime.is_fullscreen():
+            return
+        size = runtime.window_points()
+        if size is None:
+            return
+        if size == tuple(self.windowed_size) and self.save.get('window'):
+            return
+        self.windowed_size = size
+        self.save['window'] = list(size)
+        save.save(self.save)
+
+    def set_minimized(self, minimized):
+        """The window went to the Dock or the taskbar, or came back.
+
+        A run does not carry on without anyone watching it: going away mid-
+        fight pauses, the same as pressing Esc would.
+        """
+        self.minimized = bool(minimized)
+        if self.minimized and self.state == PLAYING and self.pending is None:
+            self.state = PAUSED
 
     def toggle_fullscreen(self, app):
         """Swap between the window and the whole display.
 
         Fullscreen keeps the high-DPI framebuffer, so it is the display's real
         pixels the game draws into, not the desktop's point size stretched to
-        fit.
+        fit. The new size is picked up like any other resize.
         """
-        self.fullscreen = not self.fullscreen
-        if not self.apply_video(app):
-            self.fullscreen = not self.fullscreen
+        if runtime.own_window() is None:
             return
-        self.resize(app)
+        self._remember_window()
+        want = not self.fullscreen
+        if not runtime.set_fullscreen(want, self.windowed_size):
+            return
+        self.fullscreen = want
         self.save['fullscreen'] = self.fullscreen
         save.save(self.save)
 
@@ -415,12 +509,16 @@ class Game:
     def _to_design(self, px, py):
         """Pointer position -> design units.
 
-        SDL reports the cursor in points. On a high-DPI window a point is two
-        framebuffer pixels, so the position has to cross into pixels before it
-        can be divided by the render scale.
+        SDL reports the cursor in window points. It has to cross into the
+        drawable's pixels, out of any bars around the frame, into the render
+        buffer, and only then be divided by the render scale.
         """
-        k = runtime.pointer_scale() / self.scale
-        return (px * k, py * k)
+        rx, ry = runtime.pointer_to_render(px, py)
+        return (rx / self.scale, ry / self.scale)
+
+    def _from_design(self, x, y):
+        """Design units -> a pointer position in window points."""
+        return runtime.render_to_pointer(x * self.scale, y * self.scale)
 
     # --------------------------------------------------------------- runs --
     def new_run(self, seed=None):
@@ -491,13 +589,23 @@ class Game:
 
     # ------------------------------------------------------------- boon --
     def open_boon(self):
-        """Three things a dead boss is worth."""
+        """Three things a dead boss is worth.
+
+        Reached by taking the rift in a beaten boss chamber, so this is the
+        floor's descent as well as its reward - and if the pool is empty,
+        which it can be very late in a run, the descent still has to happen.
+        """
+        self.world.boss_beaten = False
         choices = boons.offer(self.stats, rng.world, 3)
         if not choices:
+            self.next_floor()
             return
         self._boons = choices
         self.draft_screen.open_boons(choices)
         self.state = BOON
+        self._prepared = None
+        self._prep_thread = None
+        self._prep_result = None
         audio.play('upgrade', 0.7)
 
     def take_boon(self, index):
@@ -506,8 +614,10 @@ class Game:
         boons.grant(self.stats, self._boons[index])
         self.world.player.refresh_from_stats()
         self._boons = []
-        self.state = PLAYING
         audio.play('relic', 0.8)
+        # And down. A boon is taken standing in the rift, which is the same
+        # act as choosing an offering: the screen is the descent.
+        self.transition(self.next_floor)
 
     # ------------------------------------------------------------- shop --
     def open_shop(self):
@@ -604,6 +714,8 @@ class Game:
         """Label, value and one line of what it is, for the settings page."""
         glow = ('OFF', 'DIM', 'FULL')[min(self.wall_glow, 2)]
         return [
+            ('WINDOW', 'FULLSCREEN' if self.fullscreen else 'WINDOWED',
+             'or press F at any time'),
             ('DISPLAY', self.display_label(),
              'how many pixels the game draws'),
             ('VISUALS', self.visuals_label(),
@@ -622,7 +734,10 @@ class Game:
         if not 0 <= index < len(rows):
             return
         key = rows[index][0]
-        if key == 'DISPLAY':
+        if key == 'WINDOW':
+            self.toggle_fullscreen(self._app_ref)
+            audio.play('ui_select', 0.5)
+        elif key == 'DISPLAY':
             self.cycle_display(self._app_ref)
         elif key == 'VISUALS':
             self.toggle_visuals()
@@ -668,6 +783,7 @@ class Game:
         screen = self.draft_screen
 
         def go():
+            art.begin_bake()
             try:
                 screen.warm(warm)
             except Exception:
@@ -706,6 +822,7 @@ class Game:
             return
 
         def build():
+            art.begin_bake()
             try:
                 self._prep_result = self.world.prepare_floor(depth)
             except Exception:
@@ -847,7 +964,7 @@ class Game:
         elif self.state == VIGIL:
             self.title_screen.update(dt)
             self.vigil_screen.update(dt)
-        elif self.state in (TITLE, PAUSED, DRAFT, SHOP, BOON):
+        elif self.state in (TITLE, PAUSED, DRAFT, SHOP, BOON) and self.launch is None:
             # Menus are calm enough to absorb the pause too, and a player who
             # never changes floor would otherwise never be re-measured.
             self._auto_settle(app)
@@ -858,7 +975,20 @@ class Game:
             # and not twice in a hurry.
             self._auto_settle(app, urgent_only=True)
 
-        if self.state == TITLE:
+        if self.launch is not None:
+            self.launch.update(dt)
+            if self.launch.handoff:
+                # The flash has landed: the title goes in underneath it, with
+                # its wordmark already risen to where the flash reveals it.
+                self.launch.handoff = False
+                self.state = TITLE
+                self.title_screen.t = 0.8
+            elif self.launch.done:
+                self.launch = None
+
+        if self.state == LAUNCH:
+            pass
+        elif self.state == TITLE:
             self.title_screen.update(dt)
             self._hover(self.title_screen)
         elif self.state == VIGIL:
@@ -876,6 +1006,11 @@ class Game:
                 else self.draft_screen
             screen.update(dt)
             self._hover(screen)
+            if self.state == BOON:
+                # A boon is a descent as well as a reward, so the floor under
+                # it gets built while it is being read - the same trade the
+                # offering screen makes.
+                self._pump_prepare()
         elif self.state == DRAFT:
             self.draft_screen.update(dt)
             self._hover(self.draft_screen)
@@ -905,18 +1040,26 @@ class Game:
                 self.transition(lambda: self.finish_run(won=False))
             return
 
-        if world.rift_ready():
+        # Taken once. `rift_ready` stays true for as long as the player is
+        # standing in it, which is the whole length of the fade, so without
+        # this guard the branch re-runs every frame and the *last* frame's
+        # choice is the one that lands - which quietly cost every boss its
+        # boon the moment the two branches stopped being the same call.
+        if world.rift_ready() and self.pending is None and not world.rift.entered:
             world.rift.entered = True
             if world.depth >= FLOORS_PER_RUN:
                 self.transition(lambda: self.finish_run(won=True))
+            elif world.boss_beaten:
+                # A boss is paid for on the way down, not over the top of its
+                # own death. See `World._tick_boss_after`: the collapse gets
+                # the room to itself, then the rift opens, and the offering
+                # is what taking the rift buys. A boon *replaces* the floor's
+                # ordinary offering rather than coming on top of it - it is
+                # the larger thing, and two card screens back to back is one
+                # decision too many at the end of an act.
+                self.transition(self.open_boon)
             else:
                 self.transition(self.open_draft)
-            return
-
-        # A boss has finished coming apart, and owes a boon.
-        if world.pending_boon and self.pending is None:
-            world.pending_boon = False
-            self.open_boon()
             return
 
         # The Ferryman, walked into. Same division of labour as the door
@@ -931,12 +1074,19 @@ class Game:
         # scene changes.
         if world.pending_door is not None and self.pending is None:
             side = world.pending_door
-            world.pending_door = None
             # Walked through, not cut to. The world puts both chambers in one
             # space and slides the camera across; only if it cannot line the
             # two doorways up does this fall back to the fade it used to do
             # every single time.
-            if not world.begin_crossing(side):
+            started = world.begin_crossing(side)
+            if started is None:
+                # The chamber behind that door is still being baked. The flag
+                # stays set and this is asked again next frame, which costs
+                # the player nothing they can see: the door holds them until
+                # the room behind it exists. See `World.begin_crossing`.
+                return
+            world.pending_door = None
+            if not started:
                 self.transition(lambda: world.use_door(side), speed=3.0)
 
     # -------------------------------------------------------------- input --
@@ -948,6 +1098,14 @@ class Game:
             self.toggle_fullscreen(app)
             return
 
+        if self.state == LAUNCH:
+            self.launch.poke()
+            return
+        if self.launch is not None and self.state == TITLE:
+            # A key during the afterglow hurries it, rather than choosing
+            # something on a menu the player can barely see yet.
+            self.launch.poke()
+            return
         if self.state == TITLE:
             self._title_key(key)
         elif self.state == VIGIL:
@@ -978,6 +1136,9 @@ class Game:
         if button == 0:
             self.mouse_down = True
         if button != 0:
+            return
+        if self.state == LAUNCH or self.launch is not None:
+            self.launch.poke(self.mouse)
             return
         if self.state == TITLE:
             if self._click(self.title_screen):
@@ -1173,24 +1334,24 @@ class Game:
     # 120 Hz frame budget of 8.3 ms means drawing about 1.9 megapixels. No
     # setting is both; the dial is how you choose where to sit.
     #
-    # FAST's None means "one framebuffer pixel per point" - the density the
-    # game ran at before it asked SDL for a high-DPI window.
+    # Every rung is a fraction of the window's real pixels, on any display.
+    # FAST used to mean "one pixel per point", which is half on a Retina Mac
+    # and *all of them* on a flat panel - sharper than the three rungs above
+    # it, on exactly the machines least able to afford that. It is half now,
+    # everywhere, which is what it always was on the Mac it was tuned on.
     QUALITY_MODES = (
         ('AUTO', AUTO),
         ('NATIVE', 1.00),
         ('HIGH', 0.84),
         ('BALANCED', 0.72),
         ('SMOOTH', 0.62),
-        ('FAST', PER_POINT),
+        ('FAST', 0.50),
         ('FASTEST', 0.40),
     )
     # The rungs AUTO is allowed to walk, sharpest first.
     AUTO_RUNGS = (1, 2, 3, 4, 5, 6)
 
     def _rung_quality(self, value):
-        if value is PER_POINT:
-            factor = runtime.display_scale_factor()
-            return 1.0 / factor if factor > 1.0 else 1.0
         return value
 
     def default_quality_index(self):
@@ -1312,8 +1473,7 @@ class Game:
             return
         previous = self.auto_index
         self.auto_index = target
-        if self.apply_video(app):
-            self.resize(app)
+        if self._commit_display(app):
             self._auto_changed = self.t
             self._auto_history.clear()
             self.save['auto'] = self.auto_index
@@ -1331,10 +1491,9 @@ class Game:
         if app is None:
             return
         self.display_index = (self.display_index + 1) % len(self.QUALITY_MODES)
-        if self.apply_video(app):
-            self.resize(app)
-            self.save['display'] = self.display_index
-            save.save(self.save)
+        self._commit_display(app)
+        self.save['display'] = self.display_index
+        save.save(self.save)
         audio.play('ui_select', 0.5)
 
     def _sync_visuals(self):
@@ -1390,6 +1549,10 @@ class Game:
         room as far as the score is concerned, and swapping stems for a menu
         would make the menus louder than the game.
         """
+        if self.state == LAUNCH:
+            # The launch screen scores itself; the score comes up with the
+            # flash that ends it.
+            return
         director = music.director()
         world = self.world
         if world is not None and self.state in (PLAYING, PAUSED, DRAFT, SHOP):
@@ -1407,6 +1570,8 @@ class Game:
         self.save['sound'] = self.sound_on
         save.save(self.save)
         audio.bank().set_enabled(self.sound_on)
+        if self.sound_on:
+            audio.bank().prepare_async()
         music.director().set_enabled(self.sound_on)
         if self.sound_on:
             audio.play('ui_select', 0.6)
@@ -1426,7 +1591,9 @@ class Game:
             return
         started = time.perf_counter()
 
-        if self.state == TITLE:
+        if self.state == LAUNCH:
+            self.launch.draw()
+        elif self.state == TITLE:
             self.title_screen.draw(self.sound_on, self.display_label(),
                                    self.visuals_label(),
                                    self.volumetric_label(),
@@ -1464,8 +1631,11 @@ class Game:
             if self.state == PLAYING:
                 self._draw_cursor()
 
+        if self.launch is not None and self.state != LAUNCH:
+            self.launch.draw_afterglow()
+
         if self.state in (TITLE, HELP, ENDED, DRAFT, SHOP, BOON, PAUSED, VIGIL,
-                          SETTINGS):
+                          SETTINGS, LAUNCH):
             self._draw_cursor(menu=True)
 
         if self.fade > 0.001:

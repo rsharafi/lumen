@@ -3,6 +3,8 @@
 import json
 import os
 
+from . import paths
+
 # `load` only restores keys listed here, so a setting missing from this dict
 # is written on every change and silently dropped on the next launch.
 DEFAULT = {
@@ -20,6 +22,10 @@ DEFAULT = {
     'display': -1,
     'auto': 1,
     'fullscreen': False,
+    # The window's size in points when it was last a window, so the next
+    # launch opens where this one left off. None until the window has been
+    # opened once, which means "pick one that suits the display".
+    'window': None,
     # 'lit' is the light-buffer pipeline; 'classic' is the original
     # single-pass look, kept because it is a different aesthetic rather than
     # merely a worse one. `volumetric` is the air in the lit cone.
@@ -50,8 +56,7 @@ def _path():
     override = os.environ.get('LUMEN_SAVE')
     if override:
         return override
-    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    return os.path.join(here, 'lumen_save.json')
+    return os.path.join(paths.data_dir(), 'lumen_save.json')
 
 
 def load():

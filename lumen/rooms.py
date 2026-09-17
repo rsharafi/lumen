@@ -97,15 +97,53 @@ class RoomBuilder:
                 self.rules, BRAZIERS_FOR_KIND.get(room.kind, 1)),
         )
 
+    def ready(self, room):
+        """The chamber for `room` if it is already built, else None.
+
+        The non-blocking half of `level_for`, and the one the game plays
+        through. Nothing on a frame may wait for a chamber: at the display's
+        own pixel density a chamber is between half a second and a second and
+        a half of PIL, so a frame that waits for one is not a hitch, it is the
+        game stopping.
+        """
+        with self._lock:
+            got = self._built.get(room.id)
+        if got is not None and level_mod.needs_bake(got):
+            # Built, but for a render scale that has since changed. Not ready:
+            # it would draw as an empty room. The worker re-rasterises it.
+            self.hurry(room)
+            return None
+        if got is not None:
+            self._touch(room.id)
+        return got
+
+    def hurry(self, room):
+        """Ask for `room` next, ahead of everything else in the queue."""
+        with self._lock:
+            built = self._built.get(room.id)
+            if built is not None and not level_mod.needs_bake(built):
+                return
+            if room.id in self._queue:
+                self._queue.remove(room.id)
+            self._queue.insert(0, room.id)
+        self._ensure_worker()
+
     def level_for(self, room):
         """The chamber for `room`, building it here and now if it is not up.
 
-        The blocking path is the failure case, not the normal one; it is
-        counted so the tools can say how often the worker was too slow.
+        The blocking path, kept for the two places that can afford it: the
+        floor's entrance, which is built on a worker while the offering is
+        still on screen, and the fade-to-black fallback for a doorway that
+        cannot be lined up. It is counted so the tools can say how often the
+        worker was too slow.
         """
         with self._lock:
             got = self._built.get(room.id)
         if got is not None:
+            # The same chamber, re-rasterised if a resize has left it behind -
+            # not a new one, which would forget everything that happened in it.
+            if level_mod.needs_bake(got):
+                level_mod.rebake(got)
             self._touch(room.id)
             return got
 
@@ -139,10 +177,27 @@ class RoomBuilder:
                 if room.id in self._built or room.id in self._queue:
                     continue
                 self._queue.append(room.id)
+        self._ensure_worker()
+
+    def refresh(self):
+        """Re-rasterise, on the worker, every built chamber a resize left behind.
+
+        Called after the render scale changes. The chambers keep everything
+        that happened in them; only their layers are redone.
+        """
+        with self._lock:
+            for rid, level in self._built.items():
+                if rid not in self._queue and level_mod.needs_bake(level):
+                    self._queue.append(rid)
+        self._ensure_worker()
+
+    def _ensure_worker(self):
+        with self._lock:
             running = self._thread is not None and self._thread.is_alive()
-        if not running:
+            if running or not self._queue:
+                return
             self._thread = threading.Thread(target=self._drain, daemon=True)
-            self._thread.start()
+        self._thread.start()
 
     def _drain(self):
         while True:
@@ -150,9 +205,14 @@ class RoomBuilder:
                 if not self._queue:
                     return
                 rid = self._queue.pop(0)
-                if rid in self._built:
+                existing = self._built.get(rid)
+                if existing is not None and not level_mod.needs_bake(existing):
                     continue
                 room = self.plan.rooms[rid]
+            art.begin_bake()
+            if existing is not None:
+                level_mod.rebake(existing)
+                continue
             made = self._make(room)
             with self._lock:
                 if rid not in self._built:

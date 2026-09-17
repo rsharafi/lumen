@@ -112,6 +112,10 @@ class Level:
         # Every art key this chamber owns, so the cache can be cleared
         # around it rather than through it.
         self.art_keys = []
+        #: The art cache generation these layers were rasterised in. A resize
+        #: that changes the render scale empties the cache and every layer
+        #: with it, and this is how a chamber finds out; see `needs_bake`.
+        self.art_generation = -1
         self.floor_key = None
         self.wall_image = None
         self.wall_normal = None
@@ -709,6 +713,35 @@ def _grade_rgba(image, act):
     return graded
 
 
+def _affine_lut(offsets, offset_scale, divisor, bands=4):
+    """A `PIL.Image.point` table for `clip((x - offset*offset_scale) / divisor)`.
+
+    Evaluated through the same float32 arithmetic, in the same order, as the
+    whole-array version it replaces - float32 rather than Python's float64,
+    and a divide rather than a multiply by the reciprocal, because either
+    difference moves the odd byte by one and a lookup table is only worth
+    having if it is the same picture. Verified byte-for-byte against the
+    array version over every chamber size and archetype.
+    """
+    v = np.arange(256, dtype=np.float32)
+    shifts = np.asarray(offsets, dtype=np.float32) * offset_scale
+    table = []
+    for band in range(bands):
+        if band >= len(shifts):
+            table.extend(range(256))            # alpha, untouched
+            continue
+        out = (v - shifts[band]) / divisor
+        table.extend(np.clip(out, 0, 255).astype(np.uint8).tolist())
+    return table
+
+
+def _scale_lut(gain, bands=3):
+    """A `point` table for a flat multiply, clipped and truncated as before."""
+    v = np.arange(256, dtype=np.float32) * gain
+    band = np.clip(v, 0, 255).astype(np.uint8).tolist()
+    return band * bands
+
+
 def _bake_layers(level, rng, seed):
     """Bake the chamber into two images: floor beneath the light, walls above.
 
@@ -725,6 +758,8 @@ def _bake_layers(level, rng, seed):
     the target is RGB, so drawing translucent detail straight onto an RGBA
     canvas would punch holes instead of shading. Alpha is attached at the end.
     """
+    generation = art.bake_generation()
+    level.art_keys = []
     scale = art.SCALE
     w = art.px(level.width)
     h = art.px(level.height)
@@ -796,11 +831,14 @@ def _bake_layers(level, rng, seed):
 
     # The floor is composited over the light at SHADOW_FLOOR_MIX, so pre-divide
     # to land back on the intended brightness: result = void*(1-k) + baked*k.
+    #
+    # Through a lookup table rather than through the array. This is an affine
+    # map on each channel independently, which is the one thing a table does
+    # exactly, and it used to be four full-chamber float32 temporaries - at
+    # native scale on a large chamber, better than half a gigabyte of memory
+    # traffic for an operation with 256 distinct answers in it.
     k = SHADOW_FLOOR_MIX / 100.0
-    void = np.array(palette.VOID_RGB, dtype=np.float32)
-    px_arr = np.asarray(floor, dtype=np.float32)
-    px_arr[..., :3] = (px_arr[..., :3] - void * (1.0 - k)) / max(k, 1e-3)
-    floor = Image.fromarray(np.clip(px_arr, 0, 255).astype(np.uint8), 'RGBA')
+    floor = floor.point(_affine_lut(palette.VOID_RGB, 1.0 - k, max(k, 1e-3)))
 
     key_floor = ('level', 'floor', seed, level.cols, level.rows, level.archetype)
     # The act's grade, applied once to the finished layer. Everything the
@@ -811,8 +849,10 @@ def _bake_layers(level, rng, seed):
     level.floor_image = art.wrap(floor, key_floor)
     level.art_keys.append(key_floor)
     # The relief the lantern picks out of the stone. Derived from the layer
-    # that was just baked, so it lines up with it exactly.
-    level.floor_normal = art.wrap(art.normal_map(floor),
+    # that was just baked, so it lines up with it exactly. Kept at the half
+    # resolution it is built at and stretched over the chamber by the GPU
+    # instead - see `art.normal_map`; the drawing has to name the size.
+    level.floor_normal = art.wrap(art.normal_map(floor, keep_half=True),
                                   key_floor + ('normal',))
     level.art_keys.append(key_floor + ('normal',))
 
@@ -826,9 +866,9 @@ def _bake_layers(level, rng, seed):
             body.paste(wall_tex, (tx, ty))
 
     # Bright enough that the top of a wall is a surface you can see rather
-    # than a black shape with a lit line on its near edge.
-    pixels = np.asarray(body, dtype=np.float32) * WALL_ALBEDO
-    body = Image.fromarray(np.clip(pixels, 0, 255).astype(np.uint8), 'RGB')
+    # than a black shape with a lit line on its near edge. Through a table,
+    # for the same reason the floor's pre-divide is.
+    body = body.point(_scale_lut(WALL_ALBEDO))
 
     # A wall is a block of stone, and a block has a side. Seen from above the
     # only side you can see is the one facing down the screen, so the bottom
@@ -887,37 +927,49 @@ def _bake_layers(level, rng, seed):
                 wdraw.rectangle([x1 - rim + 1, y0, x1, y1], fill=(2, 3, 8, 255))
 
     # ---- the side face ---------------------------------------------------
+    # A face is `WALL_FACE` units deep along the bottom of an exposed block,
+    # which is two or three percent of a chamber - so the shading is done on
+    # those strips and nowhere else. It used to be four full-chamber float32
+    # passes (a copy of the layer, a height field, the shade, and the
+    # `np.where` that put it back) to change a fortieth of the picture.
+    #
+    # The strips cannot overlap, which is what makes this exact rather than
+    # merely close: a strip is at the bottom of a block whose neighbour below
+    # is floor, so two of them in one column are at least two tiles apart,
+    # and `WALL_FACE` is a third of a tile.
     face_px = max(3, int(round(q(WALL_FACE))))
-    arr = np.asarray(body, dtype=np.float32).copy()
-    face_t = np.zeros(arr.shape[:2], np.float32)     # 0 at the top of the face
-    is_face = np.zeros(arr.shape[:2], bool)
+    arr = np.array(body, dtype=np.uint8)
+    #: Where the faces ended up, so the normal map can be told about them.
+    #: Kept as rectangles rather than as a full-size mask: the normal is
+    #: built at half resolution, and a mask painted at full size and then
+    #: decimated picks up or loses whichever edge row it lands on.
+    faces = []
+    course_period = 2.0 * np.pi / max(2.0, q(9.0))
     for x0, x1, yb in exposed:
         x0, x1, yb = int(x0), int(x1) + 1, int(yb) + 1
         yt = max(0, yb - face_px)
         if yb - yt < 2:
             continue
-        col = np.linspace(0.0, 1.0, yb - yt, dtype=np.float32)[:, None]
-        face_t[yt:yb, x0:x1] = col
-        is_face[yt:yb, x0:x1] = True
-
-    t = face_t[..., None]
-    # Courses running along the face, so it is stone rather than a gradient.
-    yy = np.arange(arr.shape[0], dtype=np.float32)[:, None, None]
-    course = 0.5 + 0.5 * np.cos(yy * (2.0 * np.pi / max(2.0, q(9.0))))
-    # Nothing painted here decides where the light is. The face used to carry
-    # a hard highlight along its top edge, which was a bright line drawn a
-    # face's width inside the wall - a second, permanent version of exactly
-    # the artefact the light was moved off. What is left is what a vertical
-    # surface has whatever falls on it: a little darker than the top it
-    # belongs to, its own courses, and a contact shadow where it meets the
-    # floor. Its shape comes from its normal, and the lights find it.
-    shade = 0.78 + 0.10 * course - 0.10 * t
-    contact = np.clip((t - 0.80) / 0.20, 0.0, 1.0)
-    shade *= 1.0 - 0.55 * contact
-    faced = arr[..., :3] * shade
-    arr[..., :3] = np.where(is_face[..., None], np.clip(faced, 0, 255),
-                            arr[..., :3])
-    body = Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8), 'RGB')
+        faces.append((yt, yb, x0, x1))
+        # 0 at the top of the face, 1 where it meets the floor.
+        t = np.linspace(0.0, 1.0, yb - yt, dtype=np.float32)[:, None]
+        # Courses running along the face, so it is stone rather than a
+        # gradient.
+        yy = np.arange(yt, yb, dtype=np.float32)[:, None]
+        course = 0.5 + 0.5 * np.cos(yy * course_period)
+        # Nothing painted here decides where the light is. The face used to
+        # carry a hard highlight along its top edge, which was a bright line
+        # drawn a face's width inside the wall - a second, permanent version
+        # of exactly the artefact the light was moved off. What is left is
+        # what a vertical surface has whatever falls on it: a little darker
+        # than the top it belongs to, its own courses, and a contact shadow
+        # where it meets the floor. Its shape comes from its normal, and the
+        # lights find it.
+        shade = 0.78 + 0.10 * course - 0.10 * t
+        shade = shade * (1.0 - 0.55 * np.clip((t - 0.80) / 0.20, 0.0, 1.0))
+        strip = arr[yt:yb, x0:x1, :3].astype(np.float32) * shade[..., None]
+        arr[yt:yb, x0:x1, :3] = np.clip(strip, 0, 255).astype(np.uint8)
+    body = Image.fromarray(arr, 'RGB')
 
     mask = Image.new('L', (w, h), 0)
     mdraw = ImageDraw.Draw(mask)
@@ -939,11 +991,21 @@ def _bake_layers(level, rng, seed):
     # vertical surface and its normal cannot be derived from a picture of it:
     # it points down the screen, away from the block, and that is what makes
     # a wall light up when the lantern comes round in front of it.
-    wall_n = np.asarray(art.normal_map(walls, 0.7), dtype=np.float32).copy()
+    wall_n = np.asarray(art.normal_map(walls, 0.7, keep_half=True),
+                        dtype=np.float32).copy()
     fn = np.array(WALL_FACE_NORMAL, dtype=np.float32)
     fn = fn / np.linalg.norm(fn)
+    # Painted at the normal's own resolution from the rectangles the faces
+    # were shaded in, rather than at the layer's and then decimated - a mask
+    # built at full size and sampled every other row keeps or drops each edge
+    # depending on which parity it happens to land on.
+    hh, hw = wall_n.shape[0], wall_n.shape[1]
+    face_half = np.zeros((hh, hw), bool)
+    for yt, yb, x0, x1 in faces:
+        face_half[min(hh, yt // 2):min(hh, (yb + 1) // 2),
+                  min(hw, x0 // 2):min(hw, (x1 + 1) // 2)] = True
     for i in range(3):
-        wall_n[..., i] = np.where(is_face, fn[i] * 127.5 + 127.5,
+        wall_n[..., i] = np.where(face_half, fn[i] * 127.5 + 127.5,
                                   wall_n[..., i])
     level.wall_normal = art.wrap(
         Image.fromarray(np.clip(wall_n, 0, 255).astype(np.uint8), 'RGBA'),
@@ -951,6 +1013,8 @@ def _bake_layers(level, rng, seed):
     level.art_keys.append(key_wall + ('normal',))
 
     _bake_minimap(level, seed)
+    # Last, so a chamber is only ever current once every layer is in place.
+    level.art_generation = generation
 
 
 def _bake_minimap(level, seed, size=148):
@@ -986,6 +1050,23 @@ def _bake_minimap(level, seed, size=148):
 # --------------------------------------------------------------------------
 # Entry point
 # --------------------------------------------------------------------------
+def needs_bake(level):
+    """Whether a chamber's layers are missing or belong to another scale.
+
+    Either is a chamber that draws as nothing at all: its sprites were
+    released with the cache, so the floor and the walls are simply not there
+    and only the lights are. That is what walking into a room built before a
+    resize used to look like.
+    """
+    if level.art_generation != art.GENERATION:
+        return True
+    for sprite in (level.floor_image, level.floor_normal, level.wall_image,
+                   level.wall_normal, level.minimap_image):
+        if sprite is not None and not sprite.alive():
+            return True
+    return False
+
+
 def rebake(level):
     """Re-render a chamber's baked layers, e.g. after a render-scale change."""
     from . import rng as rng_mod

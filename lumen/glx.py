@@ -74,9 +74,17 @@ _targets = {}
 _targets_size = None
 _target_name = None
 _viewport = (1, 1)
-# The real drawable, as the host measured it. `ctx.screen.size` is stale from
-# the moment the window is resized; see `set_viewport`.
+# The size of the frame the game draws - the render buffer. When that is the
+# whole window it is drawn straight into the window; otherwise into
+# `_canvas`, which `present` then fits into `_present_rect`. `ctx.screen.size`
+# is stale from the moment the window is resized, so none of these come from
+# it; see `set_output`.
 _screen = (1, 1)
+_drawable = (1, 1)
+_present_rect = (0, 0, 1, 1)
+_canvas = None              # (texture, framebuffer), or None when direct
+_fx_prog = None
+_fx_vbo = _fx_vao = None
 
 # One draw of a full-screen triangle pair, for the post passes.
 _SCREEN_QUAD = np.array([-1, -1, 0, 0, 3, -1, 2, 0, -1, 3, 0, 2], dtype='f4')
@@ -125,6 +133,102 @@ in vec2 v_uv;
 in vec4 v_col;
 out vec4 frag;
 void main() { frag = texture(tex0, v_uv) * v_col; }
+'''
+
+# The screen-sized overlays - vignette, scanlines, film grain - evaluated per
+# pixel instead of baked.
+#
+# They used to be numpy bakes the size of the window: ten of them, 5 MB of
+# RGBA apiece at native scale, and more than half a second of every resize
+# spent rebuilding them. Every one is a closed-form function of the pixel it
+# lands on, so here they are that function. The arithmetic is the bake's own,
+# to the rounding: the same 8x8 Bayer dither added to alpha before it is cut
+# to eight bits, the same premultiply with the same +127, so what reaches the
+# frame is the texel the sprite would have held. The one thing that could not
+# be carried over is the grain's pattern, which came from numpy's generator;
+# it is the same distribution from a hash of the pixel instead.
+_FX_VS = '''#version 330
+uniform vec2 viewport;
+in vec2 in_pos;
+void main() {
+    vec2 ndc = vec2(in_pos.x / viewport.x * 2.0 - 1.0,
+                    1.0 - in_pos.y / viewport.y * 2.0);
+    gl_Position = vec4(ndc, 0.0, 1.0);
+}
+'''
+
+_FX_FS = '''#version 330
+uniform int kind;           // 0 vignette, 1 grain, 2 scanlines, 3 all three
+uniform vec2 viewport;
+uniform vec4 rect;          // left, top, width, height in target pixels
+uniform vec3 tint;          // the vignette's colour, 0..255
+uniform vec4 vig;           // strength, radius
+uniform vec4 grain;         // amount, seed
+uniform vec4 scan;          // alpha, period in pixels
+uniform float opacity;
+uniform float bayer[64];
+out vec4 frag;
+
+uint pcg(uint v) {
+    uint state = v * 747796405u + 2891336453u;
+    uint word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+    return (word >> 22u) ^ word;
+}
+
+float quantise(float a, float dither) {
+    return floor(clamp(a * 255.0 + dither, 0.0, 255.0));
+}
+
+void main() {
+    // Pixel column and row inside the overlay, counted from its top-left -
+    // the indices the bake's arrays used.
+    float col = floor(gl_FragCoord.x - rect.x);
+    float row = floor((viewport.y - gl_FragCoord.y) - rect.y);
+    float dither = bayer[int(mod(row, 8.0)) * 8 + int(mod(col, 8.0))];
+
+    // Vignette: straight colour `tint`, alpha `va`.
+    float u = (col + 0.5) / rect.z * 2.0 - 1.0;
+    float v = (row + 0.5) / rect.w * 2.0 - 1.0;
+    float d = sqrt((u * 1.02) * (u * 1.02) + (v * 1.16) * (v * 1.16));
+    float fall = clamp((d - vig.y) / max(1e-6, 1.45 - vig.y), 0.0, 1.0);
+    float va = quantise(pow(fall, 1.5) * vig.x, dither);
+
+    // Grain: white or black, alpha from how far the draw is from the middle.
+    uint h = pcg(uint(col) + pcg(uint(row) + pcg(uint(grain.y))));
+    float n = float(h >> 8u) / 16777216.0;
+    float ga = quantise(abs(n - 0.5) * 2.0 * grain.x, dither);
+    float gv = n > 0.5 ? 255.0 : 0.0;
+
+    // Scanlines: black, on every `period`th row.
+    float sa = quantise(mod(row, scan.y) < 0.5 ? scan.x : 0.0, dither);
+
+    vec3 rgb;
+    float a;
+    if (kind == 0) {
+        rgb = tint; a = va;
+    } else if (kind == 1) {
+        rgb = vec3(gv); a = ga;
+    } else if (kind == 2) {
+        rgb = vec3(0.0); a = sa;
+    } else {
+        // Vignette, then scanlines, then grain, composited in straight alpha
+        // and rounded to eight bits the way the flattened bake was.
+        vec3 c = tint;
+        float ca = va / 255.0;
+        float la = sa / 255.0;
+        float oa = la + ca * (1.0 - la);
+        c = oa > 0.0 ? (vec3(0.0) * la + c * ca * (1.0 - la)) / oa : vec3(0.0);
+        ca = oa;
+        la = ga / 255.0;
+        oa = la + ca * (1.0 - la);
+        c = oa > 0.0 ? (vec3(gv) * la + c * ca * (1.0 - la)) / oa : vec3(0.0);
+        rgb = floor(c + 0.5);
+        a = floor(oa * 255.0 + 0.5);
+    }
+    // Premultiplied, with the bake's rounding.
+    vec3 pm = floor((rgb * a + 127.0) / 255.0);
+    frag = vec4(pm / 255.0, a / 255.0) * opacity;
+}
 '''
 
 # The whole reason for this backend. The scene is lit in linear light with no
@@ -365,6 +469,7 @@ def attach(context):
     global _solid_prog, _tex_prog, _post_prog, _glow_prog
     global _solid_vbo, _solid_vao, _tex_vbo, _tex_vao, _quad_vao
     global _glow_vbo, _glow_vao, _shadow_open
+    global _canvas, _fx_prog, _fx_vbo, _fx_vao
     _ctx = context
     _generation += 1
     _mode = NORMAL
@@ -375,8 +480,9 @@ def attach(context):
     del _glow[:]
     _shadow_open = False
     _drop_targets()
+    _canvas = None
     if context is None:
-        _solid_prog = _tex_prog = _post_prog = _glow_prog = None
+        _solid_prog = _tex_prog = _post_prog = _glow_prog = _fx_prog = None
         return
     context.enable(context.BLEND)
     _solid_prog = context.program(vertex_shader=_SOLID_VS,
@@ -401,6 +507,10 @@ def attach(context):
     quad = context.buffer(_SCREEN_QUAD.tobytes())
     _quad_vao = context.vertex_array(
         _post_prog, [(quad, '2f 2f', 'in_pos', 'in_uv')])
+    _fx_prog = context.program(vertex_shader=_FX_VS, fragment_shader=_FX_FS)
+    _fx_prog['bayer'].value = tuple(float(v) for v in _BAYER_DITHER)
+    _fx_vbo = context.buffer(reserve=2 * 4 * 6)
+    _fx_vao = context.vertex_array(_fx_prog, [(_fx_vbo, '2f', 'in_pos')])
 
 
 def detach():
@@ -482,9 +592,80 @@ class Sprite:
         self._texture = None
         self._generation = -1
 
+    def alive(self):
+        """False once released: no bytes left to upload and no texture."""
+        return self.pixels is not None or self._texture is not None
+
 
 def sprite_from_pil(premultiplied):
     return Sprite(premultiplied.tobytes(), premultiplied.size)
+
+
+# The ordered dither `art` adds to a baked alpha before rounding it: an 8x8
+# Bayer matrix, centred, at 2.4 levels. Kept here as well so the overlays can
+# round exactly the way the bakes they replace did.
+_BAYER_DITHER = tuple(
+    ((v + 0.5) / 64.0 - 0.5) * 2.4 for v in (
+        0, 32, 8, 40, 2, 34, 10, 42, 48, 16, 56, 24, 50, 18, 58, 26,
+        12, 44, 4, 36, 14, 46, 6, 38, 60, 28, 52, 20, 62, 30, 54, 22,
+        3, 35, 11, 43, 1, 33, 9, 41, 51, 19, 59, 27, 49, 17, 57, 25,
+        15, 47, 7, 39, 13, 45, 5, 37, 63, 31, 55, 23, 61, 29, 53, 21))
+
+VIGNETTE, GRAIN, SCANLINES, OVERLAY = 0, 1, 2, 3
+
+
+class Overlay:
+    """A screen-sized effect that is drawn like a sprite and is not one.
+
+    `art.vignette`, `art.grain` and `art.screen_overlay` hand these out, so
+    every call site that blits one keeps working unchanged - `blit` notices
+    and evaluates it per pixel instead. `size` is in pixels at the scale it
+    was asked for, like a sprite's. There is nothing to bake, upload or free.
+    """
+
+    __slots__ = ('kind', 'size', 'tint', 'vig', 'grain', 'scan')
+
+    def __init__(self, kind, size, tint=(0, 0, 0), vig=(0.0, 0.0),
+                 grain=(0.0, 0.0), scan=(0.0, 1.0)):
+        self.kind = kind
+        self.size = (max(1, int(size[0])), max(1, int(size[1])))
+        self.tint = tuple(float(c) for c in tint)
+        self.vig = (float(vig[0]), float(vig[1]), 0.0, 0.0)
+        self.grain = (float(grain[0]), float(grain[1]), 0.0, 0.0)
+        self.scan = (float(scan[0]), float(max(1, int(scan[1]))), 0.0, 0.0)
+
+    def texture(self):
+        return None
+
+    def release(self):
+        pass
+
+
+def _draw_overlay(fx, left, top, width, height, opacity):
+    if _ctx is None or _fx_prog is None:
+        return
+    a = _alpha(opacity)
+    if a <= 0.0:
+        return
+    flush()
+    w = float(fx.size[0] if width is None else width)
+    h = float(fx.size[1] if height is None else height)
+    x0, y0 = float(left), float(top)
+    x1, y1 = x0 + w, y0 + h
+    _fx_vbo.write(array('f', (x0, y0, x1, y0, x1, y1,
+                              x0, y0, x1, y1, x0, y1)).tobytes())
+    prog = _fx_prog
+    prog['viewport'].value = (float(_viewport[0]), float(_viewport[1]))
+    prog['kind'].value = fx.kind
+    prog['rect'].value = (x0, y0, w, h)
+    prog['opacity'].value = a
+    for name, value in (('tint', fx.tint), ('vig', fx.vig),
+                        ('grain', fx.grain), ('scan', fx.scan)):
+        try:
+            prog[name].value = value
+        except KeyError:
+            pass            # the compiler dropped one this kind never reads
+    _fx_vao.render(vertices=6)
 
 
 # --------------------------------------------------------------------------
@@ -572,6 +753,9 @@ def _push_tex_quad(tex, corners, col, flip_v=False):
 # Primitives
 # --------------------------------------------------------------------------
 def blit(sprite, left, top, width=None, height=None, opacity=None):
+    if sprite.__class__ is Overlay:
+        _draw_overlay(sprite, left, top, width, height, opacity)
+        return
     tex = sprite.texture() if sprite is not None else None
     if tex is None:
         return
@@ -1023,9 +1207,13 @@ def _use(name):
     flush()
     _target_name = name
     if name is None:
+        if _canvas is not None:
+            _canvas[1].use()
+            _viewport = _screen
+            return
         _ctx.screen.use()
         # Deliberately *not* `_ctx.screen.size`, and not whatever viewport
-        # `use()` just restored from it - see `set_viewport`.
+        # `use()` just restored from it - see `set_output`.
         _viewport = _screen
         try:
             _ctx.screen.viewport = (0, 0, _screen[0], _screen[1])
@@ -1037,23 +1225,44 @@ def _use(name):
         _viewport = tex.size
 
 
-def set_viewport(size):
-    """Told by the host what the drawable is - and the only word for it.
+def set_output(render, drawable=None, rect=None):
+    """Told by the host what to draw at, and where on the window it goes.
 
-    moderngl reads the default framebuffer's size once, when the context is
-    created, and never revises it. `ctx.screen` therefore goes on describing
-    the window the context was born in: 2560x1440 for a 1280x720 window that
-    has since gone fullscreen into a 3600x2338 one.
+    `render` is the frame the game draws, in pixels. `drawable` is the
+    window's real framebuffer and `rect` - (x, y, w, h) from its top-left -
+    is where the frame lands in it. When the frame is the whole window it is
+    drawn straight in; when it is smaller (the sharpness dial), barred (a
+    window outside the aspect range), or mid-resize, it is drawn into a
+    canvas that `present` fits into `rect`.
 
-    Believing it meant `screen.use()` restored that stale viewport on every
-    frame, so the game drew into a 2560x1440 corner of a 3600x2338
-    framebuffer and never touched the rest. OpenGL's origin is bottom-left,
-    which is why the part it never reached showed up as a band across the
-    *top* of the screen.
+    None of this comes from `ctx.screen`. moderngl reads the default
+    framebuffer's size once, when the context is created, and never revises
+    it - so it goes on describing the window the context was born in:
+    2560x1440 for a 1280x720 window that has since gone fullscreen into a
+    3600x2338 one. Believing it once drew the game into a 2560x1440 corner of
+    the framebuffer, which showed as a band across the top of the screen.
     """
-    global _viewport, _screen
-    _screen = (max(1, int(size[0])), max(1, int(size[1])))
+    global _viewport, _screen, _drawable, _present_rect, _canvas
+    _screen = (max(1, int(render[0])), max(1, int(render[1])))
+    _drawable = (tuple(max(1, int(v)) for v in drawable) if drawable
+                 else _screen)
+    _present_rect = (tuple(int(v) for v in rect) if rect
+                     else (0, 0, _drawable[0], _drawable[1]))
     _viewport = _screen
+    direct = (_screen == _drawable
+              and _present_rect == (0, 0, _drawable[0], _drawable[1]))
+    if direct or _ctx is None:
+        _canvas = None
+        return
+    if _canvas is None or _canvas[0].size != _screen:
+        tex = _ctx.texture(_screen, 4)
+        tex.repeat_x = tex.repeat_y = False
+        _canvas = (tex, _ctx.framebuffer(color_attachments=[tex]))
+
+
+def set_viewport(size):
+    """The whole window, drawn straight into. See `set_output`."""
+    set_output(size)
 
 
 def begin_frame(background):
@@ -1087,6 +1296,8 @@ def present():
     if _ctx is None or not _frame_open:
         return False
     flush()
+    if _canvas is not None:
+        _present_canvas()
     STATS['frames'] += 1
     if _window is not None:
         _window.flip()
@@ -1094,17 +1305,46 @@ def present():
     return True
 
 
+def _present_canvas():
+    """Put the canvas where it goes on the window, and black everywhere else."""
+    global _viewport
+    tex = _canvas[0]
+    dw, dh = _drawable
+    x, y, w, h = _present_rect
+    _ctx.screen.use()
+    try:
+        _ctx.screen.viewport = (0, 0, dw, dh)
+    except Exception:
+        pass
+    _ctx.clear(0.0, 0.0, 0.0, 1.0)
+    # Exactly one texel per pixel is copied, not filtered: a barred frame at
+    # full sharpness is the same image it would have been drawn straight in.
+    exact = (w, h) == tex.size
+    tex.filter = ((_ctx.NEAREST, _ctx.NEAREST) if exact
+                  else (_ctx.LINEAR, _ctx.LINEAR))
+    mode = _mode
+    set_mode(REPLACE)
+    _viewport = _drawable
+    _push_tex_quad(tex, ((x, y), (x + w, y), (x + w, y + h), (x, y + h)),
+                   (1.0, 1.0, 1.0, 1.0), flip_v=True)
+    flush()
+    _viewport = _screen
+    set_mode(mode)
+
+
 def frame_open():
     return _frame_open
 
 
 def read_frame():
+    """The last frame drawn, at the size it was drawn, as a pygame surface."""
     if _ctx is None:
         return None
     import pygame
     flush()
     w, h = _screen
-    raw = _ctx.screen.read(viewport=(0, 0, w, h), components=3, alignment=1)
+    source = _canvas[1] if _canvas is not None else _ctx.screen
+    raw = source.read(viewport=(0, 0, w, h), components=3, alignment=1)
     surf = pygame.image.frombuffer(raw, (w, h), 'RGB')
     return pygame.transform.flip(surf, False, True)
 

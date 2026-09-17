@@ -28,40 +28,79 @@ from .draw import drawImage
 from . import noise
 
 # --------------------------------------------------------------------------
-# Fonts. macOS ships these; if a lookup fails we fall back gracefully so the
-# game still runs on a machine with a different font set.
+# Fonts.
+#
+# The game is drawn in two faces: a glyphic display capital and a monospace
+# for everything the player reads as a readout. macOS ships both - Copperplate
+# and Menlo - and on a Mac they are the ones used, because they are the faces
+# this was designed in.
+#
+# Nowhere else has them, and Apple's licence does not let them travel, so the
+# game carries a pair that can: **Copperplate CC**, an open revival of the
+# same Copperplate Gothic that Apple's is a cut of, and **DejaVu Sans Mono**,
+# which is the family Menlo itself was derived from - at the same size it sets
+# the same line to the same width, to the pixel. See `lumen/fonts/`, which
+# holds their licences beside them.
+#
+# Each entry is (regular, bold). A `.ttc` collection has its bold inside it at
+# an index that differs per file, so it says None and `_bold_face` finds it by
+# name; a plain `.ttf` names its bold outright.
 # --------------------------------------------------------------------------
+_BUNDLED = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fonts')
+
 _FONT_CANDIDATES = {
     'display': [
-        '/System/Library/Fonts/Supplemental/Copperplate.ttc',
-        '/System/Library/Fonts/Supplemental/Futura.ttc',
-        '/System/Library/Fonts/Avenir Next Condensed.ttc',
-        '/System/Library/Fonts/Supplemental/Impact.ttf',
+        ('/System/Library/Fonts/Supplemental/Copperplate.ttc', None),
+        (os.path.join(_BUNDLED, 'CopperplateCC-Heavy.ttf'),
+         os.path.join(_BUNDLED, 'CopperplateCC-Bold.ttf')),
+        ('/System/Library/Fonts/Supplemental/Futura.ttc', None),
+        ('/System/Library/Fonts/Avenir Next Condensed.ttc', None),
+        ('C:\\Windows\\Fonts\\COPRGTL.TTF', 'C:\\Windows\\Fonts\\COPRGTB.TTF'),
+        ('/System/Library/Fonts/Supplemental/Impact.ttf', None),
     ],
     'ui': [
-        '/System/Library/Fonts/Menlo.ttc',
-        '/System/Library/Fonts/Monaco.ttf',
-        '/System/Library/Fonts/Supplemental/Courier New.ttf',
+        ('/System/Library/Fonts/Menlo.ttc', None),
+        (os.path.join(_BUNDLED, 'DejaVuSansMono.ttf'),
+         os.path.join(_BUNDLED, 'DejaVuSansMono-Bold.ttf')),
+        ('/System/Library/Fonts/Monaco.ttf', None),
+        ('C:\\Windows\\Fonts\\consola.ttf', 'C:\\Windows\\Fonts\\consolab.ttf'),
+        ('/System/Library/Fonts/Supplemental/Courier New.ttf', None),
     ],
 }
 _font_cache = {}
 
 
+def _candidates(role):
+    """The faces to try for a role, best first.
+
+    `LUMEN_FONTS=bundled` skips the system ones, which is how the look a
+    Windows or Linux player gets can be checked on the machine this is
+    written on.
+    """
+    faces = _FONT_CANDIDATES.get(role, ())
+    if os.environ.get('LUMEN_FONTS') == 'bundled':
+        return [f for f in faces if f[0].startswith(_BUNDLED)]
+    return faces
+
+
 def font(role, size, bold=False):
     """The face for a role, at a pixel size.
 
-    Bold asks the font collection for its real bold face rather than
-    thickening the regular one: these are .ttc collections and the bold face
-    is at a different index in each, so the index is found by name.
+    Bold is a real bold face wherever the role has one - named beside the
+    regular, or found by name inside a `.ttc` collection - rather than the
+    regular thickened with a stroke.
     """
     key = (role, size, bold)
     hit = _font_cache.get(key)
     if hit is not None:
         return hit
     chosen = None
-    for path in _FONT_CANDIDATES.get(role, []):
+    for path, bold_path in _candidates(role):
         try:
             if bold:
+                if bold_path:
+                    chosen = ImageFont.truetype(bold_path, size)
+                    break
                 chosen = _bold_face(path, size)
                 if chosen is not None:
                     break
@@ -101,10 +140,13 @@ def _bold_face(path, size):
 
 def has_bold_face(role):
     """Whether `font(role, size, bold=True)` returns a genuine bold face."""
-    for path in _FONT_CANDIDATES.get(role, []):
-        if _bold_face(path, 12) is not None:
-            return True
-    return False
+    hit = _HAS_BOLD.get(role)
+    if hit is None:
+        hit = _HAS_BOLD[role] = font(role, 12, bold=True) is not font(role, 12)
+    return hit
+
+
+_HAS_BOLD = {}
 
 
 # --------------------------------------------------------------------------
@@ -134,6 +176,10 @@ def set_scale(scale):
 _cache = {}
 # Baking happens on a worker as well as on the frame; see `_store`.
 _bake_lock = threading.RLock()
+# Which cache generation a worker's current job started under; see
+# `begin_bake`. Unset on the main thread, which is where the scale changes and
+# so the one thread that can never be caught on the wrong side of it.
+_bake_local = threading.local()
 _pil_cache = {}
 # Pixel dimensions keyed by sprite identity, so callers that need to position
 # a baked sprite do not have to search the cache for it.
@@ -152,6 +198,13 @@ def premultiply(pil):
     white grain overlay comes out as solid white noise. Everything built here
     goes through this function on the way in.
     """
+    # Asked of the image rather than of an array of it. Three of a chamber's
+    # four layers are opaque and answer here, and `convert('RGBA')` on an
+    # image that is already RGBA still copies it - at native scale that copy
+    # is 80 MB apiece, allocated only to be measured and thrown away.
+    if pil.mode == 'RGBA' and pil.getchannel('A').getextrema()[0] == 255:
+        return pil
+
     arr = np.asarray(pil.convert('RGBA'))
     alpha = arr[..., 3]
 
@@ -192,6 +245,12 @@ def _store(key, pil, keep_source=True):
     """
     started = time.perf_counter()
     img = gpu.sprite_from_pil(premultiply(pil))
+    if bake_generation() != GENERATION:
+        # Rasterised on a worker for a scale that has been replaced since it
+        # started. Caching it would hand the wrong-sized sprite to everything
+        # that asks for this key at the new scale, so it goes back to the
+        # caller only - whose own result is stale too, and will be redone.
+        return img
     # Two things are being guarded here, and threading made both reachable:
     # the offering's sprites are baked on a worker while the floor is fought.
     #
@@ -435,7 +494,7 @@ def scorch_normal(seed, size=110):
     return _store(key, nm)
 
 
-def normal_map(pil, strength=1.0):
+def normal_map(pil, strength=1.0, keep_half=False):
     """A surface normal for every pixel, read out of the art's own shading.
 
     The stone was drawn with its mortar courses and its blotches already in
@@ -448,13 +507,23 @@ def normal_map(pil, strength=1.0):
     The result is a normal in the usual packing (a flat surface is
     (0.5, 0.5, 1)), carrying the source's alpha so that a layer only claims
     the pixels it actually covers.
+
+    `keep_half` returns it at the half resolution it was built at instead of
+    stretching it back out. Nothing is lost by that - the GPU samples the
+    texture bilinearly across the same quad, which is the identical filter
+    the upscale was applying - and a great deal is saved: the full-size
+    resize was measured at a fifth of a chamber's whole bake, the sprite it
+    produced then had to be premultiplied at four times the size, and a
+    chamber's two normal layers at native scale are 160 MB of texture that
+    becomes 40. The caller has to give the sprite a size when it draws it,
+    since its pixels no longer say what it is.
     """
     rgba = pil if pil.mode == 'RGBA' else pil.convert('RGBA')
-    # Built at half resolution and scaled back up. A normal map feeds a smooth
-    # N.L term, so it carries almost no high frequency worth preserving - and
-    # at a chamber's full size this is four times the array work, on the one
-    # code path that runs between the offering and the next floor, where every
-    # millisecond is a frame of hitch the player sees.
+    # Built at half resolution. A normal map feeds a smooth N.L term, so it
+    # carries almost no high frequency worth preserving - and at a chamber's
+    # full size this is four times the array work, on the one code path that
+    # runs between the offering and the next floor, where every millisecond
+    # is a frame of hitch the player sees.
     full = rgba.size
     half = (max(2, full[0] // 2), max(2, full[1] // 2))
     rgba = rgba.resize(half, Image.BILINEAR)
@@ -479,7 +548,9 @@ def normal_map(pil, strength=1.0):
     out[..., 2] = np.clip((nz * inv) * 127.5 + 127.5, 0, 255)
     out[..., 3] = a[..., 3]
     small = Image.fromarray(out, 'RGBA')
-    return small if half == full else small.resize(full, Image.BILINEAR)
+    if keep_half or half == full:
+        return small
+    return small.resize(full, Image.BILINEAR)
 
 
 def dither_tile(size=256):
@@ -627,7 +698,14 @@ def draw_lantern(color, cx, cy, radius, opacity, height=0.0):
 
 
 def prewarm_lantern(color, radii):
-    """Bake the lantern sizes a run will actually use, up front."""
+    """Bake the lantern sizes a run will actually use, up front.
+
+    Nothing to do where the renderer evaluates lights per pixel: `draw_lantern`
+    never reaches for a sprite there, and baking nine of them anyway was the
+    better part of a fifth of a second on every resize and every room.
+    """
+    if getattr(gpu, 'ANALYTIC_LIGHTS', False):
+        return
     for radius in radii:
         size = int(radius * 2.0)
         if 0 < size <= LANTERN_EXACT_MAX:
@@ -678,24 +756,19 @@ def draw_ring(color, cx, cy, radius, opacity, thickness=0.16, softness=1.4):
 # --------------------------------------------------------------------------
 # Full-screen overlays
 # --------------------------------------------------------------------------
-def _vignette_pil(width, height, strength, radius, tint):
-    width, height = px(width), px(height)
-    ys = (np.arange(height, dtype=np.float32) + 0.5) / height * 2.0 - 1.0
-    xs = (np.arange(width, dtype=np.float32) + 0.5) / width * 2.0 - 1.0
-    d = np.sqrt((xs[None, :] * 1.02) ** 2 + (ys[:, None] * 1.16) ** 2)
-    a = np.clip((d - radius) / max(1e-6, 1.45 - radius), 0.0, 1.0) ** 1.5 * strength
-    r, g, b = tint
-    return _rgba((np.full(a.shape, r, np.float32),
-                  np.full(a.shape, g, np.float32),
-                  np.full(a.shape, b, np.float32)), a)
-
-
 def vignette(width, height, strength=0.92, radius=0.78, tint=(2, 4, 9)):
+    """A darkening toward the frame's edges, `width` x `height` design units.
+
+    Evaluated per pixel by the renderer rather than baked; see `gpu.Overlay`.
+    """
     key = ('vig', width, height, round(strength, 2), round(radius, 2), tint)
     hit = _cache.get(key)
     if hit is not None:
         return hit
-    return _store(key, _vignette_pil(width, height, strength, radius, tint))
+    fx = gpu.Overlay(gpu.VIGNETTE, (px(width), px(height)), tint=tint,
+                     vig=(strength, radius))
+    _cache[key] = fx
+    return fx
 
 
 def grain(width, height, amount=0.055, seed=11):
@@ -704,16 +777,9 @@ def grain(width, height, amount=0.055, seed=11):
     hit = _cache.get(key)
     if hit is not None:
         return hit
-    return _store(key, _grain_pil(width, height, amount, seed))
-
-
-def _grain_pil(width, height, amount, seed):
-    width, height = px(width), px(height)
-    rng = np.random.default_rng(seed)
-    n = rng.random((height, width)).astype(np.float32)
-    a = np.abs(n - 0.5) * 2.0 * amount
-    v = np.where(n > 0.5, 255.0, 0.0)
-    return _rgba((v, v, v), a)
+    fx = gpu.Overlay(gpu.GRAIN, (px(width), px(height)), grain=(amount, seed))
+    _cache[key] = fx
+    return fx
 
 
 def scanlines(width, height, alpha=0.16, period=3):
@@ -721,26 +787,19 @@ def scanlines(width, height, alpha=0.16, period=3):
     hit = _cache.get(key)
     if hit is not None:
         return hit
-    return _store(key, _scanlines_pil(width, height, alpha, period))
-
-
-def _scanlines_pil(width, height, alpha, period):
-    width, height = px(width), px(height)
-    period = max(1, px(period))
-    rows = ((np.arange(height) % period) == 0).astype(np.float32) * alpha
-    a = np.repeat(rows[:, None], width, axis=1)
-    z = np.zeros((height, width), np.float32)
-    return _rgba((z, z, z), a)
+    fx = gpu.Overlay(gpu.SCANLINES, (px(width), px(height)),
+                     scan=(alpha, max(1, px(period))))
+    _cache[key] = fx
+    return fx
 
 
 def screen_overlay(width, height, vignette_strength=0.94, vignette_radius=0.6,
                    grain_amount=0.05, scan_alpha=0.1, scan_period=4):
-    """Vignette, scanlines and grain composited into a single sprite.
+    """Vignette, scanlines and grain, as one overlay.
 
-    Each full-screen `drawImage` costs about 0.4 ms once the renderer's blit
-    is counted - measured, not assumed - so three separate static overlays
-    were over a millisecond a frame for something that never changes. They are
-    flattened here into one.
+    They were flattened into a single sprite because three full-screen blits
+    were over a millisecond a frame; here they are one pass of one shader,
+    composited in the same order the flattening did it.
     """
     key = ('overlay', width, height, round(vignette_strength, 2),
            round(vignette_radius, 2), round(grain_amount, 3),
@@ -748,19 +807,12 @@ def screen_overlay(width, height, vignette_strength=0.94, vignette_radius=0.6,
     hit = _cache.get(key)
     if hit is not None:
         return hit
-
-    layers = [
-        _pil_cache.get(('vig', width, height, round(vignette_strength, 2),
-                        round(vignette_radius, 2), (2, 4, 9)))
-        or _vignette_pil(width, height, vignette_strength, vignette_radius,
-                         (2, 4, 9)),
-        _scanlines_pil(width, height, scan_alpha, scan_period),
-        _grain_pil(width, height, grain_amount, 11),
-    ]
-    out = layers[0]
-    for layer in layers[1:]:
-        out = Image.alpha_composite(out, layer)
-    return _store(key, out)
+    fx = gpu.Overlay(gpu.OVERLAY, (px(width), px(height)), tint=(2, 4, 9),
+                     vig=(vignette_strength, vignette_radius),
+                     grain=(grain_amount, 11),
+                     scan=(scan_alpha, max(1, px(scan_period))))
+    _cache[key] = fx
+    return fx
 
 
 def darkness(width, height, level=0.86, tint=(3, 5, 11)):
@@ -829,7 +881,8 @@ def text_sprite(message, role, size, color, tracking=0, glow_color=None,
         img = out
 
     sprite = _store(key, img)
-    _insets[id(sprite)] = ((pad + 4) / SCALE, (pad + 4) / SCALE)
+    if _cache.get(key) is sprite:
+        _insets[id(sprite)] = ((pad + 4) / SCALE, (pad + 4) / SCALE)
     return sprite
 
 
@@ -850,7 +903,8 @@ def label_sprite(message, role, size, color, bold=False):
         _LABEL_CACHE.clear()
     sprite = text_sprite(message, role, int(size), color, bold=bold)
     entry = (sprite, sprite_size(sprite))
-    _LABEL_CACHE[key] = entry
+    if bake_generation() == GENERATION:
+        _LABEL_CACHE[key] = entry
     return entry
 
 
@@ -869,6 +923,27 @@ def draw_label_sprite(message, x, y, role, size, color, align='center',
               opacity=max(0, min(100, int(opacity))))
 
 
+def text_ink_height(message, role, size, bold=False):
+    """The height of the glyphs themselves, in design units."""
+    f = font(role, px(size), bold=bold)
+    box = f.getbbox(str(message))
+    return max(1.0, (box[3] - box[1]) / SCALE)
+
+
+def text_ink_top(message, role, size, glow_radius=0, bold=False):
+    """How far below a text sprite's top edge its glyphs start.
+
+    In design units. A sprite is its face's whole line box plus the room the
+    glow needs, and faces disagree about the line box by a lot - the bundled
+    display face's is 39 units deeper than the system one's at the wordmark's
+    size, and its glyphs start further down inside it. Anything that has to
+    land in the same place whichever face drew it is positioned by its ink.
+    """
+    f = font(role, px(size), bold=bold)
+    pad = (px(glow_radius) * 2 if glow_radius else 0) + 4 + (2 if bold else 0)
+    return (pad + 4 + f.getbbox(str(message))[1]) / SCALE
+
+
 def sprite_size(sprite):
     """Design-unit dimensions of an already-built sprite."""
     return _dims.get(id(sprite), (0, 0))
@@ -885,6 +960,27 @@ def sprite_pixel_size(sprite):
 def label_inset(sprite):
     """Where the glyphs start inside a baked text sprite's padding, in pixels."""
     return _insets.get(id(sprite), (0, 0))[0] * SCALE
+
+
+_WIDTH_CACHE = {}
+
+
+def label_width(message, role, size, bold=False):
+    """How wide `drawLabel` will draw this, in design units.
+
+    Measured through the same face at the same pixel size the sprite would be
+    baked at, so a caller fitting type into a box gets the answer the drawing
+    will actually give it - and gets it without baking a sprite it may well
+    decide not to use.
+    """
+    pixels = px(size)
+    key = (message, role, pixels, bool(bold))
+    hit = _WIDTH_CACHE.get(key)
+    if hit is None:
+        f = font(role, pixels, bold=bold)
+        d = ImageDraw.Draw(Image.new('RGBA', (8, 8)))
+        hit = _WIDTH_CACHE[key] = float(d.textlength(str(message), font=f))
+    return hit / max(SCALE, 1e-6)
 
 
 def text_size(message, role, size, tracking=0):
@@ -1056,6 +1152,24 @@ def _release(sprite):
 GENERATION = 0
 
 
+def begin_bake():
+    """Mark the start of a job on a worker thread.
+
+    A worker can be halfway through rasterising a chamber when the window is
+    resized and the scale changes under it. Everything it finishes after that
+    is the wrong size, and `_store` has to know not to cache it - which it can
+    only tell by comparing the generation the job started in with the one it
+    finished in.
+    """
+    _bake_local.generation = GENERATION
+
+
+def bake_generation():
+    """The cache generation the current thread's work belongs to."""
+    started = getattr(_bake_local, 'generation', None)
+    return GENERATION if started is None else started
+
+
 def clear_all():
     """Drop every cached sprite; used when the render scale changes."""
     global GENERATION
@@ -1067,7 +1181,11 @@ def clear_all():
     _dims.clear()
     _insets.clear()
     _LABEL_CACHE.clear()
+    # Keyed by pixel size, which the scale change has just redefined, and
+    # measured through faces that are about to be dropped.
+    _WIDTH_CACHE.clear()
     _font_cache.clear()
+    _HAS_BOLD.clear()
 
 
 def clear_level_cache(keep=()):

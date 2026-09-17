@@ -261,15 +261,23 @@ def _boss_stem(rng):
     return _room(_soft_clip(core * 0.9), 3.8, 2.2, 0.42, damp=2400.0, rng=rng)
 
 
-def make_stems():
-    """Every loop, as {name: mono float32}. Slow; the cache exists for this."""
+def make_stems(progress=None):
+    """Every loop, as {name: mono float32}. Slow; the cache exists for this.
+
+    `progress`, if given, is called with the share of the work each part was
+    as it finishes - the launch screen's dial moves on it.
+    """
     rng = np.random.default_rng(4242)
     out = {}
     for index, build in ((1, _act_one), (2, _act_two), (3, _act_three)):
         bed, tension = build(rng)
         out[f'mus_{index}_{BED}'] = _normalise(_seamless(bed), 0.62)
         out[f'mus_{index}_{TENSION}'] = _normalise(_seamless(tension), 0.58)
+        if progress is not None:
+            progress(0.2)
     out[f'mus_{BOSS}'] = _normalise(_seamless(_boss_stem(rng)), 0.7)
+    if progress is not None:
+        progress(0.4)
     return out
 
 

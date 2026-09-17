@@ -40,6 +40,59 @@ python3.12 -m venv .venv && .venv/bin/pip install -r requirements.txt \
 renderer and it is OpenGL 3.3 core — see [One renderer](#one-renderer) for
 what that replaced and why.
 
+## Sending it to someone
+
+Nobody else should have to own a virtualenv to play this. `packaging/` builds
+the game into one thing you can hand over, with its own Python inside it:
+
+```bash
+.venv/bin/python packaging/build.py --check      # this machine's build, then run it
+LUMEN_NOTARY_PROFILE=lumen \
+    .venv/bin/python packaging/build.py --notarize   # ...and have Apple bless it
+packaging/build_windows.sh                       # the Windows .exe, from a Mac
+```
+
+The notarisation profile is made once with `xcrun notarytool
+store-credentials`, and after that the key never has to be named again.
+
+| | what it is | size |
+| --- | --- | --- |
+| `dist/LUMEN-mac.zip` | `LUMEN.app`, zipped with `ditto` | 23 MB |
+| `dist/LUMEN.exe` | one file, nothing to install | 44 MB |
+
+There is no such thing as one file that runs on both: the interpreter, SDL and
+the three libraries under the game are all native code, and an executable is
+built out of them. So it is one file each, and the Windows one is built on a
+Mac by running Windows Python under Wine in a container — see
+`packaging/build_windows.sh`, which also explains the one version pin in it.
+
+The macOS build is signed with a Developer ID certificate and runs under the
+hardened runtime — `packaging/build.py` signs all 149 binaries inside the
+bundle from the inside out, because a signature covers what is beneath it —
+and `--notarize` sends it to Apple and staples the ticket it sends back, which
+is what makes it open on the first double-click with nothing to click through.
+Without a certificate the build falls back to an ad-hoc signature, which is
+enough for an Apple silicon Mac to run it at all and not enough to be
+notarised: that one warns, and needs **System Settings → Privacy & Security →
+Open Anyway**, once.
+
+Windows is not signed at all — that needs a certificate somebody sells — so
+SmartScreen says *Windows protected your PC* the first time: **More info →
+Run anyway**.
+
+A packaged game does not write anything inside itself — an app bundle is
+signed, and the Windows build unpacks into a temporary folder that is deleted
+when it quits. Records and settings go where each platform keeps them, and
+survive replacing the game with a newer build:
+
+| | records | the sound it synthesised |
+| --- | --- | --- |
+| macOS | `~/Library/Application Support/LUMEN/` | `~/Library/Caches/LUMEN/` |
+| Windows | `%APPDATA%\LUMEN\` | `%LOCALAPPDATA%\LUMEN\` |
+
+Run from a checkout it still keeps both beside the game, as it always did.
+See `lumen/paths.py`.
+
 ## Controls
 
 | Input | Action |
@@ -98,6 +151,39 @@ and health, and every branch is a wager against it.
 | HEARTH | Full fuel, a little health, nothing in the room. Rare. |
 | GAUNTLET | Optional, marked as such, and hard. |
 | DESCENT | The rift. Open on arrival. |
+| BOSS | An act's close. Its own floor's descent, once the thing in it is dead. |
+
+### A room is never built on a frame
+
+Generating and baking a chamber costs 80–200 ms at the design size, and at a
+retina display's own pixel density — which is what the game draws at — a
+large one is closer to 700 ms. So they are built **ahead**, on a worker,
+while the player is busy in the room they are already in; see `lumen/rooms.py`
+for the cache and its eviction.
+
+Ahead is not a guarantee, and for a long time the failure case was to do the
+work inline: the doorway asked for a chamber, and if it was not up, it built
+one *there and then*, on the frame the player stepped into the opening. That
+is not a hitch, it is the game stopping — measured at 341 ms in the harness's
+small window and over three seconds at native scale.
+
+`begin_crossing` has three answers now rather than two. It can start the walk,
+it can say the two doorways cannot be lined up (which is the fade it used to
+be every time), or it can say **not yet** — the chamber goes to the head of
+the build queue and the player is held one step short of a threshold with
+nothing behind it, at full frame rate, until the worker is done. Two things
+keep that from being something you ever see:
+
+* Walking within five tiles of a door takes the room behind it to the head of
+  the queue, which is a second and a quarter of warning on top of the whole
+  time spent in the room.
+* The bake is between two and three times cheaper than it was — see
+  [Baking a chamber](#baking-a-chamber).
+
+Measured over a floor walked door to door at native scale with three seconds
+spent in each room: no waits at all, and no frame over 30 ms.
+`tools/crossing_check.py` holds both halves of it — that no doorway bakes on
+the frame, and that no single update stops the game.
 
 ### Walking through the door
 
@@ -123,16 +209,49 @@ Every number changes by a room's width and nothing moves on screen.
 `tools/crossing_check.py` is what holds that claim up. It measures the
 player's position *relative to the camera* frame by frame, and separately
 asserts the raw rebase really did happen. A cut would be a thousand-pixel
-step; the worst on-screen step is fifteen, and that is the camera panning as
-the framing widens from one room to two.
+step; a walking player covers 2.23, and so does the worst frame of a
+crossing.
 
 Two things had to change underneath it. Doors are carved through the **whole**
 wall now rather than through its inner ring only — a doorway had been an
 alcove you could stand in and never pass through, which nobody noticed for as
 long as walking through one teleported you past it. And the camera frames a
-*region* rather than a size, easing between framings on a smoothstep: an
-exponential lerp is fastest on its first frame, which read as a shove
-followed by a drift.
+*region* rather than a size.
+
+#### The shove at the end of a door
+
+That worst step was fifteen pixels a frame for a long time, and the test
+allowed twenty on the reasoning that a cut is a room-sized jump and a pan is
+not a cut. Both were true and it was still wrong: every door in the game
+ended in a shove.
+
+The framing used to be *animated*, from one room's rectangle to two and back,
+smoothstepped over 0.62 s. The trouble is what the clamp does while the frame
+is near the window's own size: there is no slack left in it, so the camera is
+not following the player at all, it is pinned to the frame and travels at
+whatever speed the frame is travelling. Collapsing from two rooms back to one
+is a room's width of travel, and over half a second that is 15.8 units in a
+single frame at 120 Hz against the 2.23 a walk covers — seven times the speed
+of the world, in the direction the frame happened to be shrinking.
+
+So the frame is not animated any more. It changes the instant it is asked to,
+and what is eased instead is the **correction it implies**: the difference
+between where the camera was and where the new framing would put it is taken
+on as a debt, so nothing moves on the frame the framing changes, and the debt
+is paid off over a window long enough that it is never paid faster than
+`Camera.PAN_PEAK`. The camera keeps following the player against the real
+frame the whole time with the outstanding correction riding on top, so it can
+settle gently *and* never lose the player — which the animated frame could
+not do at once. Measured over forty-eight crossings, worst single frame:
+21.7 units before, 5.6 after.
+
+Two smaller things fell out of the same measurement. The follow is released
+into the debt rather than let out on the next frame, because a frame that
+opens up has been holding the follow back against a wall and the exponential
+catch-up that follows is fastest on its first frame — the same shove from the
+other direction. And a hitstop frame keeps the lookahead it had instead of
+dropping it and picking it up again, which was a six-unit kick on the frame
+every hit landed.
 
 ### Doors
 
@@ -158,6 +277,30 @@ beyond genuinely opens up to the lantern as they go. A hostile room seals
 behind you on arrival, the door you came through included — which it could
 not do before, because until you were through, that door had to stay open
 for you.
+
+#### The ground in an opening
+
+The stonework of a doorway — the sill underfoot and the jambs either side —
+is **ground**, and it is drawn with the ground. It used to be drawn with the
+furniture, after `scene_coverage` had been switched on. That flag holds the
+room's added light back so that a figure standing in the dark stays a
+silhouette instead of a warm haze, which is right for a figure and wrong for
+a floor: the threshold was a slab of near-black laid across the opening that
+could take no light at all, so every open door in the vault had a dark
+rectangle sitting in it however close the lantern came, and the lit floor
+stopped dead at the doorway.
+
+What is left is what a threshold actually is: dressed stone a shade cooler
+than the floor it interrupts, with a joint at each mouth where the sill is
+let into the room, all of it lighting exactly as the floor does. The
+opacities had to come down with it — `WALL_DOOR` is several stops *lighter*
+than the chamber's floor, and numbers chosen while it was being drawn where
+no light could reach put bright slabs across every doorway once it was lit.
+
+Mid-crossing the two chambers share a doorway and each owns a `Door` standing
+in the same place, so the stonework is deduplicated by where a door actually
+is rather than by which room claims it. Dressing it twice laid two sills and
+four jambs on the one band of floor the player is walking across.
 
 ## The lantern
 
@@ -235,8 +378,38 @@ room answers first with rings running outward, then the thing gathers out of
 the dark with motes falling inward, then it opens its eye. The view swings
 across to watch and comes back as it finishes — an arrival you cannot see is
 not an arrival — and nothing takes control away from you while it happens.
-They **come apart** the same way, and the way down does not open until it is
-over.
+
+#### And they come apart the same way
+
+Four beats, in this order, and none of them interrupts the one before it:
+
+1. **2.8 s of coming apart.** The body cracks open in bursts that get faster
+   as they go, the light it carried gutters and flares, and the camera stays
+   on the corpse while it happens.
+2. **The collapse.** A screen wash, a thirteen-hundred-unit ripple, a hundred
+   and twenty embers with a second and a half of life in them, and the one
+   sound in the game that resolves upward.
+3. **1.9 s of nothing**, so all of that lands and the room reads as empty.
+4. **The way down opens** into the quiet, and it is announced.
+
+An act's boss chamber *is* its floor's descent room — `floorplan.generate`
+points `plan.descent` at it — but it is marked BOSS rather than DESCENT, so
+the rule that opens a rift on arrival never fired in it and there was no way
+out of a beaten boss room at all. The rift belongs to the death rather than
+to the arrival anyway: it is what killing the thing was for, and it should
+open because you killed it.
+
+The boon is paid on the way down, not over the top of the death. It used to be
+offered on the exact frame of the collapse, so the payoff for the hardest
+thing in the run was a menu wiping the moment it happened. Standing in the
+rift is what buys it, and it **replaces** that floor's ordinary offering
+rather than coming on top of it — a boon is the larger thing, and two card
+screens back to back is one decision too many at the end of an act.
+
+> Worth recording, because it hid for a while: the rift branch used to run on
+> every frame the player stood in one, which was harmless while both arms of
+> it made the same call and quietly cost every boss its boon the moment they
+> stopped. It is taken once now.
 
 
 ### The bestiary
@@ -615,6 +788,53 @@ rooms' worth of edges at once, went well past it. Best of three after warm-up,
 it costs 0.091 ms a sweep at 96 and 0.092 ms at 256: the cap is a backstop
 against a pathological room, not a budget.
 
+### Baking a chamber
+
+A chamber is baked into four layers — floor, walls, and a normal map for
+each — at the display's own pixel density. That is what makes the stone sharp
+on a retina panel and it is also why the bake is the most expensive single
+thing in the game: the area scales with the square of the render scale, so a
+boss chamber that is 213 ms at the design size was **1.6 seconds** at 2.75x.
+
+None of it is drawn any differently now. What changed is that the arithmetic
+stopped being done a chamber at a time in float32:
+
+| | design size | 2.0x | 2.75x |
+| --- | --- | --- | --- |
+| boss chamber, before | 213 ms | 669 ms | 1598 ms |
+| boss chamber, after | 78 ms | 338 ms | **691 ms** |
+| held in memory, boss chamber | | | 317 MB → **198 MB** |
+
+Four things, in order of what they were worth:
+
+* **The wall's side faces are shaded on the strips they occupy**, not over
+  the whole layer. A face is `WALL_FACE` units deep along the bottom of an
+  exposed block — two or three percent of a chamber — and it used to take
+  four full-chamber float32 passes (a copy of the layer, a height field, the
+  shade, and the `np.where` that put it back) to change a fortieth of the
+  picture. The strips provably cannot overlap, which is what makes the
+  rewrite exact rather than merely close: a strip is at the bottom of a block
+  whose neighbour below is floor, so two of them in one column are at least
+  two tiles apart and a face is a third of a tile.
+* **Half-resolution normal maps** — see [Deferred lighting](#deferred-lighting).
+* **The floor's pre-divide and the wall's albedo are lookup tables.** Both are
+  affine maps on each channel independently, which is the one thing a 256-entry
+  table does exactly. The floor's was four full-chamber float32 temporaries,
+  better than half a gigabyte of memory traffic at native scale, for an
+  operation with 256 distinct answers in it. The tables are evaluated through
+  the same float32 arithmetic in the same order as the arrays they replace —
+  float64, or a multiply by the reciprocal instead of a divide, moves the odd
+  byte by one.
+* **Premultiplication asks the image, not an array of it.** Three of the four
+  layers are opaque and take the identity path, and `convert('RGBA')` on an
+  image that is already RGBA still copies it — 80 MB apiece at native scale,
+  allocated only to be measured and thrown away.
+
+Verified byte-for-byte: the floor and wall layers, and the floor's normal map
+upscaled back to full size, are identical to what they were over every chamber
+size and archetype. Across sixteen rendered scenes, no pixel differs by more
+than 32/255 and the mean difference is 0.13.
+
 ### Resolution and scaling
 
 > Much of what follows compares three renderers, because it was written while
@@ -649,12 +869,26 @@ filters the flag out. Without it SDL sizes the framebuffer in *points*, so a
 compositor then stretches over 3024x1964 physical pixels — every edge blurred
 across 1.7 pixels, which is what the game used to look like.
 
-`pygame.Window` does expose the flag, so `lumen/runtime.py` takes the window
-over: on the first frame the framework's window is destroyed and replaced with
-an equivalent high-DPI one, and cmu-graphics is pointed at the new buffer.
-That turns the same fullscreen window into a **3600x2338** framebuffer — the
-one a native Mac app draws into, and the one the compositor samples back down
-to the panel.
+`pygame.Window` does expose the flag, so `lumen/runtime.py` opens the window
+itself, once, with high-DPI always on. That turns the same fullscreen window
+into a **3600x2338** framebuffer — the one a native Mac app draws into, and
+the one the compositor samples back down to the panel.
+
+It used to be built twice: the framework's window was destroyed on the first
+frame and replaced, and the sharpness dial destroyed it again every time it
+crossed the point where the high-DPI flag had to change, because that flag can
+only be set when a window is created. Rebuilding a window loses the GL context
+with it, so every texture in the game had to be uploaded again, and the window
+itself blinked out and came back — sometimes somewhere else. There is one
+window for the life of the game now, and the dial is a smaller buffer drawn
+into it (see [The dial](#the-dial)).
+
+On Windows none of this applies and something worse does: a process that has
+not said otherwise is *DPI-unaware*, and Windows bitmap-stretches its whole
+window on any display scaled past 100% — a 1080p laptop at 150% would draw the
+game at two thirds of its pixels and blur it up. `SDL_WINDOWS_DPI_AWARENESS`
+is set to `permonitorv2` before SDL starts, which is also the mode that stays
+sharp when the window is dragged to a display with a different scale.
 
 ##### The band across the top
 
@@ -730,27 +964,43 @@ The evidence is unambiguous once you ask two sources instead of one:
 | `glGetIntegerv(GL_VIEWPORT)` | — | **3600x2338** |
 | `win.size` x backing scale | 2560x1440 | **3600x2338** |
 
-So the host now measures the drawable from the window and tells `glx` once,
-`glx` keeps that as `_screen` and sets `ctx.screen.viewport` from it rather
-than reading it back, and `backing_scale()` — which was quietly returning
-1.42 instead of 2.0 on this path, because it divides a stale drawable by a
-live window — comes out right as a side effect. Verified across five
-fullscreen toggles and all three sharpness rungs: 3600x2338 every time, no
-blank row or column on any edge.
+So the host measures the drawable and tells `glx` once, `glx` keeps that as
+`_screen` and sets `ctx.screen.viewport` from it rather than reading it back.
+Verified across five fullscreen toggles and every sharpness rung: 3600x2338
+every time, no blank row or column on any edge.
+
+##### Measuring it from the window was also wrong
+
+What replaced `ctx.screen` was the window's size in points times a backing
+scale probed once at startup with a hidden 100x100 window. That is right on
+one display and wrong the moment there are two. Drag the window from a Retina
+laptop onto an ordinary external monitor and the probe's 2.0 is applied to a
+panel whose backing scale is 1.0: the game draws a frame twice the size of the
+framebuffer it is drawing into, and a quarter of it is on screen.
+
+SDL knows the answer and pygame does not expose it, so `runtime` finds the SDL
+already loaded inside pygame — by asking the dynamic loader which images are
+mapped, rather than by guessing at a path that a packaged build moves anyway —
+and calls `SDL_GL_GetDrawableSize` on our own window. The same bridge answers
+which display the window is on, what that display's usable area is, and where
+its frame ends, which is what makes *centre the window on the display it is
+on* and *do not open a window taller than the screen* possible at all. If the
+lookup fails, every one of those falls back to the arithmetic above, which is
+right on the single-display machines that are most of them.
 
 The moral is the one this file keeps arriving at: **measure the window, not
-the abstraction over it.** `ctx.screen`, `_renderer.get_viewport()` and
-`app.width` are all caches of a number that SDL changes underneath them.
+the abstraction over it.** `ctx.screen`, a probed scale factor and `app.width`
+are all caches of a number that SDL changes underneath them.
 
 ##### And a small twin
 
-Below full sharpness the game draws into a
-smaller buffer and hands SDL a *logical size*, which preserves aspect ratio
-and letterboxes the remainder — and the two axes were each being truncated to
-an even number independently, so their aspect no longer quite matched the
-framebuffer's. That left a black line top and bottom: 0.4 px at BALANCED,
-2.3 px at FASTEST. Deriving the width from the height instead puts every rung
-under a quarter of a pixel.
+Below full sharpness the game used to hand SDL a *logical size*, which
+preserves aspect ratio and letterboxes the remainder — and the two axes were
+each truncated to an even number independently, so their aspect no longer
+quite matched the framebuffer's. That left a black line top and bottom: 0.4 px
+at BALANCED, 2.3 px at FASTEST. The frame is a texture the game presents
+itself now, into a rectangle it works out to the pixel, so there is no second
+opinion to disagree with.
 
 It matters twice over, because **the renderer does not antialias polygon
 edges** — text is antialiased, vector shapes get one blended pixel of constant
@@ -907,21 +1157,38 @@ trade:
 **AUTO** chooses for you — it measures real frame periods, splits them into the
 part that scales with pixels and the part that does not, and predicts which
 rung fits the display's refresh rate. It moves in one jump rather than
-stepping, because every change re-bakes every sprite at the new size (~200 ms),
-and it only applies a change where that cannot be felt: while the screen is
-black between floors, in a menu, or — if a floor is running badly enough to be
-worth one hitch — mid-play, downwards only.
+stepping, because every change re-bakes the sprites at the new size, and it
+only applies a change where that cannot be felt: while the screen is black
+between floors, in a menu, or — if a floor is running badly enough to be worth
+one hitch — mid-play, downwards only. The refresh rate it aims at is the one
+of the display the window is actually on, asked for after the window exists;
+it used to be asked before there was a window, which answers 60 on a 120 Hz
+panel every time.
 
-Below full scale the cmu-graphics path draws into a smaller buffer that an SDL
-renderer stretches, because the GPU scales for free where
-`transform.smoothscale` costs 4-5 ms; the GPU path uses SDL's logical size for
-the same thing. `SDL_RENDER_SCALE_QUALITY` must be set to `1` explicitly or
-the upscale is nearest-neighbour and blocky, and a logical size has to come
-*off* before `Renderer.to_surface()` or the read is a segfault rather than an
-error. A window can be in surface mode *or* owned by a renderer, never both —
-asking a surface-mode window for a renderer fails with *Surface already
-associated with window* — so changing between them means rebuilding the window,
-as does changing the high-DPI flag.
+Below full sharpness the game draws into an offscreen canvas of exactly that
+many pixels and presents it into the window as one textured quad
+(`glx.set_output`). At **NATIVE** there is no canvas at all and the frame goes
+straight into the window; the moment there is one, the same path also handles
+bars, which is what makes the two cost nothing extra together.
+
+Every rung is a fraction of the window's real pixels, and for a while one of
+them was not. **FAST** meant *one framebuffer pixel per point*, which is half
+of them on a Retina Mac — and **all of them** on a flat panel, where a point
+*is* a pixel. On exactly the machines least able to afford it, FAST was
+sharper than the three rungs above it and the dial went backwards. It is 0.5
+everywhere now, which is what it always was on the Mac it was tuned on.
+
+| DISPLAY | fullscreen render size, this Mac | of the window |
+| --- | --- | --- |
+| NATIVE | 3600 x 2338 | 100% |
+| HIGH | 3024 x 1964 | 84% |
+| BALANCED | 2592 x 1683 | 72% |
+| SMOOTH | 2232 x 1450 | 62% |
+| FAST | 1800 x 1169 | 50% |
+| FASTEST | 1440 x 935 | 40% |
+
+`tools/display_check.py` walks the whole dial and checks each rung draws at
+the size it claims, that they are all different, and that they descend.
 
 Two macOS notes. `pygame.display.list_modes()` advertises the panel's raw pixel
 modes, but requesting one fails with `CGDisplaySwitchToMode(): Unknown Error`
@@ -930,6 +1197,71 @@ desktop; and `set_video_mode` trusts the resulting surface rather than the
 call's return value, because pygame can raise and still have changed the mode.
 `FULLSCREEN | SCALED` was tried and is slower than rendering at full size —
 SDL's scaler is on the CPU there.
+
+#### A resize is not one event
+
+Dragging a window's edge delivers a resize per frame of the drag, a maximise
+animation delivers a dozen, and a fullscreen transition on macOS delivers
+several over half a second — and each one used to be taken at face value, with
+everything rebuilt at the new size before the next was read. So the game asks
+the window what it is once a frame instead of listening for events (SDL does
+not always send one anyway: a window dragged to a display with a different
+backing scale changes its drawable without changing its size), and a change is
+only drawn at once the window has held it for 120 ms.
+
+Until it settles, the last frame is shown fitted into the new window at its
+own aspect ratio — bars, never a stretch. That is the same canvas the
+sharpness dial uses, pointed at a rectangle that no longer matches it, and it
+means a window being dragged shows the game the size it was a moment ago
+rather than something torn, squashed, or drawn into a corner of a framebuffer
+it does not fit.
+
+What a resize costs, on this machine, at a size where the render scale
+changes:
+
+| | before | now |
+| --- | --- | --- |
+| on the title screen | 604–771 ms | **4–14 ms** |
+| in a chamber | 1046–1214 ms | **290–410 ms** |
+
+Most of what went was work that did not need doing: ten screen-sized overlays
+baked in numpy (see below), and nine lantern glows baked for a renderer that
+has not drawn a lantern from a sprite since it learned to evaluate the falloff
+per pixel. What is left in a chamber is the stone itself, which genuinely has
+to be re-rasterised, and it happens with the simulation stopped — a fixed
+timestep with a ceiling on catch-up means a 300 ms hitch advances the game by
+33 ms, so nothing hits you while the floor is being redrawn.
+
+#### Bars rather than a layout nobody drew
+
+The design view is 720 units tall and as wide as the window's aspect ratio
+makes it, which is what lets an ultrawide see more of the chamber rather than
+a stretched one. Past a point that stops being true: every screen was walked
+from a square to 32:9 and the offering's cards shrink to fit, but a window
+narrower than square runs the wordmark off the sides. So the frame is composed
+for aspect ratios between 1:1 and 32:9, and a window outside that range gets
+the largest rectangle inside it that is not, centred, with black either side
+of it. The pointer maps through the same rectangle, so a click in the bars is
+a click on nothing rather than a click somewhere else.
+
+#### Screen-sized overlays, evaluated per pixel
+
+The vignette, the film grain and the scanlines were numpy bakes the size of
+the window — ten of them at a resize, 5 MB of RGBA apiece at native scale, and
+**more than half of every resize**. Every one is a closed-form function of the
+pixel it lands on, so they are that function now: one shader, one quad, and
+nothing to rebuild when the window changes.
+
+They are not an approximation of what they replaced. The bake's arithmetic is
+carried over exactly — the same 8x8 Bayer dither added to alpha before it is
+cut to eight bits, the same premultiply with the same +127 — so what reaches
+the frame is the texel the sprite would have held. `tools/display_check.py`
+draws both over the same backgrounds and compares: the vignettes differ on
+0.001% of pixels by one level out of 255, from float rounding in a square
+root, and the scanlines not at all. The grain cannot match pixel for pixel,
+because its pattern came from numpy's generator and now comes from a hash of
+the pixel, so it is checked on its statistics instead — mean and spread agree
+to two decimal places.
 
 #### Sprites belong to a render scale
 
@@ -940,6 +1272,25 @@ an empty husk that raises on the next frame that draws it. That was a real
 crash: the title screen's logo was baked once in `__init__`, so changing
 resolution on the title screen killed the app. `tools/playtest.py` has
 `resize-title`, `resize-help` and `resize-play` scenarios to keep it fixed.
+
+The rooms you are not standing in have the same problem and it was silent.
+A floor builds its chambers ahead of the player on a worker, and those baked
+layers belong to the scale they were built at; a resize emptied the cache and
+released them, and only the room on screen was rebuilt. Walk through the next
+door and the chamber behind it had no floor and no walls — not black, not an
+error, simply absent, with the lantern lighting nothing at all. A chamber now
+records the cache generation it was rasterised in, `level.needs_bake` compares
+that against the cache's, and the builder treats a chamber from the wrong
+scale as one that is not built yet: the live ones are redone on the spot, the
+rest go back on the worker, and a door will not open into a room that is not
+ready. The same check catches a chamber whose sprites have been released by
+anything else, because it also asks whether they are still alive.
+
+And the worker itself can be halfway through a chamber when the scale changes
+under it. Whatever it finishes after that is the wrong size, so `art._store`
+compares the generation a job started in against the one it ends in and
+refuses to put the result in the cache — where it would otherwise be handed to
+every later lookup of that key.
 
 ### Deferred lighting
 
@@ -1024,6 +1375,17 @@ Anything standing on the ground writes a flat normal of its own into that
 buffer first, or every light in the room would rake a person with the courses
 of the stone underneath them, which is the floor's texture printed across a
 figure.
+
+A chamber's normal layers are **kept at half the resolution of the stone they
+describe**, and the quad names its own size when it draws them. They were
+always built at half — a normal feeds a smooth N·L and carries no high
+frequency worth keeping — and then stretched back out with a bilinear resize
+before being stored, which is the same filter the GPU applies for free when
+it samples the smaller texture across the same quad. The upscale was a fifth
+of a chamber's whole bake, the sprite it produced then had to be premultiplied
+at four times the size, and a chamber's two normal layers at native scale are
+160 MB of texture where 40 will do. Upscaled back for comparison, the floor's
+normal is byte-for-byte what it was.
 
 **Walls have a side.** A wall used to be a lid — a top face with a line drawn
 round it. The bottom of each footprint is now given over to the one side a
@@ -1308,6 +1670,81 @@ enemy dying off-screen is something you notice rather than something that
 startles you at full volume. Panning is constant-power, so crossing the centre
 does not dip.
 
+### The launch screen
+
+Synthesising the bank is 0.6 s of effects and 2.0 s of score the first time,
+and decoding it into mixer sounds is another 2 s on every launch after that.
+All of it used to happen before the window existed: **four seconds of nothing
+on screen, seven on the first run**, which is long enough for somebody to
+decide the game has not started and open it again.
+
+So it happens on a worker now (`SoundBank.prepare_async`), the window comes up
+in **0.48 s**, and what it comes up to is `lumen/launch.py` — the lantern
+being lit, which is the one thing this game could put on screen while it waits
+for anything:
+
+* **Dark.** A low drone, and stone you cannot see yet.
+* **The spark.** One ember falls out of the top of the frame, lighting the
+  floor as it passes, and catches. A match on stone, then the flame's first
+  breath.
+* **The dial.** Twenty sockets are carved round the flame — one per floor of
+  the descent, the three boss floors set larger. As the bank comes in, sparks
+  swirl out of the flame and light them one at a time, each with a chime,
+  climbing the pentatonic act by act; a boss floor tolls instead, and burns
+  cold, because cold is the vault's colour and warm is yours. The lantern's
+  reach grows with them. Clicking stokes the flame, which is worth doing.
+* **The flare.** Last socket lit and every sound ready: the dial spins up, the
+  flame goes white, and the flash it ends in is where the title screen is cut
+  in underneath — with the shockwave and the embers still going over the top
+  of it, and the score coming up as they fade.
+
+It draws through the game's own pipeline — stone into the scene buffer, the
+flame and the sockets into the light buffer, bloom and tone map over the lot —
+so it is the game's look rather than a picture of it. Its own sounds are
+synthesised on the main thread before the first frame, in **67 ms**, which is
+what lets the very first thing on screen already make a noise: a seamless
+four-second drone and a chord that fades up under it (every partial a whole
+number of cycles over the loop, the noise filtered in the frequency domain
+over exactly that length, so both wrap without a click), a match strike, one
+struck chime resampled to twenty pitches, a toll, and a gust for the clicking.
+
+The dial is honest. It never runs ahead of the real work and never finishes
+before it, but it also never fills in less than 2.6 s — a machine that loads
+everything in a second still gets to watch the thing it is looking at happen —
+and when a single long piece of work (the score is synthesised in four lumps)
+leaves it sitting still, it creeps forward by at most 5% so it does not read
+as a game that has hung. On a warm cache it lasts about five seconds end to
+end. Muted, it plays the same and says nothing.
+
+Two things that only matter because they are not visible: the frame rate is
+held to the display's refresh while it is up, because a launch screen drawing
+340 frames a second of a mostly dark picture takes the interpreter lock off
+the thread that is doing the actual work — it costs a second and a half of the
+wait — and the worker is asked to stop and joined before the mixer is torn
+down, so quitting during the first four seconds does not take SDL apart
+underneath a thread still handing it sounds.
+
+### Two typefaces that can travel
+
+The game is set in Copperplate and Menlo, which is to say in two faces that
+ship with macOS and with nothing else. Apple's licence does not let them go
+anywhere, so a build for Windows carries a pair that can: **Copperplate CC**,
+an open revival of the same Copperplate Gothic that Apple's is a cut of, and
+**DejaVu Sans Mono**, which is the family Menlo was derived from — at the same
+size it sets the same line to the same width, to the pixel. On a Mac the
+system faces are still the ones used, because they are the ones this was drawn
+in. `LUMEN_FONTS=bundled` forces the other path, which is how the Windows look
+is checked from here.
+
+A stand-in is never quite a swap. Copperplate CC's capitals are a much larger
+share of its point size and its line box is 39 units deeper at the wordmark's
+size, which put *DESCENT INTO THE VAULT* through the first row of the menu.
+Text is measured by its **ink** rather than by its line box now
+(`art.text_ink_top`, `art.text_ink_height`): the wordmark is set at whatever
+point size puts its capitals at the height the title was laid out to, and hung
+so those capitals start where they always started. The two titles land within
+a pixel of each other.
+
 ---
 
 ## Layout
@@ -1345,7 +1782,10 @@ lumen/
   hud.py             heads-up display, room map, floor map
   screens.py         title, help, draft, shop, pause, endings
   audio.py           numpy sound synthesis and the WAV cache
+  launch.py          the launch screen: the lantern lit, while the bank builds
+  fonts/             two open typefaces, for the platforms macOS's are not on
   save.py            persistent records
+  paths.py           where a packaged game keeps what it writes
   config.py          all tuning constants
 tools/
   playtest.py        drives the real game: scripted input, autopilot, shots
@@ -1358,6 +1798,13 @@ tools/
   stat_probe.py      proves every upgrade stat changes something observable
   economy_report.py  what a floor pays, which is what every price is set from
   sound_report.py    every effect in the bank, and whether anything plays it
+  display_check.py   resizes a real window every way a player can, and proves
+                     the frame follows it
+packaging/
+  build.py           the build, the signature, and the zip to send someone
+  build_windows.sh   the Windows .exe, built on a Mac under Wine
+  icon.py            the app icon, drawn rather than stored
+  lumen.spec         what PyInstaller puts in the bundle, and what it leaves
 ```
 
 ## Development
