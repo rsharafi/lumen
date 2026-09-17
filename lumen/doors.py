@@ -249,8 +249,34 @@ def collect_segments(level, doors):
 # --------------------------------------------------------------------------
 # Drawing
 # --------------------------------------------------------------------------
+#: The sill laid in the opening, and the joints where it meets the room. All
+#: of it is deliberately faint, and it is faint for a reason that only became
+#: true once this stopped being drawn in the dark: `STONE` is a mid blue-grey,
+#: several stops *lighter* than the chamber's floor, and the old opacities
+#: were set while it was being drawn where no light could reach it. Lit, the
+#: same numbers put bright slabs across every doorway. See `draw_frame`.
+SILL_TINT = 13
+SILL_JOINT = 30
+JAMB_OPACITY = 30
+
+
 def draw_frame(door, ox, oy):
-    """The jambs and threshold, which are there in every state.
+    """The stonework of the opening: the sill underfoot, and the jambs.
+
+    **This is ground, and it is drawn with the ground.** It used to be drawn
+    with the furniture, after `scene_coverage` had been switched on - which
+    holds the room's added light back so that a figure in the dark stays a
+    silhouette instead of a warm haze. Correct for a figure; wrong for a
+    floor. The threshold was a slab of near-black laid across the opening
+    that could take no light at all, so every open door in the vault had a
+    dark rectangle sitting in it however close the lantern came, and the lit
+    floor stopped dead at the doorway. A door you can walk through is not a
+    hole in the ground.
+
+    So what is left is what a threshold actually is: dressed stone, a shade
+    cooler than the floor it interrupts, with a joint at each mouth where the
+    sill is let into the room. All of it lights exactly as the floor does,
+    which is what makes a doorway continuous with the rooms either side of it.
 
     Drawn under everything else in the opening so a withdrawn leaf slides
     behind its own jamb rather than over it.
@@ -258,23 +284,28 @@ def draw_frame(door, ox, oy):
     x0, y0 = door.x0 - ox, door.y0 - oy
     x1, y1 = door.x1 - ox, door.y1 - oy
     j = 7.0
+    # The sill. A tint rather than a fill: the chamber's bake already put
+    # stone here, and the job is to dress it, not to cover it up.
+    drawPolygon(x0, y0, x1, y0, x1, y1, x0, y1,
+                fill=STONE, opacity=SILL_TINT)
     if door.axis == 'h':
         # Jambs stand either side of the opening, running with the wall.
         for jx in (x0, x1):
             drawPolygon(jx - j, y0 - 2, jx + j, y0 - 2,
                         jx + j, y1 + 2, jx - j, y1 + 2,
-                        fill=STONE, opacity=100)
-        # The threshold, so the floor of the opening reads as worked stone
-        # rather than as more of the room.
-        drawPolygon(x0, y0 + 3, x1, y0 + 3, x1, y1 - 3, x0, y1 - 3,
-                    fill=palette.WALL_DEEP, opacity=58)
+                        fill=STONE, opacity=JAMB_OPACITY)
+        # The joints, at the two mouths of the opening.
+        for jy in (y0, y1):
+            drawPolygon(x0, jy - 1.0, x1, jy - 1.0, x1, jy + 1.0, x0, jy + 1.0,
+                        fill=palette.WALL_DEEP, opacity=SILL_JOINT)
     else:
         for jy in (y0, y1):
             drawPolygon(x0 - 2, jy - j, x1 + 2, jy - j,
                         x1 + 2, jy + j, x0 - 2, jy + j,
-                        fill=STONE, opacity=100)
-        drawPolygon(x0 + 3, y0, x1 - 3, y0, x1 - 3, y1, x0 + 3, y1,
-                    fill=palette.WALL_DEEP, opacity=58)
+                        fill=STONE, opacity=JAMB_OPACITY)
+        for jx in (x0, x1):
+            drawPolygon(jx - 1.0, y0, jx + 1.0, y0, jx + 1.0, y1, jx - 1.0, y1,
+                        fill=palette.WALL_DEEP, opacity=SILL_JOINT)
 
 
 def draw_leaves(door, ox, oy, run_time, lit):

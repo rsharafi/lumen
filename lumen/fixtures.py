@@ -72,13 +72,55 @@ class Fixture:
     def near(self, x, y, radius=210.0):
         return (x - self.x) ** 2 + (y - self.y) ** 2 <= radius * radius
 
-    def draw_terms(self, ox, oy, px, py):
-        """Write what this thing is, and what it will cost, above it.
+    #: How far above the fixture the name sits, and how far below the name
+    #: the terms sit. Flipped as a pair when there is masonry overhead.
+    LABEL_RISE = 52.0
+    LABEL_GAP = 18.0
+    #: Half the width the two lines need clear of stone, in world units. The
+    #: names are short and the terms are one phrase, so this is generous
+    #: rather than measured - the point is to notice a wall, not to fit.
+    LABEL_HALF_W = 76.0
+
+    def label_offset(self, level):
+        """How far above the fixture its name should sit, in world units.
+
+        Negative is above, which is where it belongs: a name over the thing
+        it names reads as a caption, and the fixture's own light is under it.
+
+        A chamber does not always have room for that. A fixture stood against
+        the top wall - which happens whenever the middle of the room is
+        blocked and the placement falls back to a spawn point - puts its name
+        on the masonry, where a dark caption on dark stone is not a caption,
+        it is a smudge. So the name goes *under* the fixture instead when
+        there is no clear floor above it, which every chamber has somewhere,
+        because a fixture the player can walk to is a fixture with floor
+        around it.
+        """
+        rise = self.LABEL_RISE
+        if level is None:
+            return -rise
+        half = self.LABEL_HALF_W
+        top = self.y - rise - self.LABEL_GAP * 0.5
+        # Both lines, and the width they take, not a point: a name clears a
+        # pillar's left edge and still crosses it.
+        for x in (self.x - half, self.x, self.x + half):
+            if not level.is_open_at(x, top, 6.0):
+                return rise * 0.86
+        return -rise
+
+    def draw_terms(self, ox, oy, px, py, level=None, view=None):
+        """Write what this thing is, and what it will cost, beside it.
 
         Only a shrine has terms, and a shrine whose terms you read *after*
         touching it is not a bargain - it is a trap, and this game already
         asks the player to accept quite enough that they cannot see. Shown
         from across the room, and only while there is still a choice.
+
+        Drawn after the lighting rather than into it - see
+        `World._draw_fixture_terms`. A caption is something the game is
+        telling you, not a thing standing in the room, and the version that
+        went through the light buffer was multiplied down to nothing in
+        exactly the places it was needed most.
         """
         from .draw import drawLabel
         if self.taken or not self.near(px, py):
@@ -88,11 +130,29 @@ class Fixture:
         if fade <= 0.02:
             return
         sx, sy = self.x - ox, self.y - oy
-        drawLabel(self.label, sx, sy - 52, size=15, bold=True,
+        # The name leads and the terms sit under it, above or below - so the
+        # reading order is the same whichever way round the pair went.
+        rise = self.label_offset(level)
+        name_y = sy + rise
+        terms_y = name_y + self.LABEL_GAP
+        if view is not None:
+            # A fixture near the edge of the window - which a wide chamber
+            # puts there often enough - should not write off the screen.
+            margin = 22.0
+            lo, hi = margin, view[1] - margin
+            shift = 0.0
+            lowest = max(name_y, terms_y if self.terms else name_y)
+            if name_y < lo:
+                shift = lo - name_y
+            elif lowest > hi:
+                shift = hi - lowest
+            name_y += shift
+            terms_y += shift
+        drawLabel(self.label, sx, name_y, size=15, bold=True,
                   fill=palette.UI_TEXT, font=palette.FONT_DISPLAY,
                   opacity=int(92 * fade))
         if self.terms:
-            drawLabel(self.terms, sx, sy - 34, size=11,
+            drawLabel(self.terms, sx, terms_y, size=11,
                       fill=palette.UI_DIM, font=palette.FONT_UI,
                       opacity=int(84 * fade))
 

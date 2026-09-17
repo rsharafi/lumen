@@ -20,6 +20,7 @@ os.environ.setdefault('CI', '1')
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
+from lumen import art                               # noqa: E402
 from lumen import floorplan as fp                   # noqa: E402
 from lumen import rng as rng_mod                    # noqa: E402
 from lumen import upgrades                          # noqa: E402
@@ -84,10 +85,28 @@ def walk_through(world, side, steps=900):
         world.update(DT, keys, (world.player.x + 100, world.player.y), False)
         trail.append((world.player.x, world.player.y,
                       world.camera.x, world.camera.y, world.room.id))
-        if world.pending_door is not None:
-            world.begin_crossing(world.pending_door)
-            world.pending_door = None
+        _try_crossing(world)
     return trail
+
+
+def _try_crossing(world):
+    """Answer a flagged doorway the way the game does.
+
+    `begin_crossing` has three answers, not two. None means the chamber
+    behind that door has not been baked yet: the game leaves the flag set and
+    asks again on the next frame rather than building it on this one, because
+    at the display's own pixel density that is up to a second and a half with
+    everything stopped. A harness that clears the flag on a None throws the
+    crossing away.
+    """
+    side = world.pending_door
+    if side is None:
+        return None
+    started = world.begin_crossing(side)
+    if started is None:
+        return None
+    world.pending_door = None
+    return started
 
 
 def case_walks_not_teleports():
@@ -119,15 +138,22 @@ def case_walks_not_teleports():
         biggest_rebase = max(biggest_rebase, math.hypot(cx - dx, cy - dy))
         if step > worst:
             worst, at = step, i
-    # A dash is the fastest the player legitimately moves: 900 px/s at a
-    # 120 Hz step is 7.5 px in a frame. Twelve is generous and still an order
-    # of magnitude below a room-sized jump.
-    # What is being ruled out is a *cut* - a room-sized step in a single
-    # frame. The camera legitimately pans while the framing widens from one
-    # room to two, and that moves the world under a standing player on
-    # purpose; twenty pixels at 120 Hz is a brisk pan, and a cut is fifty
-    # times that.
-    check('nothing cuts on screen', worst < 20.0,
+    # A walking player covers 2.23 px in a frame at 120 Hz, and everything
+    # above that is the camera moving on its own.
+    #
+    # This used to allow twenty, on the reasoning that a cut is a room-sized
+    # jump and a pan is not a cut. That was true and it was not enough: the
+    # framing was animated from one room's rectangle to two and back, and
+    # while the frame is near the window's own size the camera is pinned to
+    # it rather than to the player - so the collapse at the far end of a
+    # crossing dragged the view at 15.8 px a frame, seven times a walk, and
+    # every door in the game ended in a shove. Twenty passed it happily.
+    #
+    # The framing is not animated any more; what is eased is the correction
+    # it implies, at a bounded speed. See `fx.Camera`. Measured over
+    # forty-eight crossings the worst single frame is 5.6, so this is a real
+    # bound on that and not a restatement of it.
+    check('nothing cuts on screen', worst < 7.0,
           f'largest on-screen step {worst:.2f} px at frame {at}')
     check('the world does move under the player', biggest_rebase > 100.0,
           f'largest rebase {biggest_rebase:.0f} px - the swap happened')
@@ -136,17 +162,20 @@ def case_walks_not_teleports():
 def case_both_rooms_are_solid():
     world = a_floor()
     side = next(iter(world.room.doors))
+    waited = 0
     for _ in range(400):
         cx, cy = world.level.door_center(side)
         world.update(DT, set(), (cx, cy), False)
         world.player.x += (cx - world.player.x) * 0.25
         world.player.y += (cy - world.player.y) * 0.25
         if world.pending_door is not None:
-            world.begin_crossing(world.pending_door)
-            world.pending_door = None
+            if _try_crossing(world) is None:
+                waited += 1
+                continue
             break
     check('a crossing starts', world.crossing is not None,
-          f'crossing={world.crossing is not None}')
+          f'crossing={world.crossing is not None}'
+          + (f', after {waited} frames waiting on the chamber' if waited else ''))
     if world.crossing is None:
         return
     solids = world.solids()
@@ -188,9 +217,74 @@ def case_can_turn_back():
           f'{first} -> {second} -> {world.room.id}')
 
 
+def case_no_frame_builds_a_chamber():
+    """Walking through a door must not bake anything on the frame it happens.
+
+    This is the one that used to stop the game dead. Generating and baking a
+    chamber is 80-200 ms at the design size and between half a second and a
+    second and a half at a retina display's own pixel density, and it was
+    being done inline, on the frame the player stepped into a doorway. The
+    builder's worker is the only thing allowed to do it now; the doorway
+    waits for the worker instead of doing its job for it.
+
+    Measured against the builder's own count of how often it was made to
+    build something in a hurry, which is exactly the number this exists to
+    hold at zero - plus the wall clock, because a frame is a frame however
+    the work got onto it.
+    """
+    import time
+    art.set_scale(2.0)                     # a retina window, where it hurt
+    try:
+        world = a_floor(seed=31, depth=7)
+        # One built inline, on purpose: the floor's entrance, behind the
+        # fade, before the player is anywhere.
+        base = world.builder.waits
+        worst = 0.0
+        for side in list(world.room.doors):
+            if side not in world.level.doors:
+                continue
+            world.player.x, world.player.y = world.level.door_entry(side, 2.4)
+            world.player.vx = world.player.vy = 0.0
+            world.door_lock = 0.0
+            if world.warded:
+                world.enemies = []
+                world.break_wards()
+            heading = {'n': (0.0, -1.0), 's': (0.0, 1.0),
+                       'w': (-1.0, 0.0), 'e': (1.0, 0.0)}[side]
+            for _ in range(1500):
+                goal = (world.player.x + heading[0] * 400.0,
+                        world.player.y + heading[1] * 400.0)
+                keys = set()
+                if goal[0] - world.player.x > 6:
+                    keys.add('d')
+                elif goal[0] - world.player.x < -6:
+                    keys.add('a')
+                if goal[1] - world.player.y > 6:
+                    keys.add('s')
+                elif goal[1] - world.player.y < -6:
+                    keys.add('w')
+                t0 = time.perf_counter()
+                world.update(DT, keys, (world.player.x + 100,
+                                        world.player.y), False)
+                worst = max(worst, (time.perf_counter() - t0) * 1000.0)
+                _try_crossing(world)
+                if world.crossing is None and world.room.id != world.plan.entrance:
+                    break
+            break
+        check('a doorway never bakes on the frame', world.builder.waits == base,
+              f'{world.builder.waits - base} chamber(s) built inline')
+        # Generous, because this is a bound on a class of stall and not a
+        # frame-time budget: the freeze it rules out was 340 ms at the design
+        # size and over three seconds at a retina one.
+        check('no frame stops the game', worst < 60.0,
+              f'slowest single update {worst:.1f} ms')
+    finally:
+        art.set_scale(1.0)
+
+
 def main():
     for case in (case_walks_not_teleports, case_both_rooms_are_solid,
-                 case_can_turn_back):
+                 case_can_turn_back, case_no_frame_builds_a_chamber):
         try:
             case()
         except Exception as exc:                     # noqa: BLE001

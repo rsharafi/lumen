@@ -16,6 +16,59 @@ from .mathx import clamp, ease_out_cubic
 
 
 class Camera:
+    """Where the view is, and what it is allowed to see.
+
+    ## The framing, and why it is not animated
+
+    A chamber narrower than the window is centred in it, and a chamber wider
+    than the window lets the camera roam inside its edges. A crossing frames
+    both chambers at once, so the camera can follow the player out of one and
+    into the next without either room's edge catching it.
+
+    Switching between those framings moves the view even when the player is
+    standing still, and the whole distance has to be covered somehow. The
+    obvious answer - animate the frame itself, from one room's rectangle to
+    two and back - is the wrong one, and it was wrong in a way that only
+    shows up in the case that matters. While the frame is close to the
+    window's own size the clamp has almost no slack in it, so the camera is
+    not following the player at all: it is *pinned to the frame*, and it
+    travels at whatever speed the frame is travelling. Coming out of a
+    crossing that meant a room's width in a little over half a second -
+    measured, 15.8 design units in a single frame at 120 Hz, against the 2.2
+    a walking player covers - which is the shove you feel at the end of every
+    door.
+
+    So the frame is not animated. It changes the instant it is asked to, and
+    what is eased instead is the **correction it implies**: the difference
+    between where the camera was and where the new framing would put it is
+    taken on as a debt, so nothing moves on the frame the framing changes,
+    and the debt is then paid off over a window long enough that it is never
+    paid faster than `PAN_PEAK`. The camera keeps following the player
+    against the real frame the entire time, with the outstanding correction
+    riding on top - so it can settle gently *and* never lose the player,
+    which the animated frame could not do at once.
+    """
+
+    #: How fast the framing may pull the view about on its own, in design
+    #: units a second, at the quickest point of the move. A walk is 268, and
+    #: a correction that travels at about the speed the world already moves
+    #: when you walk is one the eye reads as the room settling.
+    PAN_PEAK = 330.0
+    #: The window a correction is paid off over, whatever its size. The floor
+    #: keeps a tiny nudge from being a slow crawl; the ceiling keeps a
+    #: room-sized one from drifting for half the next fight.
+    #:
+    #: A crossing between two chambers narrower than the window owes about
+    #: eight hundred units - a whole room, because the view has to travel
+    #: from one centred room to the next - and that is more than `PAN_PEAK`
+    #: will carry inside the ceiling. Measured over forty-eight crossings,
+    #: the worst single frame at 120 Hz: 21.7 units with the frame animated,
+    #: 6.3 at a 1.9 s ceiling, 5.6 at 2.6, 5.3 at 3.2. Past about two and a
+    #: half seconds it is buying very little and the view is still settling
+    #: while the next fight starts.
+    PAY_MIN = 0.30
+    PAY_MAX = 2.6
+
     def __init__(self, view_w, view_h):
         self.x = 0.0
         self.y = 0.0
@@ -31,99 +84,146 @@ class Camera:
         # or to the left of the one they are leaving - see `World.crossing`.
         self.bounds_x = 0.0
         self.bounds_y = 0.0
-        self._want = (view_w, view_h, 0.0, 0.0)
-        self._from = self._want
-        self._ease_t = 1.0
+        # Where the camera wants to be before the framing has its say. Kept
+        # separately so a framing that opens up knows where the player was
+        # standing rather than where the old frame had pinned the view.
+        self._raw_x = 0.0
+        self._raw_y = 0.0
+        # And where it would rather be with no lag at all - the player's own
+        # position, this frame. See `set_bounds`.
+        self._goal_x = 0.0
+        self._goal_y = 0.0
+        # The framing correction still owed, what it was when it was taken
+        # on, and how far through paying it we are.
+        self._off_x = 0.0
+        self._off_y = 0.0
+        self._owed_x = 0.0
+        self._owed_y = 0.0
+        self._pay_t = 1.0
+        self._pay_dur = self.PAY_MIN
         self._t = 0.0
 
     def snap_to(self, x, y):
-        self.x = x - self.view_w * 0.5
-        self.y = y - self.view_h * 0.5
-        self._clamp()
+        self._raw_x = self._goal_x = x - self.view_w * 0.5
+        self._raw_y = self._goal_y = y - self.view_h * 0.5
+        self._off_x = self._off_y = 0.0
+        self._owed_x = self._owed_y = 0.0
+        self._pay_t = 1.0
+        self.x, self.y = self._framed(self._raw_x, self._raw_y)
+
+    def _framed(self, x, y):
+        """Where the framing puts a camera that would rather be at (x, y)."""
+        lo_x, lo_y = self.bounds_x, self.bounds_y
+        fx = clamp(x, lo_x, lo_x + max(0.0, self.bounds_w - self.view_w))
+        fy = clamp(y, lo_y, lo_y + max(0.0, self.bounds_h - self.view_h))
+        # Centre the chamber when it is smaller than the window.
+        if self.bounds_w < self.view_w:
+            fx = lo_x + (self.bounds_w - self.view_w) * 0.5
+        if self.bounds_h < self.view_h:
+            fy = lo_y + (self.bounds_h - self.view_h) * 0.5
+        return fx, fy
 
     def set_bounds(self, w, h, x=0.0, y=0.0, ease=False):
         """Frame this region.
 
-        `ease` slides the framing there over the next fraction of a second
-        instead of snapping to it. That matters when a crossing widens the
-        frame from one room to two: a chamber narrower than the window is
-        centred in it, and switching that on in a single frame moved the view
-        by ninety pixels with the player standing still - the one visible
-        seam left in an otherwise continuous walk.
+        `ease` takes the move on as a correction to be paid off gradually
+        rather than letting it land on the next frame - see the class note.
+        Without it the framing simply takes effect, which is what arriving in
+        a room wants: there is nothing on screen yet to be continuous with.
         """
-        if not ease:
-            self._want = self._from = (w, h, x, y)
-            self._ease_t = 1.0
-            self.bounds_w, self.bounds_h = w, h
-            self.bounds_x, self.bounds_y = x, y
+        if (w, h, x, y) == (self.bounds_w, self.bounds_h,
+                            self.bounds_x, self.bounds_y):
             return
-        if self._want == (w, h, x, y):
+        before = self._framed(self._raw_x, self._raw_y) if ease else None
+        self.bounds_w, self.bounds_h = w, h
+        self.bounds_x, self.bounds_y = x, y
+        if before is None:
+            self._off_x = self._off_y = 0.0
+            self._owed_x = self._owed_y = 0.0
+            self._pay_t = 1.0
+            self.x, self.y = self._framed(self._raw_x, self._raw_y)
             return
-        self._from = (self.bounds_w, self.bounds_h,
-                      self.bounds_x, self.bounds_y)
-        self._want = (w, h, x, y)
-        self._ease_t = 0.0
+        # Let the follow out of whatever the old frame was holding it back
+        # from, here, where it becomes part of the debt - rather than on the
+        # next frame, where it becomes a lurch. Walking at a door in a room
+        # taller than the window pins the follow against that room's edge for
+        # as long as it takes to get there; the frame then opens onto two
+        # rooms and releases it, and the exponential catch-up that follows is
+        # fastest on its very first frame. Measured, 15.9 units at 120 Hz -
+        # the same shove as the collapse at the far end, from the other
+        # direction.
+        self._raw_x, self._raw_y = self._goal_x, self._goal_y
+        after = self._framed(self._raw_x, self._raw_y)
+        # Whatever was still owed rolls into the new debt, so two framing
+        # changes in quick succession - which is exactly what a crossing is -
+        # settle once instead of fighting each other.
+        self._owe(self._off_x + before[0] - after[0],
+                  self._off_y + before[1] - after[1])
 
-    #: How long the framing takes to slide from one room to two, in seconds.
-    FRAME_EASE = 0.62
+    def _owe(self, dx, dy):
+        """Carry `dx, dy` of correction, over a window that bounds its speed."""
+        self._off_x, self._off_y = dx, dy
+        self._owed_x, self._owed_y = dx, dy
+        # Smoothstep is quickest in the middle, at 1.5x its own average, so
+        # this is the shortest window in which the pan still tops out at
+        # PAN_PEAK.
+        self._pay_dur = clamp(1.5 * math.hypot(dx, dy) / self.PAN_PEAK,
+                              self.PAY_MIN, self.PAY_MAX)
+        self._pay_t = 0.0
 
-    def _ease_bounds(self, dt):
-        """Slide the framing toward what was last asked for.
+    def _pay(self, dt):
+        """Work the outstanding correction down toward nothing.
 
-        Smoothstepped over a fixed duration rather than lerped toward the
-        target, because an exponential ease is fastest on its first frame -
-        measured, 22 px of pan in one frame at 120 Hz and decaying from
-        there, which reads as a shove followed by a drift. A pan should start
-        and finish gently and be quickest in the middle, which is what this
-        is.
+        Smoothstepped rather than lerped, because an exponential is fastest
+        on its first frame - measured, 22 units of pan in one frame at 120 Hz
+        and decaying from there, which reads as a shove followed by a drift.
+        A pan should start and finish gently and be quickest in between.
         """
-        if self._ease_t >= 1.0:
+        if self._pay_t >= 1.0:
             return
-        self._ease_t = min(1.0, self._ease_t + dt / self.FRAME_EASE)
-        t = self._ease_t
-        k = t * t * (3.0 - 2.0 * t)
-        fw, fh, fx, fy = self._from
-        w, h, x, y = self._want
-        self.bounds_w = fw + (w - fw) * k
-        self.bounds_h = fh + (h - fh) * k
-        self.bounds_x = fx + (x - fx) * k
-        self.bounds_y = fy + (y - fy) * k
+        self._pay_t = min(1.0, self._pay_t + dt / self._pay_dur)
+        t = self._pay_t
+        k = 1.0 - t * t * (3.0 - 2.0 * t)
+        self._off_x = self._owed_x * k
+        self._off_y = self._owed_y * k
 
     def shift(self, dx, dy):
         """Move the camera and its frame by the same amount.
 
         Used when a crossing rebases the world under the player: the numbers
         all change and nothing moves on screen, which is the entire trick.
+        The outstanding correction is a difference, so it survives untouched.
         """
         self.x += dx
         self.y += dy
+        self._raw_x += dx
+        self._raw_y += dy
         self.bounds_x += dx
         self.bounds_y += dy
-        w, h, bx, by = self._want
-        self._want = (w, h, bx + dx, by + dy)
-        fw, fh, fx, fy = self._from
-        self._from = (fw, fh, fx + dx, fy + dy)
-
-    def _clamp(self):
-        lo_x, lo_y = self.bounds_x, self.bounds_y
-        max_x = lo_x + max(0.0, self.bounds_w - self.view_w)
-        max_y = lo_y + max(0.0, self.bounds_h - self.view_h)
-        self.x = clamp(self.x, lo_x, max_x)
-        self.y = clamp(self.y, lo_y, max_y)
-        # Centre the chamber when it is smaller than the window.
-        if self.bounds_w < self.view_w:
-            self.x = lo_x + (self.bounds_w - self.view_w) * 0.5
-        if self.bounds_h < self.view_h:
-            self.y = lo_y + (self.bounds_h - self.view_h) * 0.5
 
     def follow(self, tx, ty, aim_x, aim_y, dt):
-        self._ease_bounds(dt)
-        goal_x = tx + aim_x * CAMERA_LOOKAHEAD - self.view_w * 0.5
-        goal_y = ty + aim_y * CAMERA_LOOKAHEAD - self.view_h * 0.5
+        goal_x = self._goal_x = tx + aim_x * CAMERA_LOOKAHEAD - self.view_w * 0.5
+        goal_y = self._goal_y = ty + aim_y * CAMERA_LOOKAHEAD - self.view_h * 0.5
         k = 1.0 - math.exp(-(CAMERA_LERP * 60.0) * dt)
-        self.x += (goal_x - self.x) * k
-        self.y += (goal_y - self.y) * k
-        self._clamp()
+        self._raw_x += (goal_x - self._raw_x) * k
+        self._raw_y += (goal_y - self._raw_y) * k
+        # Held inside the frame on any axis the frame can actually constrain,
+        # so the camera answers the instant the player turns round against a
+        # wall rather than first walking an invisible position back inside
+        # the room. On an axis where the chamber is narrower than the window
+        # there is no inside to be held in - the view is centred there - and
+        # this is only remembered so that a frame which opens up knows where
+        # the player had got to.
+        if self.bounds_w >= self.view_w:
+            self._raw_x = clamp(self._raw_x, self.bounds_x,
+                                self.bounds_x + self.bounds_w - self.view_w)
+        if self.bounds_h >= self.view_h:
+            self._raw_y = clamp(self._raw_y, self.bounds_y,
+                                self.bounds_y + self.bounds_h - self.view_h)
+        self._pay(dt)
+        fx, fy = self._framed(self._raw_x, self._raw_y)
+        self.x = fx + self._off_x
+        self.y = fy + self._off_y
 
         self._t += dt
         if self.shake > 0.01:
